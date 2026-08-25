@@ -325,6 +325,17 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
             ),
         );
 
+    // The BPF object needs a clang that can see the host's kernel headers.
+    // With the NDK toolchain on PATH (typical in CI), bare `clang` resolves to
+    // the NDK compiler, which has no host sysroot and fails on <linux/bpf.h> —
+    // so pin CLANG for the build script to a non-NDK clang explicitly.
+    if std::env::var_os("CLANG").is_none() {
+        let clang = find_system_clang().ok_or(
+            "no clang outside the NDK toolchain found on PATH; install clang or set CLANG",
+        )?;
+        cmd.env("CLANG", clang);
+    }
+
     const LINKER: &str = "aarch64-linux-android31-clang";
     if find_in_path(LINKER).is_none() {
         let ndk_bin = ndk_bin_dir().ok_or_else(|| {
@@ -359,6 +370,26 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
         aligns.len()
     );
     Ok(fluxd)
+}
+
+/// The first `clang` on PATH that is not part of an NDK toolchain. NDK bin
+/// directories are recognised by the Android-target driver they contain.
+fn find_system_clang() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let ndk_home = std::env::var_os("ANDROID_NDK_HOME").map(PathBuf::from);
+    for dir in std::env::split_paths(&path) {
+        if ndk_home.as_ref().is_some_and(|ndk| dir.starts_with(ndk))
+            || dir.join("aarch64-linux-android31-clang").is_file()
+        {
+            continue;
+        }
+        for candidate in [dir.join("clang"), dir.join("clang.exe")] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn find_in_path(name: &str) -> Option<PathBuf> {
