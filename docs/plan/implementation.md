@@ -93,7 +93,10 @@
 2. §15.2 的八个逻辑测试全部存在且通过。
 3. `cargo xtask abi-check` **真正实现并通过**：用 clang 算出 `flux_abi.h` 各结构的偏移，与 `abi.rs` 的镜像逐字段比对。CI 里那行 `continue-on-error: true` 在本阶段结束时**必须删掉**。
 4. `cargo xtask package` 连续两次 clean build 产出的 hash 一致（可复现构建）。
-5. `xtask` 校验 `engine.lock` 的两个 sha256 与 size；任一不匹配就拒绝打包。
+5. `xtask` 校验 `engine.lock` 的两个 sha256 与 size；任一不匹配就拒绝打包。**这条已经手工验证过一次**：2026-08-26 下载 v1.13.19 的 asset，archive 与 binary 两个 digest 与 `engine.lock` 逐字相符（§16.10）。`xtask` 要做的是把它自动化。
+6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖四项机械检查：`docs/README.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`evidence/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
+
+   **这四项都是真实抓到过缺陷的检查**，不是假想的整洁度指标：章节映射曾指向已移出的文件；推翻计数曾同时存在 5 / 7 / 8 三个互相矛盾的说法；§18 曾把一个已执行完的迁移计划写成待办，还错称归档目录被 `.gitignore` 排除。用 Rust 写在 `xtask` 里，不要写成 PowerShell 脚本——跨平台、CI 天然能跑、且不需要绕执行策略。
 
 **本阶段答的 Phase 0 问题**：无（纯逻辑，无内核交互）。
 
