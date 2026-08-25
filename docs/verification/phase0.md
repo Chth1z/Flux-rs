@@ -50,6 +50,8 @@ v4/v6、connected 与 unconnected UDP 经 assign 后，sing-box 收到的 `IP_RE
 
 下调依据：`clone/AndroidTProxyShell/tproxy.sh` 创建的链全部挂在 `mangle PREROUTING` / `mangle OUTPUT`，**从不碰 `filter INPUT`**（`tproxy.sh:968`），而它的本机路径确实要经过 INPUT（OUTPUT 打 mark → 策略路由送 `lo` → 重新入栈 → PREROUTING TPROXY → INPUT）。既然它无需在 INPUT 开口就能工作，**AOSP 默认的 `filter INPUT` 不会丢弃这类本地交付流量**。残余风险是接口差异：它的包 `iif = lo`，我们的包 `iif = flxrs1`，Android 可能存在 `-i lo` 的快捷放行。
 
+> **2026-08-25 实测：这条残余风险已消除**（§16.9.1）。`filter INPUT` 的七条 target 全部是 `in *`，没有任何接口维度的分支，且七条的计数与 policy 计数逐字相同——所有输入包都完整走完全部链。`iif = lo` 与 `iif = flxrs1` 在 INPUT 里走的是**同一条路径**，不存在藏在 `-i lo` 后面的差异。下面第 1–3 条的实测清单**仍然要做**，因为它们答的是另一个问题："OEM 是否整体丢弃"，那要靠数据面在位后比对计数增长。
+
 抬高依据：`clone/box4magisk/box/scripts/box.service:72-79` 有一个专门的 `oneplus_a16_fix()`，内容是 **flush OEM 的 `fw_INPUT` / `fw_OUTPUT` / `fw_OUTPUT_oplus_dns` 链**，注释写"OnePlus Android 16 filter rules cleaned for TProxy fix"。**这说明至少一个 OEM 的 `filter` 链确实会干掉 TPROXY 流量。**
 
 因此本项的实测清单是：
@@ -499,3 +501,86 @@ libbpf: map 'control_root.inner': can't determine value size for type [95]: -22
 注意边界：bpftool 是**按 BTF 声明**建 map 的，而产品由 `maps.rs` 显式建（§12.2）。所以这次过关证明的是**程序逻辑可验证**，不是 map 参数正确。后者由 `fluxd check` 负责。
 
 **这条应当进 CI**：`bpftool prog loadall` 是最便宜的验证器门。代价是 CI runner 的内核与 arm64 5.15 有差异，所以它是补充而非替代真机验证。
+---
+
+## 16.9 Q6 观测半场 + veth 生命周期（2026-08-25，SM-S9180 / 5.15.211）
+
+工具：`tools/phase0/q6-veth-observe.sh`。前三节纯观测；第四节创建一个**无地址、无路由**的 veth 对并在退出时删除，是 §8.4 / §8.7 能在没有数据面时验的那一半。
+
+### 16.9.1 `filter INPUT` 没有 `-i lo` 快捷放行——一条残余风险被测掉了
+
+§16.1 Q6 原先记着一条残余风险：AndroidTProxyShell 不在 `filter INPUT` 开口也能工作，但**它的包 `iif = lo`，我们的包 `iif = flxrs1`**，所以"Android 可能有 `-i lo` 的快捷放行"这条可能性无法排除。
+
+实测结果（v4/v6 完全一致）：
+
+```
+Chain INPUT (policy ACCEPT 796K packets, 1455M bytes)
+ pkts bytes target              prot opt in  out  source     destination
+ 796K 1455M oem_in              all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M bw_INPUT            all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M fw_INPUT            all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M bw_VIDEOCALL_IN     all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M bw_VIDEOCALL_OUT    all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M bw_videocall_box    all  --  *   *    0.0.0.0/0  0.0.0.0/0
+ 796K 1455M firewall_f          all  --  *   *    0.0.0.0/0  0.0.0.0/0
+```
+
+**每一条的 `in` 都是 `*`。** 没有任何接口维度的分支，policy 是 `ACCEPT`，并且七条 target 的计数与 policy 计数完全相同（796K/1455M），说明**所有输入包都完整走完这七条链**。
+
+结论：`iif = lo` 与 `iif = flxrs1` 在 `filter INPUT` 里走**完全相同**的路径。既然 AndroidTProxyShell 的本地交付流量能活着穿过这些链，我们的也能。**这条残余风险在本设备上消除。**
+
+（仍是单机结论。OEM 可以在 `oem_in` / `fw_INPUT` 里放任何东西——box4magisk 的 `oneplus_a16_fix()` 就是证据。但"接口维度的隐藏差异"这一层已经排除，剩下的是"OEM 是否整体丢弃"，那一层要等数据面到位后用计数增长比对来答。）
+
+### 16.9.2 厂商 filter 的占位是**按接口**的，不是设备级的
+
+§8.5.3 记的是"三星在 `wlan0` egress 占据 `chain 0 / pref 1 / handle 0x1`"。这次在**同一台设备**上，Wi-Fi 断开、蜂窝为主网时：
+
+| 接口 | 类型 | egress filter | ingress filter |
+|---|---|---|---|
+| `rmnet_data0` | 519 (RAWIP) | **空** | **空** |
+| `rmnet_data1` | 519 (RAWIP) | **空** | **空** |
+| `rmnet_data8` | 519 (RAWIP) | **空** | **空** |
+
+三个 rmnet 接口都有 `clsact`，但**两侧一个 filter 都没有**。
+
+所以"厂商占 pref 1"是 **`wlan0` 专属现象**，不是这台设备的普遍行为。这对 §8.5.3 的动态 pref 选择是个直接的强化理由：**不能按设备记忆一个 pref，必须按接口逐个探测**。同一台设备上蜂窝能拿到 pref 1、Wi-Fi 拿不到。
+
+### 16.9.3 §8.4 的 sysctl 起点
+
+| sysctl | 实测值 | 设计要求 |
+|---|---:|---|
+| `net.ipv4.conf.all.rp_filter` | **0** | 必须为 0 —— **开箱即满足** |
+| `net.ipv4.conf.default.rp_filter` | 0 | 影响新建接口的初值 |
+| `net.ipv4.ip_forward` | **0** | 设计预测不需要它；起点就是 0，正好能验证这个预测 |
+| `net.ipv4.conf.all.arp_filter` | 0 | 设计预测不需要 |
+| `net.ipv4.conf.all.accept_local` | 0 | 只需在 peer 上按接口设 1，不动全局 |
+
+`default.rp_filter = 0` 有额外含义：**新建的 `flxrs1` 继承到的初值就是 0**，我们写 `flxrs1.rp_filter=0` 是幂等确认而非真正的改动。这符合 §1.3 "不改全局设置"的非目标。
+
+### 16.9.4 veth 生命周期：干净
+
+| 步骤 | 结果 |
+|---|---|
+| `ip link add flxrs0 type veth peer name flxrs1` | 成功（ifindex 48/49） |
+| 写 `flxrs1.rp_filter = 0` | 成功 |
+| 写 `flxrs1.accept_local = 1` | 成功 |
+| `tc qdisc add dev flxrs1 clsact` | 成功，`qdisc clsact ffff: parent ffff:fff1` |
+| 两端 `up` | 两端 `operstate=up` |
+| `ip link del flxrs0` | 两端**同时消失**（删一端即删对） |
+| 残留检查 | 两个接口都 gone；`ip rule` / `ip route show table all` / `ip -6 rule` 中匹配 `flxrs` 的行数 = **0** |
+
+**netd 确实注意到了新接口**：
+
+```
+NetdWrapper: NetdWrapper interface add, iface= flxrs1
+NetdWrapper: NetdWrapper interface add, iface= flxrs0
+```
+
+但它**只记了日志**：没有给 `flxrs*` 创建自己的 `clsact`（我们 add 之前是 `noop`）、没有加地址、没有加路由、没有把它并入任何 network。这正是 §8.7 需要的性质——我们的 veth 上的对象是**我们独占**的，不像物理接口那样要和 netd 争 `clsact`（§8.5.1）。
+
+**未覆盖**：本项只验了"创建-配置-删除"闭环与零残留。包能否真的穿过这条 veth 并被本地栈接受（§8.4 的 martian-source / `accept_local` 矩阵、Q5 的全部条目）需要数据面在位，无法在此提前。
+
+### 16.9.5 顺带记下的两件事
+
+- **存在一条 `block_all_dns` 链**（v4/v6 各一，当前 `0 references`）。它现在没被引用，但名字说明系统保留了整体阻断 DNS 的能力。若某天被引用，会与 §1.3 的 DNS 捕获直接冲突。列为已知观察，不是当前问题。
+- rmnet 接口的 `operstate` 是 `unknown` 而非 `up`。RAWIP 接口不上报载波状态，所以**接口选择逻辑不能用 `operstate == "up"` 做判据**，否则会漏掉全部蜂窝接口。这是一个很容易写错的地方。

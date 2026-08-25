@@ -22,7 +22,7 @@
 | 能推翻主路线的技术未知项 | **无** |
 | 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
 
-设计期共推翻自己**七次**，全部在 `evidence/review-log.md` §0.5 留有「原说法 / 实际 / 处置」对照。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
+设计期共推翻自己**十次**——七次在实测前（`evidence/review-log.md` §0.5），三次在 2026-08-25 的 Phase 0 实测中（同文件 §0.6，其中两条推翻的是我自己写下的结论）。全部留有「原说法 / 实际 / 处置」对照。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
 
 ## 术语强度
 
@@ -469,6 +469,10 @@ static int __bpf_redirect(struct sk_buff *skb, struct net_device *dev, u32 flags
 修复手段是内核**明文认可**的：`__bpf_skb_change_head()` 的注释原文就是"*Intention for this helper is to be used by an L3 skb that needs to push mac header for redirection into L2 device*"（`net/core/filter.c:3729-3758`）。它内部调 `skb_reset_mac_header()`，正好让 `mac_header < network_header` 重新成立；且它对 GSO skb 豁免长度上限，因此 GSO 安全。
 
 顺带一提，AOSP 与 honk 都把这件事做成两个 object / 两个 attach 分支（AOSP 的 `..._ether` 与 `..._rawip`，`clatd.c:248-270`；honk `attach.rs:657-690`），与本设计的 `flx_cap_l2` / `flx_cap_l3` 分法一致。
+
+> **接口筛选不得用 `operstate` 做判据。** 实测（§16.9.5）：`rmnet_data0` 承载着默认路由、有 v4 与 v6 全局地址、流量正在跑，而 `/sys/class/net/rmnet_data0/operstate` 读出来是 **`unknown`**，不是 `up`。RAWIP 接口不上报载波状态。所以任何形如 `operstate == "up"` 或 `IF_OPER_UP` 的过滤会**漏掉全部蜂窝接口**——恰好是 `flx_cap_l3` 唯一的适用对象。判据用 `IFF_UP` 标志（来自 `RTM_NEWLINK` 的 `ifi_flags`）加"存在 scope global 地址"，不要用 `operstate`。
+>
+> 同一段实测还给出另一个不该用的判据：**"有地址"不等于"netd 认为它在网络里"**。观测时 `wlan0` 带着 `192.168.x.x` 却**没有 `clsact`**，因为 Wi-Fi 刚被断开而地址还没回收。`clsact` 的有无才是 netd 视角的真相（§8.5.1），这也正是我们复用它而不是自己创建的理由。
 
 ## 3.4 CLAT464
 
@@ -1097,6 +1101,12 @@ filter protocol all pref 1 bpf chain 0 handle 0x1 \
 - 因此**即使 pref 1 当时是空的，也不应该占它**。选 pref 的策略是"满足排序约束的前提下，避开厂商惯用的 pref 1"，并靠 §10.4 的 `RTM_NEWTFILTER` 事件持续监视自己那一条是否还在、以及是否有新 filter 插到我们前面。
 
 **这一条同时改变了 §2.2.3(6) 的影响面评估**：本机除 AOSP 的 `dscpPolicy` 外，三星还有 `tosMarker` 系列**五个** egress 程序（`classify_ack` / `classify_uid` / `classify_queue_mapping` / `set_queue_mapping` / `set_tos_mobile`）以及 `mnxbNetd`、`semUidBPF_ape`、`tcpAccECN` 的 ether 变体。被捕获流量绕过的下游 filter 比蓝图原先设想的多得多。
+
+> **2026-08-25 追加实测：占位是按接口的，不是按设备的。** 上面那句"三星占了 egress pref 1"容易被读成设备级事实，**它不是**。在同一台 SM-S9180 上、Wi-Fi 断开蜂窝为主网时，`rmnet_data0` / `rmnet_data1` / `rmnet_data8` 三个接口都有 `clsact`，而 **egress 与 ingress 两侧一个 filter 都没有**（§16.9.2）。
+>
+> 名字本身就在提示这一点：`..._tsm_ether` 的后缀是 `ether`，它是给 `ARPHRD_ETHER` 准备的，RAWIP 的蜂窝接口不在它的范围内。
+>
+> **对实现的直接后果**：不得把"本设备的可用 pref"缓存成一个值，必须**逐接口 dump、逐接口选取、逐接口做 §8.5.4 的存活验证**。同一台设备上蜂窝可能拿到 pref 1（但按上面的理由仍应避开它）、Wi-Fi 只能拿 pref 2。把 wlan0 的观察外推到 rmnet 会得出错误的排除决策。
 
 ### 8.5.4 正向存活验证：唯一与厂商无关的"我们真的在工作"判据
 
