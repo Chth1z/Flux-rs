@@ -15,7 +15,7 @@
 |---|---|
 | Phase 0 **观测半场** | ✅ 已完成（`verification/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
 | Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
-| Phase 0 **Q1–Q9** | ⬜ 待做。已授权，工具链无障碍（WSL 编 BPF → `adb push` → 设备自带 `bpftool`） |
+| Phase 0 **Q1** | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
 | 能推翻主路线的技术未知项 | **无** |
 | 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
 
@@ -819,6 +819,26 @@ I4  if UDP:
 第二行为什么不会错查到 app 自己的 socket：established 查找的 key 是「local = daddr:dport，remote = saddr:sport」。我们的入向包是 `saddr=app_ip, sport=app_port, daddr=server_ip, dport=server_port`，所以 local 侧是 `server_ip:server_port`——那是 engine 的 transparent accepted child（`ir_loc_addr` 取自 SYN 的 daddr），**不是** app 的 socket（它的 local 是 `app_ip:app_port`）。
 
 **由此得到两条禁令**：① **禁止**对 established/data 包调 `bpf_sk_assign`——把 listener 关联到数据段会让 `tcp_v4_rcv` 用错 socket；② **禁止**在任何地方"顺手"把 `skb->destructor` 设成 `sock_pfree`，那会跳过 `ip_rcv_core` 的 orphan，让 app 自己的 socket 有机会被 `skb_steal_sock` 取回，等于把 app 的报文交还给 app。这两条是 §7.5 的 I3 else 分支为什么必须是 `TC_ACT_OK` 而不是"再 assign 一次"的全部理由。
+
+## 7.5.0 一条比 verifier 更靠后的陷阱：arm64 5.15 不支持带返回值的原子操作
+
+**实测于 2026-08-25，SM-S9180 / 5.15.211**（Phase 0 Q1 的副产物，§16.6）。
+
+在 BPF 里写 `__sync_fetch_and_add(p, 1)` **并使用它的返回值**，会生成带 `BPF_FETCH` 标志的 `BPF_ATOMIC` 指令。在 arm64 5.15 上加载这样的程序会失败：
+
+```
+libbpf: prog 'q1_probe': BPF program load failed: Unknown error 524
+processed 167 insns (limit 1000000) ... total_states 15 peak_states 15
+libbpf: prog 'q1_probe': failed to load: -524
+```
+
+`524` 是 `-ENOTSUPP`。注意日志的形状：**verifier 本身通过了**（167 条指令、无任何抱怨），失败发生在其后的 JIT 阶段。所以这不是"程序写错了"，而是"这条指令这个平台不实现"，而 errno 完全没有指向性。
+
+**规则：数据面禁止使用带返回值的原子操作。** 不取返回值的原子加（纯 `BPF_XADD` 形态）不受影响。
+
+本设计**天然满足**这条：`counters` 是 `PERCPU_ARRAY`，per-CPU 数据不存在竞争，`cnt()` 用的是普通 `*v += 1`；`uid_stats`（D23）是 `PERCPU_HASH`，同理。generation 号来自 `flux_control.generation`，由用户态发布，数据面从不自增任何全局计数器。
+
+**但实现者很容易在调试时踩进来**——想加一个"全局计数看看"，随手写 `__sync_fetch_and_add`，然后对着 `-524` 发懵。这就是记下它的理由。
 
 ## 7.5.1 BPF verifier 陷阱清单
 
