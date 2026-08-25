@@ -32,7 +32,7 @@ fi
 STATE=$("$FLUXD" status 2>/dev/null)
 
 case "$STATE" in
-*'"state":"active"'*)
+*'"state":"Active"'*)
 	echo "Flux-rs is active. Disabling."
 	"$FLUXD" disable
 	set_description "[Disabled] Tap to enable."
