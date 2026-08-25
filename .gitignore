@@ -1,0 +1,14 @@
+# Build output
+/target/
+/dist/
+
+# Local scratch. Nothing under docs/ is ignored: docs/blueprint.md is the
+# design contract and MUST be tracked. The previous repository ignored
+# /docs/* and /audit/, which is how the entire design package ended up
+# outside version control.
+*.log
+*.bak
+/scratch/
+
+# Third-party sources cloned for research only. Never enters the product tree.
+/clone/

@@ -1,0 +1,16 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Everything deployed to Android must be LF. module.prop in particular:
+# the Magisk parser requires LF line endings (docs/blueprint.md §13.2.0).
+*.sh text eol=lf
+*.prop text eol=lf
+module/* text eol=lf
+
+# BPF source and the shared ABI header are consumed by clang on Linux.
+bpf/**/*.c text eol=lf
+bpf/**/*.h text eol=lf
+
+# Lock files are compared byte for byte by reproducible packaging.
+engine.lock text eol=lf
+Cargo.lock text eol=lf

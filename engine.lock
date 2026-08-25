@@ -1,0 +1,26 @@
+# Pinned sing-box engine asset.
+#
+# Flux ships and runs the UNMODIFIED official release binary. There is no patch,
+# no fork and no rebuild step. `xtask` verifies the downloaded asset against the
+# digest below and refuses to package on mismatch.
+#
+# The blueprint's data-plane contract was verified line by line against
+# SagerNet/sing-box v1.13.19; see docs/blueprint.md §0.5.1 and §9.
+#
+# TODO(phase-6): fill in digest and size from the official release asset before
+# the first packaged build. Left empty on purpose so that packaging fails loudly
+# rather than silently accepting an unpinned binary.
+
+[engine]
+name = "sing-box"
+version = "1.13.19"
+source = "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-android-arm64.tar.gz"
+archive_sha256 = ""
+binary_path_in_archive = "sing-box-1.13.19-android-arm64/sing-box"
+binary_sha256 = ""
+binary_size = 0
+
+# Recorded because it decides whether the module works on 16 KiB base-page
+# devices. Official assets are still 0x1000; fluxd itself is built with
+# p_align >= 0x4000 (docs/blueprint.md §3.8).
+max_load_p_align = "0x1000"
