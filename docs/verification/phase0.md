@@ -1,0 +1,286 @@
+# Phase 0：编码之前的最小证伪
+
+> 原 blueprint.md 第 16 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
+>
+> 谁读这份：要上机跑测试的人；以及想知道某台设备实测出了什么的人。规范性合同仍是 `docs/blueprint.md`。
+
+---
+
+# 第 16 部分：Phase 0 —— 编码与清库之前的最小证伪
+
+Phase 0 在临时目录（`/tmp` 或独立 worktree）完成，只含一个最小 BPF C、一个小 loader、一份 netns 脚本与官方 sing-box。**不预建 Flux 框架，产物不进最终仓库。**
+
+先在 Linux 主机的 network namespace 里跑 Q1–Q5（**必须是 5.15 内核**，与产品基线一致），再在一台可恢复的目标 Android 设备上跑 Q6–Q10。**Q10 只能在真机上做**，因为它要验证的是厂商 filter 的行为。
+
+## 16.1 十个必答问题
+
+**Q1 — SK_STORAGE first-decision**
+在 TC egress 中对 `bpf_sk_fullsock(skb->sk)` 执行 `bpf_sk_storage_get(..., &initial, F_CREATE)`：verifier 是否接受？并发 SYN 是否由 `BPF_NOEXIST` 语义产生唯一 winner、loser 在 `CREATE` 返回 NULL 后能用只读重查稳定读回同一 winner？两种 state 是否在后续 egress 保持不变、并随 socket 关闭释放（无容量驱逐）？
+*断言*：并发 100 条 connect，每个 socket 的 decision 恒定；`grep` 内核内存不增长；socket close 后 storage 计数回落。
+
+**Q2 — listener 身份、assign 与共绑**
+官方 sing-box `1.13.19` 以 `type:tproxy`、`listen:198.18.0.2`/`2001:db8::2` 启动后：4 个 socket 是否出现且 `SOCK_DIAG` inode 能与 `/proc/<pid>/fd` 交叉核验？`bpf_sk_lookup_tcp/udp` 返回的 `src_ip4/src_ip6/src_port/state/family` 是否与配置一致？`bpf_sk_assign()` 是否**成功**（即 sing-box 的 listener 确实没有 `SO_REUSEPORT`，否则会 `-ESOCKTNOSUPPORT`）？
+*断言*：4/4 socket 核验通过；assign 返回 0；`ss -lntpe`/diag 显示无 reuseport。
+
+**Q3 — TCP 生命周期**
+v4/v6 完整握手、SYN 重传、final ACK、data、FIN/RST、TFO 在"只对 SYN assign"策略下是否工作？sing-box 侧 `accept()` 后 `getsockname()` 是否**逐字节**等于原始目的？client 的 `getpeername()` 是否一致？TIME_WAIT 重传 ACK、abortive RST、无 `skb->sk` 的内核 RST 是否如合同走 Android 原路径？engine 退出后仍可查到 full socket 的旧 flow 是否只 drop/reset 而**不** direct？
+*断言*：目的地址逐字节相等；旧 flow 无一个字节到达真实目的（用真实目的侧 tcpdump 证明）。
+
+**Q4 — UDP 原目的**
+v4/v6、connected 与 unconnected UDP 经 assign 后，sing-box 收到的 `IP_RECVORIGDSTADDR` / `IPV6_RECVORIGDSTADDR` cmsg 是否与原目的完全一致？回写路径（sing-box 新建 `IP_TRANSPARENT` socket 绑定原目的）是否能到达 app？
+*断言*：4 组（family × connected）全部逐字节一致；app 收到的源地址等于原目的。
+
+**Q5 — skb 回送闭环与路由前置条件**（D17 之后 L2 不再写包，本项相应调整）
+
+1. **L2 零改写**：`flx_cap_l2` 不写任何字节即 `bpf_redirect`，配 ingress 的 `bpf_skb_change_type(PACKET_HOST)`，包能否被 `ip_rcv` 接受？（若 `PACKET_OTHERHOST` 仍被丢，说明 TC ingress 晚于 `ip_rcv`，D17 被证伪，回退到写 dst MAC。）
+2. **L3 补头**：`bpf_skb_change_head(14)` + 只写 2 字节 EtherType，在 rmnet 上能否闭环？headroom 不足时 helper 是否返回 `-ENOMEM`（应当自行 `skb_cow`）？
+3. **clone 安全**：TCP 重传的 skb 是 `skb_clone`。L2 路径现在完全不写包，因此**本条只对 L3 有效**：确认 `bpf_skb_change_head` 后原始写队列 skb 未被破坏（大文件上传 + 人为丢包触发重传，校验对端收到的数据完整）。
+4. **GSO**：确认 TCP GSO 超级包（大文件上传，TSO 开启）能穿过 veth 并被本地栈正确处理；`CHECKSUM_PARTIAL` 在接收侧应被 `skb_csum_unnecessary` 跳过校验。依据：`__is_skb_forwardable()` 对 GSO skb 有显式豁免（v6.1 `include/linux/netdevice.h:3913-3917`），所以超级包会原样到达 peer。
+5. **UDP GSO（`UDP_SEGMENT`）**：QUIC 客户端（Cronet）会用 `UDP_SEGMENT` 发超级包。接收侧应由 `udp_queue_rcv_skb()` 的 `udp_unexpected_gso()` → `udp_rcv_segment()` 分段后再入 socket 队列。**必须实测**：让一个选中的 app 跑 QUIC 大流量，确认 engine 收到的是正确的一个个 datagram 而不是一个巨包。dae 曾因此在自己的客户端里默认关掉 UDP GSO（PR #391）——我们不能关 app 的，只能确认内核路径成立。
+6. **路由前置条件的最小集**：分别以 `all.rp_filter = 0/1`、`flxrs1.accept_local = 0/1`、**`ip_forward = 0/1`**、`arp_filter` 默认值跑矩阵，确定**真正必需的最小集**。§8.4 的预测是「需要 `flxrs1.rp_filter=0` + `accept_local=1` + `all.rp_filter=0`，不需要 `ip_forward`、不需要 `arp_filter`」；dae 三者都设了（`netns_utils.go:437-450`）。失败时**直接上 `pwru` + `kfree_skb_reason`**，不要猜（§8.4.1 有 dae 的原始 trace 可对照）。
+7. **可达性与共存**：Flux 取到的 pref 之前没有终止 chain 的 classifier（用 §8.5.4 的存活验证判定，不靠 dump 推断）；`TC_ACT_UNSPEC` 之后后续 filter 的计数器仍在增长。
+
+*断言*：大文件双向传输 checksum 正确；`all.rp_filter=1` 时确实 martian-source 丢包（证明 §8.4 的检查是必要的，不是多余的保守）；`ip_forward=0` 下端到端成功（否则触发 §21 的范围变更）；后续 filter 计数器有增长。
+
+**Q6 — 真机网络分支**
+一台目标 Android（内核 ≥ 5.15）上：Wi-Fi（ARPHRD_ETHER）、rmnet（ARPHRD_RAWIP）、可用时的 CLAT `v4-*` 是否都保留 UID 与原目的？VPN TUN 是否确实被排除？`/data/system/packages.list` 是否能精确解析 user/package/UID？**Android 的 `filter INPUT`（`bw_INPUT`/`fw_INPUT`）与 `nat/mangle PREROUTING` 是否放行我们注入到 `flxrs1` 的包？**
+*断言*：三类接口各至少一条 TCP + 一条 UDP 端到端成功；`iptables -L -v -n` 显示无异常 drop 计数增长。
+
+**AOSP 默认路径的风险已下调，但 OEM 路径的风险被新证据抬高了。**
+
+下调依据：`clone/AndroidTProxyShell/tproxy.sh` 创建的链全部挂在 `mangle PREROUTING` / `mangle OUTPUT`，**从不碰 `filter INPUT`**（`tproxy.sh:968`），而它的本机路径确实要经过 INPUT（OUTPUT 打 mark → 策略路由送 `lo` → 重新入栈 → PREROUTING TPROXY → INPUT）。既然它无需在 INPUT 开口就能工作，**AOSP 默认的 `filter INPUT` 不会丢弃这类本地交付流量**。残余风险是接口差异：它的包 `iif = lo`，我们的包 `iif = flxrs1`，Android 可能存在 `-i lo` 的快捷放行。
+
+抬高依据：`clone/box4magisk/box/scripts/box.service:72-79` 有一个专门的 `oneplus_a16_fix()`，内容是 **flush OEM 的 `fw_INPUT` / `fw_OUTPUT` / `fw_OUTPUT_oplus_dns` 链**，注释写"OnePlus Android 16 filter rules cleaned for TProxy fix"。**这说明至少一个 OEM 的 `filter` 链确实会干掉 TPROXY 流量。**
+
+因此本项的实测清单是：
+
+0. **枚举 egress filter 基线**（本条是新增的，因为整个生态没人查过）：`tc filter show dev wlan0 egress`、`tc filter show dev rmnet_data0 egress`、以及 `v4-*` 存在时同样操作。`asteriskd` 只检查过 hotspot interface 的 **ingress**（`asteriskd_runtime.c:4994-4995`），所以"物理 interface 的 egress 上有什么"没有任何先例数据。记录已有 filter 的 pref / protocol / kind / program name。**这直接决定 §8.5 的 first-applicable 判定在真机上能否满足**；已知会出现 CLAT 翻译程序与 OEM 的 QoS/DSCP 程序。
+1. `iptables -t filter -L -v -n` / `ip6tables` 全量抓一次基线；
+2. 跑一条捕获流量，再抓一次，逐链比对 drop/reject 计数增长；
+3. **单列 OEM 自有链**（`fw_*`、`oem_*`、`oplus_*`、`miui_*` 之类）的计数。
+
+**若 OEM 链丢我们的包，0.9.0 的答案是"该设备不受支持，保持 Direct 并在 `status` 报告"，绝不是"flush OEM 的防火墙链"。** box4magisk 选了后者；那与 §1.3 的非目标（不清空系统对象）和 §15.4(1) 直接冲突，我们不跟。
+
+**Q7 — 换代与故障自愈**
+engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时，是否只影响已 redirect 的包，而下一个新 SYN/datagram 恢复 Direct？跨 generation 的 in-flight 旧包被送进新 listener 时行为是否如 D3 所述无害（旧 SYN 变新连接、旧 established 数据被 RST）？fault latch 是否抑制 storm、重复/旧事件是否幂等、current fault 是否让 fluxd 先 inactive 再重启 generation？
+*断言*：`kill -9` engine 后新连接 100% direct；fault 事件数为 O(1) 而非 O(packets)。
+
+**Q8 — 清理与重建**
+`kill -9 fluxd` 后：残留 TC filter 是否只造成"新流 direct、已入场流 drop"？重启 fluxd 后 §8.7 的删除-重建是否把所有对象恢复到确定状态？`stop` + `uninstall` + reboot 后是否零 Flux 内核残留？系统 TC/RPDB/VPN 对象是否**完全未被修改**？
+*断言*：重启前后 `ip rule`/`ip route`/`tc filter show`（系统 interface）逐行 diff 为空。
+
+**Q9 — per-app DNS（阻塞项，D18 的实机确认）**
+源码链已完整（§1.3.1），但"这台设备上 `bpf_get_socket_uid()` 对 netd 的 DNS 包确实返回 app UID"必须实测：
+
+1. 选中一个已知 UID 的 app，让它做一次 `getaddrinfo()`（不要用自带 DNS 的浏览器，用普通 app）。断言：该次明文 :53 流量被捕获，且 engine 侧看到的源是我们的 tproxy inbound。
+2. 用 `counters` 的 `admit_udp` 与 engine 日志交叉确认该 datagram 确实进了 engine，而不是直连出去。
+3. **未选中**的 app 做同样操作，断言其 DNS **不**被捕获（`uid_policy` miss）。这一条同样重要——它证明归属是精准的而不是"全抓"。
+4. 关闭 Private DNS 与开启 Private DNS 各跑一次，确认后者的解析走 :853 且不经过 Flux（§1.3.3 边界①）。
+5. 抓一次被捕获 :53 流量的 `sk_uid`，确认不是 `1051`（若是，该设备开了 `enforce_dns_uid`，属边界②，记录后按"不捕获"处理）。
+
+6. 顺带验证 §1.3.5：在用户 JSON 里加一条 `{"package_name": ["<选中的包名>"], "outbound": "<某个出口>"}` 规则，确认它命中（`sing-box` debug 日志会打印匹配的 rule）。若 `tun.NewPackageManager` 在该设备失败，日志会有 warn，则 `package_name` 规则静默不匹配——记录为已知边界，不阻塞。
+
+**Q10 — 厂商 filter 在前时我们还会不会运行（阻塞项，2026-08-25 实测新增）**
+
+由 §8.5.3 的实测引出：三星在 `wlan0` egress 占据 `chain 0 / pref 1 / handle 0x1`，而 tc 的 priority 最小就是 1，所以我们只能排在它**后面**。而 `__tcf_classify` 一旦某个 filter 返回 `>= 0` 的动作就停止遍历——**如果厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，我们的程序一个包都收不到，同时 attach 本身完全成功、没有任何错误。** 这是本设计目前最可能"装上了但什么都没发生"的失效模式。
+
+1. 在 `wlan0` egress 的 **pref 2** 挂一个最小程序（只对每个包 `counters[0]++` 然后返回 `TC_ACT_UNSPEC`），产生已知流量，断言计数器**在涨**。
+2. 若不涨：说明厂商 pref 1 终止了 chain。改测 pref 1 是否可抢（`NLM_F_EXCL` 应当 `EEXIST`；**不要**用 `NLM_F_REPLACE` 去顶掉厂商的）。此时要么该 interface 只能排除，要么整条 clsact 路线在三星设备上不可用，**属于范围变更，回 §21 征求确认**。
+3. 在**蜂窝** interface 上重复：实测时 `rmnet_data0/1/8` 的 egress 是空的，pref 1 可用，但 `tosMarker_schedcls_egress_set_tos_mobile` 这个程序存在，说明它在某些条件下会挂上来。至少要确认"我们在 pref 2、厂商不在场"时计数器会涨。
+4. 验证 §8.5.3 的竞态：我们先占 pref 2 并保持运行，然后触发 Wi-Fi 重连，观察三星的 attach 是否成功、我们的 filter 是否仍在、以及 `RTM_NEWTFILTER` 事件是否被 reactor 正确收到。
+5. **由此固化一条激活步骤**：attach 之后、`publish active=1` 之前，必须用正向存活验证确认程序真的在跑（§8.5.3 约束 3）。这一步的实现方式也在本问中定稿。
+
+*断言*：pref 2 上的计数器在真实流量下增长；`NLM_F_EXCL` 对已占用的 pref 返回 `EEXIST` 而非静默成功；厂商重新 attach 后我们的 filter 仍在且仍在计数。
+
+**若第 1 或 3 条不成立，D18 被证伪**：那说明该内核的 `sockfs_setattr` → `sk_uid` 链路或 AOSP 的 `fchown` 行为与源码不符。此时必须回到设计，重新在旧的"不捕获系统 DNS"与"全设备劫持 :53"之间选择，**不得**靠特判 :53 端口蒙过去。
+
+## 16.2 观测半场的实测结果（SM-S9180 / Android 16 / 5.15.211-Qkernel，2026-08-25）
+
+Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"）与**证伪半场**（Q1–Q9，需要加载 BPF）。下表是观测半场的结果,全部通过 `adb shell su -c` 只读采集,未加载任何程序、未修改任何对象。
+
+设备:SM-S9180 / SM8550(kalama) / Android 16 / SDK 36 / 安全补丁 2026-04-05 / **kernel 5.15.211-Qkernel**(恰为产品基线) / page size **4096** / root 为 KernelSU(`u:r:ksu:s0`)。
+
+### 16.2.1 与蓝图预测一致的（可以停止怀疑的）
+
+| 项 | 蓝图预测 | 实测 |
+|---|---|---|
+| `all.rp_filter` / `default.rp_filter` | 预期 0,但"必须检查而非假设"(§8.4) | **全部 0**,49 个 interface 无一例外 |
+| `accept_local` | 预期 0,需我们在 `flxrs1` 上设 1 | **全部 0** —— 确认必须设 |
+| `ip_forward` / `ipv6 forwarding` | 预期不需要打开(§8.4 推断) | **都是 0**,即 Q5 的测试条件就是设备原生状态 |
+| `ip_local_port_range` | listener 端口取 61000–65535 须在其上 | **32768–60999**,不重叠 |
+| `rmnet_data0` 链路类型 | ARPHRD_RAWIP ⇒ L3 分支强制(§3.3.1) | **ARPHRD_RAWIP(519)**,15 个 rmnet 全是 |
+| `wlan0` 链路类型 | ARPHRD_ETHER ⇒ L2 分支 | **ARPHRD_ETHER(1)** |
+| netd `ip rule` 最低 priority | 10000,故 1–9999 空闲(§8.3) | **最低 10000**,1–9999 **整段为空**,pref 100 可用 |
+| 路由表 20260 | 应在 netd 的 `1000+ifindex` 之外 | v4/v6 **均为空** |
+| fwmark 位占用 | 0–20 被 netd 用,21–28 空,31 是 wakeup(§3.1) | 实际用到 `0x7fefffff` 掩码 + **`0x80000000`(bit 31,`wakeupctrl` NFLOG)**。21–30 未见占用 |
+| GKI config | §4 的整张表 | **逐项命中**,含 `CONFIG_VETH/DUMMY/TUN/NET_SCH_INGRESS/NET_CLS_BPF/NET_ACT_BPF/BPF_SYSCALL/BPF_JIT/CGROUP_BPF/DEBUG_INFO_BTF/IP_MULTIPLE_TABLES/NF_CONNTRACK` |
+| `CONFIG_NETKIT` | 四个 GKI 分支全缺 | **缺失**,netkit 不可用 |
+| BTF | `SK_STORAGE` 需要 | `/sys/kernel/btf/vmlinux` **存在,5,779,111 字节** |
+| `clsact` 生命周期 | netd 随 interface 加入/离开网络创建与删除(§8.5.1) | **只有 3 个 UP 的蜂窝口(`rmnet_data0/1/8`)有 clsact;`wlan0` 没有**(当前未连接)。直接印证 |
+| `packages.list` | 10 字段,`uid = userId*100000 + appId` | **10 字段**,561 行,UID 范围 1000–10425 |
+
+### 16.2.2 与蓝图不一致、已据此改文档的
+
+**(a) cgroup 槽位不是常驻占用。** 见 §0.1 第 2 条的更正框。`bpftool cgroup show` 对根、`/apps`、`/system` 与全树遍历**全部返回空**,但 8 个 `cgroup_sock_addr` 程序确实已加载。结论:bpfloader 开机只 load+pin,按需 attach。
+
+> **第二次复核(卸载旧模块、关闭 VPN、重启后)**:结论**完全一致**。全新启动、无 VPN、无 Flux 残留的干净状态下,cgroup attach 列表依然全空,而 8 个 `cgroup_sock_addr` 仍然已加载。这条更正**可复现,不是偶发**。
+
+**(b) 厂商已经占了 egress pref 1——这是本轮最重要的发现,已导致 ABI 与激活流程改动。** 详见 **§8.5.3**。
+
+第一轮采集时 `tc filter show` 在所有 interface 上都是空的,我据此写下"egress pref 1 在常态下是空闲的"。**第二轮推翻了它**:重启后主网变成 `wlan0`(ARPHRD_ETHER),三星的 `semUidBPF_schedcls_egress_tsm_ether` 占据了 `chain 0 / pref 1 / handle 0x1 / protocol all`——与 `flux_abi.h` 原先预定的四元组完全相同。
+
+两轮结果不同的原因本身就是一个发现:**厂商的 attach 时刻不可预测**。第一轮 `wlan0` 处于 down(主网是蜂窝),第二轮 `wlan0` 成为主网。更关键的是第二轮内部也自相矛盾——探针第 6 节报"无 filter",而同一次运行第 10 节的 `bpftool net show` 报"已 attach";核对时间戳后确认程序在开机后 7 秒就由 bpfloader 加载(`loaded_at`),但**挂到 `wlan0` 上是在链路已带全局地址之后好几分钟**。`loaded_at` 与 attach 时刻是两件事。
+
+因此:`FLUX_TC_PREF` 从固定常量改为 `FLUX_TC_PREF_PREFERRED`(2)/`_MIN`/`_CLAT_MAX` 三元组 + dump 后动态选取;激活流程新增"正向存活验证";Phase 0 新增 **Q10**。探针也已改为**采样两次**并显式用 clsact parent handle,否则会漏掉这类晚到的 attach。
+
+### 16.2.3 蓝图完全没有预料到的
+
+| 发现 | 影响 |
+|---|---|
+| **14 个 `epdg0..13` 接口,全部 `ARPHRD_NONE`**(VoWiFi/ePDG 隧道) | §3.3 的 admission 会逐个遍历并排除它们(既非 ETHER 也非 RAWIP,且不叫 `v4-*`)。行为正确,但**接口清单比预期长得多**(49 个),admission 的日志与 `status` 输出要能承受这个规模而不刷屏 |
+| **`tun0` 处于 UP 且有 `uidrange 0-99999` 的 netd 规则**(netId 0x76) | 设备上**当前有 VPN 在跑**。按 §3.5,此时物理口上看到的是 VPN 的 outer socket,不是 app 的。**任何捕获测试在关掉 VPN 之前都不可信** |
+| **Samsung 自有 BPF 规模远超 AOSP**:86 个 prog pin / 115 个 map pin,含 `mnxbNetd`、`netlog`(5 个 ringbuf)、`semSmartHS`、`semUidBPF`、`tcpAccECN`、**`tosMarker`(`tos_policy_mobile_map`)** | `tosMarker` 与 §2.2.3(6) 的 DSCP 边界直接相关:除 AOSP 的 `dscpPolicy` 外,三星还有自己的 ToS 标记路径。被代理流量丢失 app 级标记这条**影响面比蓝图写的更大** |
+| **`qcom_qos_reset_POSTROUTING` 对本机源地址出向流量 `--set-xmark 0x0/0xffffffff`** | 高通 QoS 在 POSTROUTING **清空整个 fwmark**。我们不用 mark,所以无影响;但这条独立地证明了 §19 拒绝 mark 方案是对的——**在这台设备上 mark 根本活不到出口** |
+| **`memlock` rlimit 仅 64 KB** | kernel ≥ 5.11 用 memcg 而非 memlock 记账 BPF 内存,所以 5.15 上不受限。但若将来回落到更老内核,16 KiB ringbuf + 9 张 map 会撞上这个上限。记录备查 |
+| **`/system/bin/bpftool` 已存在**(v5.16.0 / libbpf v1.4) | Phase 0 证伪半场可以直接用它做 attach 验证与 map dump,不必自带工具 |
+| **旧架构残留仍在设备上**:`/data/adb/flux`、`/sys/fs/bpf/flux/`(空目录)、以及**仍然安装着的 `flux` 模块** | 在 0.9.0 上机测试前**必须清理**,否则新旧模块会争同一批对象与目录 |
+| `private_dns_mode = opportunistic` | D18 依赖的明文 DNS 路径在此模式下**确实存在**(机会性 DoT,失败回落明文)。但上游支持 DoT 时查询走 853 加密,那部分不在捕获范围内——与 §1.3 的残余边界一致 |
+
+## 16.3 这份结果有多少能外推到别的手机
+
+**产品面向的不是三星。** 一台设备的实测必须先分层,才能知道哪些结论可以当作普适事实写进设计、哪些只能当作"某一族设备的样本"。下面按**依据的来源**分层——层级越高,外推越可靠。
+
+### 16.3.1 第 1 层：AOSP 源码强制,每台 Android 设备都一样
+
+这些不是"在这台设备上观察到",而是"AOSP 的代码就这么写的,实测只是确认没被厂商改掉"。**可以直接当作设计前提。**
+
+| 事实 | 依据 | 设计中的用处 |
+|---|---|---|
+| netd 的 `ip rule` 最低 priority = 10000,1–9999 空闲 | `RouteController.h:34` | §8.3 选 pref 100 |
+| netd 路由表 = `1000 + ifindex` | `RouteController.h:100` | §8.3 选 table 20260 |
+| fwmark 位布局(netId 0–15、16–20 netd 语义、31 wakeup) | `Fwmark.h:24-53` | §3.1 |
+| netd 随 interface 加入/离开网络创建并删除 `clsact` | `RouteController.cpp:1201`、`NetworkController.cpp:152` | §8.5.1、§26 不变量 4 |
+| AOSP 自身的 TC 优先级占用(ingress 1/2/3/4,egress 4/5) | `ConnectivityService.java`、`ClatCoordinator.java`、`DscpPolicyTracker.java` | §8.5.2 |
+| CLAT 的 `v4-*` 是 `ARPHRD_NONE` | `ClatCoordinator.java:471` 自述 | §3.3.1 |
+| `packages.list` 10 字段、`uid = userId*100000 + appId` | AOSP | D8 |
+| DnsResolver 用 `fchown` 把 DNS socket 归属改回 app | `res_send.cpp:789/1092` | D18 |
+
+### 16.3.2 第 2 层：GKI 强制的内核 config,Android 12+ 新机可靠
+
+`CONFIG_VETH` / `NET_CLS_BPF` / `NET_SCH_INGRESS` / `BPF_SYSCALL` / `CGROUP_BPF` / `DEBUG_INFO_BTF` 全为 `y`、`CONFIG_NETKIT` 缺失——这四项在四个 GKI 分支的 `gki_defconfig` 里逐项核对过(§4),本机实测一致。
+
+**但有两个真实的例外**,设计不能假定 GKI:
+
+1. **从旧版本升级上来的设备可能不是 GKI**。Google 只要求**新发布**的设备用 GKI;由 Android 11 升级到 13/14 的机型可能仍是厂商自建内核。
+2. **KernelSU 的 LKM / late-load 模式跑在厂商原版内核上**(§13.2.0 记录了 `KSU_RUNTIME_MODE`)。这类设备的 config 缺失概率显著更高。
+
+所以 §4 的规则不变:**每一项都必须在 activation 时以"实际调用成功"验证,而不是查版本或查 config。** 本机 `/proc/config.gz` 可读是运气,不是保证。
+
+### 16.3.3 第 3 层：SoC 厂商,覆盖面大但绝不通用
+
+| 观察 | 归属 | 外推边界 |
+|---|---|---|
+| `rmnet_data*` 是 `ARPHRD_RAWIP` | **高通**的 rmnet 驱动 | 联发科用 `ccmni*`、三星 Exynos 用 `rmnet*`/`umts_*`,**命名与 ARPHRD 都可能不同** |
+| `rmnet_ipa0`(MTU 9216) | 高通 IPA 硬件加速 | 其它平台无此设备 |
+| `qcom_qos_reset_POSTROUTING` 对本机源地址出向流量 `--set-xmark 0x0/0xffffffff` | 高通 | 但它独立印证了 §19 拒绝 mark 方案是对的 |
+
+**由此得到一条设计硬规则(本设计已经满足,此处明确写下)**:**interface admission 只按 `ARPHRD` 类型判定,绝不按名字匹配。** 唯一的例外是 CLAT 的 `v4-*` 前缀,而那是 AOSP 源码里写死的命名约定(第 1 层)。任何形如"名字以 `rmnet` 开头就当蜂窝"的代码都会在联发科设备上错。
+
+### 16.3.4 第 4 层：OEM 特有,**不可外推**——本次最重要的发现就在这一层
+
+| 观察 | 归属 |
+|---|---|
+| `semUidBPF` 占据 egress `chain 0/pref 1/handle 0x1` | 三星 |
+| `tosMarker` 五个 egress 程序、`mnxbNetd`、`semSmartHS`、`semUidBPF_ape`、`tcpAccECN` | 三星 |
+| 14 个 `epdg*`(`ARPHRD_NONE`,VoWiFi) | 三星 |
+| 86 个 prog pin / 115 个 map pin | 三星(原生 AOSP 少得多) |
+
+**§8.5.3 的 pref 冲突是三星特有的,但"某个 OEM 占了 egress pref 1"这个*类别*是普适风险。** 小米、OPPO、vivo、荣耀都有自己的网络增强 BPF,谁占了哪个 pref 无法从任何公开来源推断。
+
+**因此外推的正确方式不是猜,而是改设计:**
+
+- 不预定任何 pref,dump 后动态选取(§8.5.3 已改)。
+- **attach 之后做正向存活验证**(§8.5.4),因为这是唯一与厂商无关的"我们真的在工作"的判据。
+- `status` 必须报告实际取到的 pref 与同一 chain 上的其它 filter,让用户在陌生机型上能自证。
+
+### 16.3.5 第 5 层：内核版本带——**不能从 Android 版本推断**
+
+本机是**最有说服力的反例**:**Android 16 / SDK 36,内核却是 5.15.211**。它是从 Android 13 升级来的,GKI 分支停在 `android13-5.15`。
+
+所以以下这类映射**只对新发布机型成立**,对升级机型无效:
+
+| Android | 新机的 GKI 分支 |
+|---|---|
+| 12 | 5.10 |
+| 13 | **5.15** |
+| 14 | 6.1 |
+| 15 | 6.6 |
+| 16 | 6.12 |
+
+受内核版本影响的三条机制:
+
+| 机制 | 分界 | 本机(5.15) |
+|---|---|---|
+| `bpf_sk_assign` 拒绝 `SO_REUSEPORT` listener | < 6.5 命中 | **命中**(§9.2) |
+| 未 hash socket 的引用泄漏 | < 6.5 命中 | **命中**,靠 §9.4 的顺序规避 |
+| **TCX attach** | ≥ 6.6 可用 | **不可用** |
+
+**这三条都必须运行时探测,禁止读 `uname -r` 判定。** 厂商会回移特性,升级机型的内核也不跟随系统版本。
+
+### 16.3.6 结论：本次测试的外推价值
+
+| 问题 | 回答 |
+|---|---|
+| 第 1、2 层结论能当普适前提吗 | **能**(第 2 层附带 GKI 例外的运行时验证要求) |
+| `rmnet = RAWIP`、因此需要 L3 分支 | **需要 L3 分支这个结论普适**(总有非以太的蜂窝口);但**具体名字与类型不普适**,必须按 ARPHRD 判定 |
+| 三星占 pref 1 这件事能外推吗 | **不能**。但"OEM 可能占 pref 1"作为**风险类别**普适,已据此改成动态选 pref + 存活验证 |
+| `rp_filter=0`、`ip_forward=0` 能外推吗 | 这是**内核默认值**且 AOSP 从不设置(§8.4.1),所以**大概率**如此;但厂商可以在 `init.rc` 里改,**§8.4 的运行时读取 + 冲突即响亮失败不能省** |
+| 一台设备够吗 | **不够,但它把设计从"猜"推进到了"知道要测什么"**。真正需要的补充样本是:一台**联发科**设备(验证 `ccmni` 的 ARPHRD)、一台 **6.6+ 新机**(验证 TCX 路径)、一台**非三星 OEM**(验证 pref 冲突的普遍性) |
+
+**这一节的方法论要求**:今后每次在新机型上跑 `tools/phase0/observe.sh`,结论都要按上面五层归类再写进文档。把 OEM 层的观察当成普适事实,是这份设计最容易犯的错。
+
+## 16.4 通过标准
+
+- `2 family × 2 protocol` 的 TCP/UDP 原目的**逐字节**一致，4 个 socket 全部完成 readiness 核验。
+- 任何 pre-redirect 的未入场失败保留原 skb（真实目的侧能看到该连接直连成功）；任何 post-boundary 失败明确 drop（真实目的侧看不到任何字节）。
+- 活跃 TCP decision 不被容量驱逐、first-decision-wins、不原地翻转、socket 关闭后释放。
+- 所有 capture filter 是 first applicable；egress "不接管" 全部用 `TC_ACT_UNSPEC`；AOSP CLAT 与后续 OEM filter 仍被执行。
+- frozen control leaf 经 pointer swap 只出现完整 old/new snapshot。
+- Android 系统 TC/RPDB/VPN/sysctl 对象无修改或覆盖（`all.rp_filter` 亦未被 Flux 写过）。
+- 全程无需 cgroup attach、sing-box patch、SOCKMAP、heartbeat 或第二后端。
+
+**任何一项不成立：停止进入清库与编码阶段**，修订本蓝图并重新请所有者确认。不得把 Phase 0 变成长期实验平台。
+
+---
+
+
+---
+
+## 16.5 Q10 首次尝试的结果（2026-08-25，SM-S9180）
+
+Q10 的决定性测量**尚未完成**，但这次尝试本身产出了三条事实，其中两条改变了工具选择。
+
+### 16.5.1 已确定的事实
+
+| 事实 | 影响 |
+|---|---|
+| **Android 的 `tc` 没有编入任何 action 模块。** `action drop` / `action gact drop` / `police` 全部报 `Unknown action "noact"`（iproute2-ss171113 找不到 action 模块时的回退） | 用 `tc` action 做观测的方案**整条作废**。也让 §12.8「不 shell out 到 tc/ip」的理由更硬：即使想用，这个 `tc` 也表达不了我们要的东西 |
+| **`tc -s` 对 qdisc / class 有效，对 filter / action 返回空** | 独立确认了 §8.5.4 不能依赖 filter 级统计。该节选用 BPF map 计数器是必需而非偏好 |
+| **`tc -s qdisc show` 会显示 clsact 的 drop 计数器**（`mini_qdisc_qstats_cpu_drop`） | 这是本平台上唯一可用的「TC_ACT_SHOT 发生了」观测点，将来做 Q10 与其它 TC 实验都靠它 |
+
+### 16.5.2 厂商 filter 的瞬态性得到第三次确认
+
+同一天内 `wlan0` egress 上三星的 `semUidBPF` filter 被观测到 **在场 → 不在场 → 再在场** 三种状态，而程序 id 95/96 **全程保持加载**。
+
+这把 §8.5.3 的「attach 时刻不可预测」升级为「**在场与否本身是反复变化的**」。两条设计含义：
+
+- 任何「激活时检查一次冲突」的逻辑都不足够，必须靠 `RTM_NEWTFILTER` 持续监视（§10.4 已如此规定）。
+- **Q10 只能在厂商 filter 在场的窗口内测。** `tools/phase0/q10-chain-continuation.sh` 已内置检测：发现 pref 1 有真实占用者时自动改测真实场景并跳过合成用例。
+
+### 16.5.3 阻塞项
+
+决定性测量需要一个**编译好的 BPF 对象**（在 pref 2 挂一个只做 `counters[SAW_PACKET]++` 然后返回 `TC_ACT_UNSPEC` 的程序，用 `bpftool map dump` 读计数）。设备上已有 `/system/bin/bpftool`（v5.16.0 / libbpf v1.4），可直接用于 load 与 attach。
+
+**缺的是开发机上的 clang（带 bpf target）**。当前开发机无 clang、无 NDK。这属于 `governance.md` §1.2 的「改所有者的开发机」，需所有者决定。
+
+在此之前，**§8.5.4 的存活验证机制不能视为已验证**，只能视为已设计。
