@@ -317,6 +317,28 @@ mod tests {
             has_dns_hijack_rule(&config),
             "default template lacks a hijack-dns rule"
         );
+
+        // sing-box rejects a selector/urltest with no members ("missing
+        // tags"); this crate cannot run `sing-box check`, so it re-asserts
+        // the one semantic rule the shipped template has actually violated.
+        // Caught for real: the region selectors were shipped with
+        // `"outbounds": []` and v1.13.19 refused the whole config.
+        for outbound in config["outbounds"]
+            .as_array()
+            .expect("template has outbounds")
+        {
+            let kind = outbound["type"].as_str().unwrap_or_default();
+            if kind == "selector" || kind == "urltest" {
+                assert!(
+                    outbound["outbounds"]
+                        .as_array()
+                        .is_some_and(|o| !o.is_empty()),
+                    "{} `{}` has no member outbounds; sing-box check fails on it",
+                    kind,
+                    outbound["tag"].as_str().unwrap_or("?")
+                );
+            }
+        }
     }
 
     #[test]
