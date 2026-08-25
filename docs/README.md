@@ -6,8 +6,9 @@
 
 | 你要做的事 | 读这个 |
 |---|---|
+| **我是用户，这东西是干什么的** | **`introduction.md`**（不含术语） |
 | 实现某个模块 | `blueprint.md`，从头读到尾 |
-| 先了解这东西是什么 | `architecture.md` |
+| 了解技术架构 | `architecture.md` |
 | 上机跑测试 | `verification/phase0.md` + `../tools/phase0/README.md` |
 | 查一个错误码的含义 | `reference/failures-and-status.md` |
 | 质疑某条断言的依据 | `evidence/review-log.md` |
