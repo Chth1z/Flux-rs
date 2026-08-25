@@ -60,13 +60,33 @@ pub const MAP_NAMES: [&str; 9] = [
 // --------------------------------------------------------------------- limits
 
 /// `uid_policy` capacity.
-pub const UID_POLICY_MAX_ENTRIES: u32 = 512;
+///
+/// Must hold the selected set plus every `DRAINING` entry accumulated during a
+/// boot, since those are never deleted (see [`UidMode::Draining`]).
+pub const UID_POLICY_MAX_ENTRIES: u32 = 4096;
+
 /// Hard cap on simultaneously selected UIDs.
-pub const UID_SELECTED_MAX: u32 = 128;
+///
+/// Sized from measurement: SM-S9180 carries 429 packages inside the
+/// `[10000, 19999]` application range, so the previous cap of 128 made
+/// "select every third-party app" structurally impossible (blueprint §1.5.3).
+pub const UID_SELECTED_MAX: u32 = 1024;
+
 /// Capacity of each bypass LPM trie.
-pub const LPM_MAX_ENTRIES: u32 = 128;
-/// LPM slots held back for dynamically injected self-address bypasses.
-pub const LPM_SELF_ADDR_RESERVE: u32 = 32;
+///
+/// The kernel forces `BPF_F_NO_PREALLOC` on `LPM_TRIE`, so this is a ceiling
+/// rather than an allocation and an unused 65536 costs nothing. It is what
+/// lets the bypass set hold a country-scale route list and skip a userspace
+/// round trip for traffic that would have gone direct anyway (blueprint
+/// §1.5.1).
+pub const LPM_MAX_ENTRIES: u32 = 65536;
+
+/// LPM slots held back for the device's own addresses.
+///
+/// IPv6 privacy extension addresses rotate, so the reactor filters on
+/// `IFA_FLAGS` and evicts LRU inside this reserve rather than accumulating
+/// (blueprint §1.5.4).
+pub const LPM_SELF_ADDR_RESERVE: u32 = 64;
 /// `fault_latch` capacity.
 pub const FAULT_LATCH_MAX_ENTRIES: u32 = 64;
 /// Power of two AND page-size aligned for both 4 KiB and 16 KiB base pages.
