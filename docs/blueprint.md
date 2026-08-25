@@ -30,7 +30,17 @@
 这是硬约束下唯一可行的组合，理由不是"eBPF 越多越好"，而是三条互相咬合的事实：
 
 1. **UDP 原目的无法用 cgroup SOCK_ADDR 恢复。** `IP_RECVORIGDSTADDR` 的 cmsg 由内核在 `udp*_recvmsg` 中**从 skb 的 IP 头**生成（`ip_cmsg_recv_offset` 读 `ip_hdr(skb)->daddr`），而 `BPF_CGROUP_UDP4_RECVMSG` hook 只能改写返回给用户态的 peer sockaddr。旧仓库的 token 方案因此对 UDP 是**伪证明**：map 自洽，engine 读到的 cmsg 仍是 token。任何"保留真实原目的且不改 engine"的方案都必须让**真实 IP/port header 抵达 TProxy listener**。
-2. **Android 15/16 已用 flags-0 独占 root cgroup 的 SOCK_ADDR 槽位。** 本仓库自己的真机 QUERY（现已归档至 `archive/2026-08-25-superseded/docs/research/sm-s9180-sock-addr-occupancy-2026-08.md`，SM-S9180 / 5.15.211 / Android 16）显示 `inet4/6 connect`、`udp4/6 sendmsg`、`udp4/6 recvmsg` 全部 `flags=0x0` 被占用，190 个 `apps/uid_*` 后代节点全被内核规则阻塞。Linux `hierarchy_allows_attach()` 对 flags-0 祖先直接拒绝后代同类型 attach。可行的只剩"抢占 netd 槽位"（CHIZI/bpf2socks 的做法，会静默关掉 Android 自己的 connect hook）或"detach-promote-append"（无人实现，且 netd 重启即打架）。**产品不能建立在抢系统槽位上。** 因此 0.9.0 **禁止任何 cgroup attach**。
+2. **cgroup SOCK_ADDR 槽位是一个"随时可能被占、且占用时机不可预测"的共享资源。**
+
+   > **2026-08-25 实测更正。** 这一条我原先写的是"Android 15/16 已用 flags-0 **永久独占** root cgroup 的 SOCK_ADDR 槽位"，依据是归档的 `sm-s9180-sock-addr-occupancy-2026-08.md`。**在同一台设备上复测，该表述不成立**：`bpftool cgroup show` 对 `/sys/fs/cgroup`、`/sys/fs/cgroup/apps`、`/sys/fs/cgroup/system` 以及 `bpftool cgroup tree` 全树遍历，**返回的 attach 列表全部为空**；同时 `bpftool prog show` 显示 **8 个 `cgroup_sock_addr`、2 个 `cgroup_skb`、2 个 `cgroup_sockopt`、2 个 `cgroup_sock` 程序确实已加载**。参见 §16.2。
+   >
+   > 真实机制是：AOSP 的 bpfloader 在开机时**只 load + pin，不 attach**；attach 发生在对应功能被激活的时刻。所以槽位占用是**动态的**，不是常驻的。
+
+   这**削弱**了"槽位被占死"的说法，但**不改变结论**，理由反而更强了一层：一个只在 netd 激活某功能时才出现的冲突，比常驻冲突**更难处理**——它意味着产品可能在安装时工作正常，几小时后因为系统启用了某个特性而**静默失效**，且失效时机不可预测、不可复现。`hierarchy_allows_attach()` 对 flags-0 祖先拒绝后代同类型 attach 这条内核规则依然成立，只是触发时刻不确定。
+
+   可行的替代只剩"抢占 netd 槽位"（CHIZI/bpf2socks 的做法，会静默关掉 Android 自己的 connect hook）或"detach-promote-append"（无人实现，且 netd 重启即打架）。**产品不能建立在抢系统槽位、或建立在一个随时可能被系统收回的共享资源上。** 因此 0.9.0 **禁止任何 cgroup attach**。
+
+   注意第 1 条**不依赖**本条。即使槽位永远空着，UDP 原目的仍然无法用 cgroup 方案恢复——那是内核机制问题，与占用无关。**第 1 条单独就足以否决 cgroup 路线。**
 3. **TC + `bpf_sk_assign` 不改写 IP/port**，只把 socket 关联到 skb，由内核 local-route 交付。这正是官方 sing-box 能读到真实目的的机制根源。
 
 **采纳失败语义框架**：admission-bounded fail-open。未入场的新 TCP 首 SYN / 当前 UDP datagram 在**可检测的 redirect 前**失败走 Direct；越过 admission boundary 后的内部失败只能 drop/reset，绝不中途 direct 泄漏。这是可实现且诚实的合同。
@@ -2028,7 +2038,51 @@ engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时�
 
 **若第 1 或 3 条不成立，D18 被证伪**：那说明该内核的 `sockfs_setattr` → `sk_uid` 链路或 AOSP 的 `fchown` 行为与源码不符。此时必须回到设计，重新在旧的"不捕获系统 DNS"与"全设备劫持 :53"之间选择，**不得**靠特判 :53 端口蒙过去。
 
-## 16.2 通过标准
+## 16.2 观测半场的实测结果（SM-S9180 / Android 16 / 5.15.211-Qkernel，2026-08-25）
+
+Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"）与**证伪半场**（Q1–Q9，需要加载 BPF）。下表是观测半场的结果,全部通过 `adb shell su -c` 只读采集,未加载任何程序、未修改任何对象。
+
+设备:SM-S9180 / SM8550(kalama) / Android 16 / SDK 36 / 安全补丁 2026-04-05 / **kernel 5.15.211-Qkernel**(恰为产品基线) / page size **4096** / root 为 KernelSU(`u:r:ksu:s0`)。
+
+### 16.2.1 与蓝图预测一致的（可以停止怀疑的）
+
+| 项 | 蓝图预测 | 实测 |
+|---|---|---|
+| `all.rp_filter` / `default.rp_filter` | 预期 0,但"必须检查而非假设"(§8.4) | **全部 0**,49 个 interface 无一例外 |
+| `accept_local` | 预期 0,需我们在 `flxrs1` 上设 1 | **全部 0** —— 确认必须设 |
+| `ip_forward` / `ipv6 forwarding` | 预期不需要打开(§8.4 推断) | **都是 0**,即 Q5 的测试条件就是设备原生状态 |
+| `ip_local_port_range` | listener 端口取 61000–65535 须在其上 | **32768–60999**,不重叠 |
+| `rmnet_data0` 链路类型 | ARPHRD_RAWIP ⇒ L3 分支强制(§3.3.1) | **ARPHRD_RAWIP(519)**,15 个 rmnet 全是 |
+| `wlan0` 链路类型 | ARPHRD_ETHER ⇒ L2 分支 | **ARPHRD_ETHER(1)** |
+| netd `ip rule` 最低 priority | 10000,故 1–9999 空闲(§8.3) | **最低 10000**,1–9999 **整段为空**,pref 100 可用 |
+| 路由表 20260 | 应在 netd 的 `1000+ifindex` 之外 | v4/v6 **均为空** |
+| fwmark 位占用 | 0–20 被 netd 用,21–28 空,31 是 wakeup(§3.1) | 实际用到 `0x7fefffff` 掩码 + **`0x80000000`(bit 31,`wakeupctrl` NFLOG)**。21–30 未见占用 |
+| GKI config | §4 的整张表 | **逐项命中**,含 `CONFIG_VETH/DUMMY/TUN/NET_SCH_INGRESS/NET_CLS_BPF/NET_ACT_BPF/BPF_SYSCALL/BPF_JIT/CGROUP_BPF/DEBUG_INFO_BTF/IP_MULTIPLE_TABLES/NF_CONNTRACK` |
+| `CONFIG_NETKIT` | 四个 GKI 分支全缺 | **缺失**,netkit 不可用 |
+| BTF | `SK_STORAGE` 需要 | `/sys/kernel/btf/vmlinux` **存在,5,779,111 字节** |
+| `clsact` 生命周期 | netd 随 interface 加入/离开网络创建与删除(§8.5.1) | **只有 3 个 UP 的蜂窝口(`rmnet_data0/1/8`)有 clsact;`wlan0` 没有**(当前未连接)。直接印证 |
+| `packages.list` | 10 字段,`uid = userId*100000 + appId` | **10 字段**,561 行,UID 范围 1000–10425 |
+
+### 16.2.2 与蓝图不一致、已据此改文档的
+
+**(a) cgroup 槽位不是常驻占用。** 见 §0.1 第 2 条的更正框。`bpftool cgroup show` 对根、`/apps`、`/system` 与全树遍历**全部返回空**,但 8 个 `cgroup_sock_addr` 程序确实已加载。结论:bpfloader 开机只 load+pin,按需 attach。
+
+**(b) AOSP 的 TC 优先级表描述的是"潜在冲突",不是当前状态。** §8.5.2 那张表来自 AOSP 源码常量,是对的;但**本机当前 `tc filter show` 在所有 interface 上都是空的**,`bpftool net show` 的 xdp/tc/flow_dissector/netfilter **四项全空**,而同时有 **29 个 `sched_cls` 程序已加载**。也就是说 tethering / CLAT / `tc police` / `dscpPolicy` 的程序都躺在那里等激活。实际含义:egress pref 1 在常态下是空闲的,§8.5.2 的共存设计仍然必要,但触发条件比预想的稀疏。
+
+### 16.2.3 蓝图完全没有预料到的
+
+| 发现 | 影响 |
+|---|---|
+| **14 个 `epdg0..13` 接口,全部 `ARPHRD_NONE`**(VoWiFi/ePDG 隧道) | §3.3 的 admission 会逐个遍历并排除它们(既非 ETHER 也非 RAWIP,且不叫 `v4-*`)。行为正确,但**接口清单比预期长得多**(49 个),admission 的日志与 `status` 输出要能承受这个规模而不刷屏 |
+| **`tun0` 处于 UP 且有 `uidrange 0-99999` 的 netd 规则**(netId 0x76) | 设备上**当前有 VPN 在跑**。按 §3.5,此时物理口上看到的是 VPN 的 outer socket,不是 app 的。**任何捕获测试在关掉 VPN 之前都不可信** |
+| **Samsung 自有 BPF 规模远超 AOSP**:86 个 prog pin / 115 个 map pin,含 `mnxbNetd`、`netlog`(5 个 ringbuf)、`semSmartHS`、`semUidBPF`、`tcpAccECN`、**`tosMarker`(`tos_policy_mobile_map`)** | `tosMarker` 与 §2.2.3(6) 的 DSCP 边界直接相关:除 AOSP 的 `dscpPolicy` 外,三星还有自己的 ToS 标记路径。被代理流量丢失 app 级标记这条**影响面比蓝图写的更大** |
+| **`qcom_qos_reset_POSTROUTING` 对本机源地址出向流量 `--set-xmark 0x0/0xffffffff`** | 高通 QoS 在 POSTROUTING **清空整个 fwmark**。我们不用 mark,所以无影响;但这条独立地证明了 §19 拒绝 mark 方案是对的——**在这台设备上 mark 根本活不到出口** |
+| **`memlock` rlimit 仅 64 KB** | kernel ≥ 5.11 用 memcg 而非 memlock 记账 BPF 内存,所以 5.15 上不受限。但若将来回落到更老内核,16 KiB ringbuf + 9 张 map 会撞上这个上限。记录备查 |
+| **`/system/bin/bpftool` 已存在**(v5.16.0 / libbpf v1.4) | Phase 0 证伪半场可以直接用它做 attach 验证与 map dump,不必自带工具 |
+| **旧架构残留仍在设备上**:`/data/adb/flux`、`/sys/fs/bpf/flux/`(空目录)、以及**仍然安装着的 `flux` 模块** | 在 0.9.0 上机测试前**必须清理**,否则新旧模块会争同一批对象与目录 |
+| `private_dns_mode = opportunistic` | D18 依赖的明文 DNS 路径在此模式下**确实存在**(机会性 DoT,失败回落明文)。但上游支持 DoT 时查询走 853 加密,那部分不在捕获范围内——与 §1.3 的残余边界一致 |
+
+## 16.3 通过标准
 
 - `2 family × 2 protocol` 的 TCP/UDP 原目的**逐字节**一致，4 个 socket 全部完成 readiness 核验。
 - 任何 pre-redirect 的未入场失败保留原 skb（真实目的侧能看到该连接直连成功）；任何 post-boundary 失败明确 drop（真实目的侧看不到任何字节）。
