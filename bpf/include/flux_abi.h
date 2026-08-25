@@ -25,6 +25,11 @@
 /* ------------------------------------------------------------------ magic */
 
 /* Bump on ANY layout, map-set or semantic change. Not related to SemVer.
+ * 0xF10C0903: map set 9 -> 12. Local addresses move from the bypass LPM tries
+ *             into dedicated exact HASH maps (self_addr_v4/v6) and a per-UID
+ *             byte counter is added (uid_stats). The listener addresses move
+ *             out of the range sing-box conventionally uses for fakeip.
+ *             See docs/blueprint.md D20, D21, D23.
  * 0xF10C0902: added the flx_verify probe program and FLUX_CNT_SAW_PACKET, for
  *             the positive liveness check in docs/blueprint.md section 8.5.4.
  *             Needed because a vendor filter at a lower TC preference can
@@ -41,7 +46,7 @@
  * kernel/userspace data contract and do not require a bump, because no BPF
  * program reads them. Only struct layouts and the map set do.
  */
-#define FLUX_ABI_MAGIC 0xF10C0902u
+#define FLUX_ABI_MAGIC 0xF10C0903u
 
 /* Guards against reading uninitialised or foreign socket storage. */
 #define FLUX_DECISION_MAGIC 0xD3C15100u
@@ -53,9 +58,23 @@
  * flux.bpf.c are documentation; the two MUST agree and a flux-core test
  * checks the table against this header.
  */
-#define FLUX_MAP_UID_POLICY   "uid_policy"    /* HASH        512   u32 -> u8   */
-#define FLUX_MAP_BYPASS_V4    "bypass_v4"     /* LPM_TRIE    128   NO_PREALLOC */
-#define FLUX_MAP_BYPASS_V6    "bypass_v6"     /* LPM_TRIE    128   NO_PREALLOC */
+#define FLUX_MAP_UID_POLICY   "uid_policy"    /* HASH       4096   u32 -> u8   */
+#define FLUX_MAP_BYPASS_V4    "bypass_v4"     /* LPM_TRIE  65536   NO_PREALLOC */
+#define FLUX_MAP_BYPASS_V6    "bypass_v6"     /* LPM_TRIE  65536   NO_PREALLOC */
+
+/* The device's own addresses, kept OUT of the LPM tries on purpose. They are
+ * always full-length prefixes, so a trie buys nothing over exact hashing, and
+ * HASH deletes cleanly as IPv6 privacy addresses rotate. It also sidesteps the
+ * LPM trie UBSAN crash present on 6.6.0-6.6.46 (blueprint D20, section 1.5.3a).
+ */
+#define FLUX_MAP_SELF_ADDR_V4 "self_addr_v4"  /* HASH        256   4B  -> u8   */
+#define FLUX_MAP_SELF_ADDR_V6 "self_addr_v6"  /* HASH        256   16B -> u8   */
+
+/* Per-UID byte and packet counters, updated ONLY on captured packets so
+ * unselected traffic is untouched. Carries no address, port or time series --
+ * nothing that could reconstruct browsing history (blueprint D23, 1.5.6).
+ */
+#define FLUX_MAP_UID_STATS    "uid_stats"     /* PERCPU_HASH 4096  u32 -> 16B  */
 #define FLUX_MAP_TCP_DECISION "tcp_decision"  /* SK_STORAGE  0     NO_PREALLOC + BTF */
 #define FLUX_MAP_CONTROL_ROOT "control_root"  /* ARRAY_OF_MAPS 1                */
 #define FLUX_MAP_CONTROL_LEAF "control_leaf"  /* ARRAY       1     inner        */
@@ -81,11 +100,19 @@
  */
 #define FLUX_LPM_MAX_ENTRIES        65536u
 
-/* Slots held back for the device's own addresses. IPv6 privacy extension
- * addresses rotate, so the reactor filters by IFA_FLAGS and evicts LRU within
- * this reserve rather than accumulating (section 1.5.4).
+/* Capacity of each self-address HASH map. No longer carved out of the LPM
+ * reserve, because local addresses live in their own maps now (D20). The
+ * reactor filters on IFA_FLAGS -- tentative and dadfailed are never inserted,
+ * deprecated is kept because existing connections still use it -- and evicts
+ * least-recently-seen within this bound as IPv6 privacy addresses rotate
+ * (section 1.5.4).
  */
-#define FLUX_LPM_SELF_ADDR_RESERVE     64u
+#define FLUX_SELF_ADDR_MAX_ENTRIES    256u
+
+/* uid_stats capacity. Matches uid_policy: a UID that can be selected must be
+ * countable.
+ */
+#define FLUX_UID_STATS_MAX_ENTRIES   4096u
 #define FLUX_FAULT_LATCH_MAX_ENTRIES 64u
 /* Power of two AND PAGE_SIZE aligned for both 4 KiB and 16 KiB pages. */
 #define FLUX_FAULT_RINGBUF_BYTES     16384u
@@ -157,11 +184,11 @@ struct flux_control {
 	__u32 flxrs1_ifindex;       /* 20  ingress anchor (diagnostics)        */
 	__u16 listen_port_v4;       /* 24  be                                  */
 	__u16 listen_port_v6;       /* 26  be                                  */
-	__u8 listen_v4[4];          /* 28  be, 198.18.0.2                      */
+	__u8 listen_v4[4];          /* 28  be, 198.51.100.1                      */
 	__u8 probe_remote_v4[4];    /* 32  be, 192.0.2.1                       */
 	__u16 probe_remote_port;    /* 36  be, 9                               */
 	__u8 pad0[2];               /* 38  MUST be 0                           */
-	__u8 listen_v6[16];         /* 40  be, 2001:db8::2                     */
+	__u8 listen_v6[16];         /* 40  be, 2001:db8:0:1::2                     */
 	__u8 probe_remote_v6[16];   /* 56  be, 2001:db8:ffff::1                */
 	__u32 selected_count;       /* 72  diagnostics only                    */
 	__u32 draining_count;       /* 76  diagnostics only                    */
@@ -191,11 +218,20 @@ struct flux_control {
  * (control/kern/tproxy.c, tproxy_dae0peer_ingress -> bpf_skb_change_type).
  */
 
-/* Fixed listener bind addresses. Both prefixes are permanently in the fixed
- * bypass set so a selected app can never target them and self-loop.
+/* Fixed listener bind addresses. Only these exact addresses are in the fixed
+ * bypass set -- not their prefixes. Bypassing a whole prefix was overkill:
+ * preventing a self-loop only requires that a selected app cannot target the
+ * listener itself.
  */
-#define FLUX_LISTEN_V4_STR "198.18.0.2"          /* RFC 2544 benchmarking  */
-#define FLUX_LISTEN_V6_STR "2001:db8::2"         /* RFC 3849 documentation */
+/* Moved out of 198.18.0.0/15 and 2001:db8::/32 deliberately. sing-box's fakeip
+ * conventionally uses 198.18.0.0/15 for v4, and the old choice put the whole
+ * /15 into the fixed bypass -- which made every fakeip address un-capturable,
+ * so fakeip failed silently and completely. The convention is theirs and older,
+ * so Flux moves. Only the exact listener address is bypassed now, not a prefix.
+ * See docs/blueprint.md D21 and section 9.0.
+ */
+#define FLUX_LISTEN_V4_STR "198.51.100.1"        /* RFC 5737 TEST-NET-2    */
+#define FLUX_LISTEN_V6_STR "2001:db8:0:1::2"     /* RFC 3849 documentation */
 #define FLUX_PROBE_REMOTE_V4_STR "192.0.2.1"     /* RFC 5737 TEST-NET-1    */
 #define FLUX_PROBE_REMOTE_V6_STR "2001:db8:ffff::1"
 #define FLUX_PROBE_REMOTE_PORT 9
@@ -218,6 +254,20 @@ struct flux_lpm_v6_key {
 	__u32 prefixlen; /* 0 */
 	__u8 addr[16];   /* 4  be */
 };                       /* size 20 */
+
+/* ------------------------------------------------------------- uid_stats
+ *
+ * Per-UID totals, updated ONLY on captured packets, so unselected traffic never
+ * touches this map and the section 14.1 budget is unaffected. Deliberately
+ * carries no address, no port and no time series: it answers "how much did this
+ * app send through the proxy" and nothing that could reconstruct where it went.
+ *
+ * size 16, align 8
+ */
+struct flux_uid_stats {
+	__u64 packets; /* 0 */
+	__u64 bytes;   /* 8 */
+};
 
 /* ----------------------------------------------------------------- fault */
 

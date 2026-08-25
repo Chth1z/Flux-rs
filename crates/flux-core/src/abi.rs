@@ -14,23 +14,43 @@
 
 /// Bumped on ANY layout, map-set or semantic change. Unrelated to SemVer.
 ///
+/// * `0xF10C0903` map set 9 to 12: local addresses move out of the bypass LPM
+///   tries into exact HASH maps, a per-UID byte counter is added, and the
+///   listener addresses move clear of sing-box's conventional fakeip range
+///   (blueprint D20, D21, D23).
 /// * `0xF10C0902` added the [`PROG_VERIFY`] probe program and
 ///   [`Counter::SawPacket`] for the positive liveness check (blueprint §8.5.4).
 /// * `0xF10C0901` dropped `peer_mac` / `host_mac`; ingress forces
 ///   `PACKET_HOST` instead (blueprint D17).
-pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0902;
+pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0903;
 
 /// Guards against reading uninitialised or foreign socket storage.
 pub const FLUX_DECISION_MAGIC: u32 = 0xD3C1_5100;
 
 // ------------------------------------------------------------------ map names
 
-/// `HASH`, 512 entries, `u32 -> u8`.
+/// `HASH`, `u32 -> u8`.
 pub const MAP_UID_POLICY: &str = "uid_policy";
-/// `LPM_TRIE`, 128 entries, `BPF_F_NO_PREALLOC`.
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only.
 pub const MAP_BYPASS_V4: &str = "bypass_v4";
-/// `LPM_TRIE`, 128 entries, `BPF_F_NO_PREALLOC`.
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only.
 pub const MAP_BYPASS_V6: &str = "bypass_v6";
+
+/// The device's own IPv4 addresses, kept out of the LPM trie on purpose.
+///
+/// They are always full-length prefixes, so a trie buys nothing over exact
+/// hashing, `HASH` deletes cleanly as addresses come and go, and it sidesteps
+/// the LPM trie UBSAN crash on 6.6.0–6.6.46 (blueprint D20, §1.5.3a).
+pub const MAP_SELF_ADDR_V4: &str = "self_addr_v4";
+/// The device's own IPv6 addresses. See [`MAP_SELF_ADDR_V4`].
+pub const MAP_SELF_ADDR_V6: &str = "self_addr_v6";
+
+/// `PERCPU_HASH`, per-UID byte and packet counters.
+///
+/// Updated only on captured packets, so unselected traffic is untouched.
+/// Carries no address, port or time series — nothing that could reconstruct
+/// browsing history (blueprint D23, §1.5.6).
+pub const MAP_UID_STATS: &str = "uid_stats";
 /// `SK_STORAGE`, `BPF_F_NO_PREALLOC`, requires BTF.
 pub const MAP_TCP_DECISION: &str = "tcp_decision";
 /// `ARRAY_OF_MAPS`, 1 entry: holds the current control leaf.
@@ -45,10 +65,13 @@ pub const MAP_FAULT_EVENTS: &str = "fault_events";
 pub const MAP_COUNTERS: &str = "counters";
 
 /// Every map symbol name the loader must bind, in declaration order.
-pub const MAP_NAMES: [&str; 9] = [
+pub const MAP_NAMES: [&str; 12] = [
     MAP_UID_POLICY,
     MAP_BYPASS_V4,
     MAP_BYPASS_V6,
+    MAP_SELF_ADDR_V4,
+    MAP_SELF_ADDR_V6,
+    MAP_UID_STATS,
     MAP_TCP_DECISION,
     MAP_CONTROL_ROOT,
     MAP_CONTROL_LEAF,
@@ -81,12 +104,18 @@ pub const UID_SELECTED_MAX: u32 = 1024;
 /// §1.5.1).
 pub const LPM_MAX_ENTRIES: u32 = 65536;
 
-/// LPM slots held back for the device's own addresses.
+/// Capacity of each self-address `HASH` map.
 ///
-/// IPv6 privacy extension addresses rotate, so the reactor filters on
-/// `IFA_FLAGS` and evicts LRU inside this reserve rather than accumulating
-/// (blueprint §1.5.4).
-pub const LPM_SELF_ADDR_RESERVE: u32 = 64;
+/// No longer carved out of the LPM capacity, since local addresses have their
+/// own maps now (D20). The reactor filters on `IFA_FLAGS` — `tentative` and
+/// `dadfailed` are never inserted, `deprecated` is kept because existing
+/// connections still use it — and evicts least-recently-seen within this bound
+/// as IPv6 privacy addresses rotate (blueprint §1.5.4).
+pub const SELF_ADDR_MAX_ENTRIES: u32 = 256;
+
+/// `uid_stats` capacity. Matches [`UID_POLICY_MAX_ENTRIES`]: a UID that can be
+/// selected must be countable.
+pub const UID_STATS_MAX_ENTRIES: u32 = 4096;
 /// `fault_latch` capacity.
 pub const FAULT_LATCH_MAX_ENTRIES: u32 = 64;
 /// Power of two AND page-size aligned for both 4 KiB and 16 KiB base pages.
@@ -107,10 +136,18 @@ pub const USER_ID_MAX: u32 = 999;
 
 // ------------------------------------------------------- listener identities
 
-/// RFC 2544 benchmarking address the TProxy listener binds for IPv4.
-pub const LISTEN_V4_STR: &str = "198.18.0.2";
+/// RFC 5737 TEST-NET-2 address the TProxy listener binds for IPv4.
+///
+/// Deliberately clear of `198.18.0.0/15`, which sing-box conventionally uses
+/// for fakeip. The old choice reserved that whole `/15` in the fixed bypass,
+/// which made every fakeip address un-capturable and broke fakeip silently and
+/// completely (blueprint D21, §9.0).
+pub const LISTEN_V4_STR: &str = "198.51.100.1";
 /// RFC 3849 documentation address the TProxy listener binds for IPv6.
-pub const LISTEN_V6_STR: &str = "2001:db8::2";
+///
+/// Narrowed from the whole `2001:db8::/32` for the same reason as
+/// [`LISTEN_V4_STR`], leaving the rest of the documentation range usable.
+pub const LISTEN_V6_STR: &str = "2001:db8:0:1::2";
 /// RFC 5737 TEST-NET-1 address used as the liveness probe remote.
 pub const PROBE_REMOTE_V4_STR: &str = "192.0.2.1";
 /// Documentation-range IPv6 liveness probe remote.
@@ -297,6 +334,25 @@ pub struct Control {
     pub pad1: [u8; 8],
 }
 
+// ------------------------------------------------------------------ uid_stats
+
+/// Per-UID totals, updated only on captured packets.
+///
+/// Unselected traffic never touches this map, so the §14.1 budget is
+/// unaffected. Deliberately carries no address, no port and no time series: it
+/// answers "how much did this app send through the proxy" and nothing that
+/// could reconstruct where it went (blueprint D23, §1.6.6).
+///
+/// C: `struct flux_uid_stats`, size 16, align 8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(C)]
+pub struct UidStats {
+    /// Captured packets attributed to this UID.
+    pub packets: u64,
+    /// Captured bytes attributed to this UID.
+    pub bytes: u64,
+}
+
 // --------------------------------------------------------------------- bypass
 
 /// LPM trie key for the IPv4 bypass set. C: size 8.
@@ -435,8 +491,8 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    LPM_SELF_ADDR_RESERVE < LPM_MAX_ENTRIES,
-    "self-address reservation would leave no room for user prefixes"
+    UID_STATS_MAX_ENTRIES >= UID_POLICY_MAX_ENTRIES,
+    "a UID that can be selected must be countable"
 );
 
 const _: () = assert!(
@@ -513,6 +569,14 @@ mod tests {
         assert_eq!(offset_of!(Control, bypass_v4_count), 80);
         assert_eq!(offset_of!(Control, bypass_v6_count), 84);
         assert_eq!(offset_of!(Control, pad1), 88);
+    }
+
+    #[test]
+    fn uid_stats_layout_matches_header() {
+        assert_eq!(size_of::<UidStats>(), 16);
+        assert_eq!(align_of::<UidStats>(), 8);
+        assert_eq!(offset_of!(UidStats, packets), 0);
+        assert_eq!(offset_of!(UidStats, bytes), 8);
     }
 
     #[test]

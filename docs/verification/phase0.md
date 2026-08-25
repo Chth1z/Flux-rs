@@ -19,7 +19,7 @@ Phase 0 在临时目录（`/tmp` 或独立 worktree）完成，只含一个最�
 *断言*：并发 100 条 connect，每个 socket 的 decision 恒定；`grep` 内核内存不增长；socket close 后 storage 计数回落。
 
 **Q2 — listener 身份、assign 与共绑**
-官方 sing-box `1.13.19` 以 `type:tproxy`、`listen:198.18.0.2`/`2001:db8::2` 启动后：4 个 socket 是否出现且 `SOCK_DIAG` inode 能与 `/proc/<pid>/fd` 交叉核验？`bpf_sk_lookup_tcp/udp` 返回的 `src_ip4/src_ip6/src_port/state/family` 是否与配置一致？`bpf_sk_assign()` 是否**成功**（即 sing-box 的 listener 确实没有 `SO_REUSEPORT`，否则会 `-ESOCKTNOSUPPORT`）？
+官方 sing-box `1.13.19` 以 `type:tproxy`、`listen:198.51.100.1`/`2001:db8:0:1::2` 启动后（地址按 D21 已移出 fakeip 惯用段）：4 个 socket 是否出现且 `SOCK_DIAG` inode 能与 `/proc/<pid>/fd` 交叉核验？`bpf_sk_lookup_tcp/udp` 返回的 `src_ip4/src_ip6/src_port/state/family` 是否与配置一致？`bpf_sk_assign()` 是否**成功**（即 sing-box 的 listener 确实没有 `SO_REUSEPORT`，否则会 `-ESOCKTNOSUPPORT`）？
 *断言*：4/4 socket 核验通过；assign 返回 0；`ss -lntpe`/diag 显示无 reuseport。
 
 **Q3 — TCP 生命周期**
@@ -37,7 +37,7 @@ v4/v6、connected 与 unconnected UDP 经 assign 后，sing-box 收到的 `IP_RE
 3. **clone 安全**：TCP 重传的 skb 是 `skb_clone`。L2 路径现在完全不写包，因此**本条只对 L3 有效**：确认 `bpf_skb_change_head` 后原始写队列 skb 未被破坏（大文件上传 + 人为丢包触发重传，校验对端收到的数据完整）。
 4. **GSO**：确认 TCP GSO 超级包（大文件上传，TSO 开启）能穿过 veth 并被本地栈正确处理；`CHECKSUM_PARTIAL` 在接收侧应被 `skb_csum_unnecessary` 跳过校验。依据：`__is_skb_forwardable()` 对 GSO skb 有显式豁免（v6.1 `include/linux/netdevice.h:3913-3917`），所以超级包会原样到达 peer。
 5. **UDP GSO（`UDP_SEGMENT`）**：QUIC 客户端（Cronet）会用 `UDP_SEGMENT` 发超级包。接收侧应由 `udp_queue_rcv_skb()` 的 `udp_unexpected_gso()` → `udp_rcv_segment()` 分段后再入 socket 队列。**必须实测**：让一个选中的 app 跑 QUIC 大流量，确认 engine 收到的是正确的一个个 datagram 而不是一个巨包。dae 曾因此在自己的客户端里默认关掉 UDP GSO（PR #391）——我们不能关 app 的，只能确认内核路径成立。
-6. **路由前置条件的最小集**：分别以 `all.rp_filter = 0/1`、`flxrs1.accept_local = 0/1`、**`ip_forward = 0/1`**、`arp_filter` 默认值跑矩阵，确定**真正必需的最小集**。§8.4 的预测是「需要 `flxrs1.rp_filter=0` + `accept_local=1` + `all.rp_filter=0`，不需要 `ip_forward`、不需要 `arp_filter`」；dae 三者都设了（`netns_utils.go:437-450`）。失败时**直接上 `pwru` + `kfree_skb_reason`**，不要猜（§8.4.1 有 dae 的原始 trace 可对照）。
+6. **路由前置条件的最小集**：分别以 `all.rp_filter = 0/1`、`flxrs1.accept_local = 0/1`、**`ip_forward = 0/1`**、`arp_filter` 默认值跑矩阵，确定**真正必需的最小集**。§8.4 的预测是「需要 `flxrs1.rp_filter=0` + `accept_local=1` + `all.rp_filter=0`，不需要 `ip_forward`、不需要 `arp_filter`」；dae 三者都设了（`netns_utils.go:437-450`）。失败时**直接上 `pwru` + `kfree_skb_reason`**，不要猜（§8.4 有 dae 的原始 trace 可对照）。
 7. **可达性与共存**：Flux 取到的 pref 之前没有终止 chain 的 classifier（用 §8.5.4 的存活验证判定，不靠 dump 推断）；`TC_ACT_UNSPEC` 之后后续 filter 的计数器仍在增长。
 
 *断言*：大文件双向传输 checksum 正确；`all.rp_filter=1` 时确实 martian-source 丢包（证明 §8.4 的检查是必要的，不是多余的保守）；`ip_forward=0` 下端到端成功（否则触发 §21 的范围变更）；后续 filter 计数器有增长。
@@ -80,7 +80,9 @@ engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时�
 
 6. 顺带验证 §1.3.5：在用户 JSON 里加一条 `{"package_name": ["<选中的包名>"], "outbound": "<某个出口>"}` 规则，确认它命中（`sing-box` debug 日志会打印匹配的 rule）。若 `tun.NewPackageManager` 在该设备失败，日志会有 warn，则 `package_name` 规则静默不匹配——记录为已知边界，不阻塞。
 
-**Q10 — 厂商 filter 在前时我们还会不会运行（阻塞项，2026-08-25 实测新增）**
+**若 Q9 的第 1 或 3 条不成立，D18 被证伪**：那说明该内核的 `sockfs_setattr` → `sk_uid` 链路或 AOSP 的 `fchown` 行为与源码不符。此时必须回到设计，重新在旧的"不捕获系统 DNS"与"全设备劫持 :53"之间选择，**不得**靠特判 :53 端口蒙过去。
+
+**Q10 — 厂商 filter 在前时我们还会不会运行（阻塞项，2026-08-25 实测新增；✅ 已通过，见 §16.5.4）**
 
 由 §8.5.3 的实测引出：三星在 `wlan0` egress 占据 `chain 0 / pref 1 / handle 0x1`，而 tc 的 priority 最小就是 1，所以我们只能排在它**后面**。而 `__tcf_classify` 一旦某个 filter 返回 `>= 0` 的动作就停止遍历——**如果厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，我们的程序一个包都收不到，同时 attach 本身完全成功、没有任何错误。** 这是本设计目前最可能"装上了但什么都没发生"的失效模式。
 
@@ -92,11 +94,9 @@ engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时�
 
 *断言*：pref 2 上的计数器在真实流量下增长；`NLM_F_EXCL` 对已占用的 pref 返回 `EEXIST` 而非静默成功；厂商重新 attach 后我们的 filter 仍在且仍在计数。
 
-**若第 1 或 3 条不成立，D18 被证伪**：那说明该内核的 `sockfs_setattr` → `sk_uid` 链路或 AOSP 的 `fchown` 行为与源码不符。此时必须回到设计，重新在旧的"不捕获系统 DNS"与"全设备劫持 :53"之间选择，**不得**靠特判 :53 端口蒙过去。
-
 ## 16.2 观测半场的实测结果（SM-S9180 / Android 16 / 5.15.211-Qkernel，2026-08-25）
 
-Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"）与**证伪半场**（Q1–Q9，需要加载 BPF）。下表是观测半场的结果,全部通过 `adb shell su -c` 只读采集,未加载任何程序、未修改任何对象。
+Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"）与**证伪半场**（Q1–Q10，需要加载 BPF）。下表是观测半场的结果,全部通过 `adb shell su -c` 只读采集,未加载任何程序、未修改任何对象。
 
 设备:SM-S9180 / SM8550(kalama) / Android 16 / SDK 36 / 安全补丁 2026-04-05 / **kernel 5.15.211-Qkernel**(恰为产品基线) / page size **4096** / root 为 KernelSU(`u:r:ksu:s0`)。
 
@@ -141,7 +141,7 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 | **`tun0` 处于 UP 且有 `uidrange 0-99999` 的 netd 规则**(netId 0x76) | 设备上**当前有 VPN 在跑**。按 §3.5,此时物理口上看到的是 VPN 的 outer socket,不是 app 的。**任何捕获测试在关掉 VPN 之前都不可信** |
 | **Samsung 自有 BPF 规模远超 AOSP**:86 个 prog pin / 115 个 map pin,含 `mnxbNetd`、`netlog`(5 个 ringbuf)、`semSmartHS`、`semUidBPF`、`tcpAccECN`、**`tosMarker`(`tos_policy_mobile_map`)** | `tosMarker` 与 §2.2.3(6) 的 DSCP 边界直接相关:除 AOSP 的 `dscpPolicy` 外,三星还有自己的 ToS 标记路径。被代理流量丢失 app 级标记这条**影响面比蓝图写的更大** |
 | **`qcom_qos_reset_POSTROUTING` 对本机源地址出向流量 `--set-xmark 0x0/0xffffffff`** | 高通 QoS 在 POSTROUTING **清空整个 fwmark**。我们不用 mark,所以无影响;但这条独立地证明了 §19 拒绝 mark 方案是对的——**在这台设备上 mark 根本活不到出口** |
-| **`memlock` rlimit 仅 64 KB** | kernel ≥ 5.11 用 memcg 而非 memlock 记账 BPF 内存,所以 5.15 上不受限。但若将来回落到更老内核,16 KiB ringbuf + 9 张 map 会撞上这个上限。记录备查 |
+| **`memlock` rlimit 仅 64 KB** | kernel ≥ 5.11 用 memcg 而非 memlock 记账 BPF 内存,所以 5.15 上不受限。但若将来回落到更老内核,16 KiB ringbuf + 12 张 map 会撞上这个上限。记录备查 |
 | **`/system/bin/bpftool` 已存在**(v5.16.0 / libbpf v1.4) | Phase 0 证伪半场可以直接用它做 attach 验证与 map dump,不必自带工具 |
 | **旧架构残留仍在设备上**:`/data/adb/flux`、`/sys/fs/bpf/flux/`(空目录)、以及**仍然安装着的 `flux` 模块** | 在 0.9.0 上机测试前**必须清理**,否则新旧模块会争同一批对象与目录 |
 | `private_dns_mode = opportunistic` | D18 依赖的明文 DNS 路径在此模式下**确实存在**(机会性 DoT,失败回落明文)。但上游支持 DoT 时查询走 853 加密,那部分不在捕获范围内——与 §1.3 的残余边界一致 |
@@ -234,7 +234,7 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 | 第 1、2 层结论能当普适前提吗 | **能**(第 2 层附带 GKI 例外的运行时验证要求) |
 | `rmnet = RAWIP`、因此需要 L3 分支 | **需要 L3 分支这个结论普适**(总有非以太的蜂窝口);但**具体名字与类型不普适**,必须按 ARPHRD 判定 |
 | 三星占 pref 1 这件事能外推吗 | **不能**。但"OEM 可能占 pref 1"作为**风险类别**普适,已据此改成动态选 pref + 存活验证 |
-| `rp_filter=0`、`ip_forward=0` 能外推吗 | 这是**内核默认值**且 AOSP 从不设置(§8.4.1),所以**大概率**如此;但厂商可以在 `init.rc` 里改,**§8.4 的运行时读取 + 冲突即响亮失败不能省** |
+| `rp_filter=0`、`ip_forward=0` 能外推吗 | 这是**内核默认值**且 AOSP 从不设置(§8.4),所以**大概率**如此;但厂商可以在 `init.rc` 里改,**§8.4 的运行时读取 + 冲突即响亮失败不能省** |
 | 一台设备够吗 | **不够,但它把设计从"猜"推进到了"知道要测什么"**。真正需要的补充样本是:一台**联发科**设备(验证 `ccmni` 的 ARPHRD)、一台 **6.6+ 新机**(验证 TCX 路径)、一台**非三星 OEM**(验证 pref 冲突的普遍性) |
 
 **这一节的方法论要求**:今后每次在新机型上跑 `tools/phase0/observe.sh`,结论都要按上面五层归类再写进文档。把 OEM 层的观察当成普适事实,是这份设计最容易犯的错。
