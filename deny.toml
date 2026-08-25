@@ -8,23 +8,21 @@ unsound = "all"
 ignore = []
 unused-ignored-advisory = "deny"
 
+# Every allowance below must be exercised by an actual dependency
+# (unused-allowed-license = "deny"), so this list IS the license inventory of
+# the tree. Extend it only together with the dependency that needs it.
 [licenses]
 allow = [
   "Apache-2.0",
-  "BSD-3-Clause",
   "GPL-3.0-only",
-  "ISC",
   "MIT",
   "Unicode-3.0",
-  "Zlib",
 ]
 confidence-threshold = 0.8
 include-dev = true
 unused-allowed-license = "deny"
 unused-license-exception = "deny"
-exceptions = [
-  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
-]
+exceptions = []
 
 [licenses.private]
 ignore = false
