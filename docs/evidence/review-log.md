@@ -1,0 +1,314 @@
+# 独立复核记录与更正对照
+
+> 原 blueprint.md 第 0 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
+>
+> 谁读这份：有人质疑某条断言的依据时，来查它是源码、实测还是推理。规范性合同仍是 `docs/blueprint.md`。
+
+---
+
+# 第 0 部分：独立复核与本文的修正
+
+## 0.1 我采纳前两版蓝图的什么
+
+**采纳核心数据路径**：
+
+> 受支持的 Android 物理 egress TC 按 socket UID + 目的 CIDR 做粗分流 → 命中 packet 经无地址专用 veth 回送 → veth peer TC ingress 用 `bpf_sk_assign()` 交给**官方未修改** sing-box 的 TProxy inbound。
+
+这是硬约束下唯一可行的组合，理由不是"eBPF 越多越好"，而是三条互相咬合的事实：
+
+1. **UDP 原目的无法用 cgroup SOCK_ADDR 恢复。** `IP_RECVORIGDSTADDR` 的 cmsg 由内核在 `udp*_recvmsg` 中**从 skb 的 IP 头**生成（`ip_cmsg_recv_offset` 读 `ip_hdr(skb)->daddr`），而 `BPF_CGROUP_UDP4_RECVMSG` hook 只能改写返回给用户态的 peer sockaddr。旧仓库的 token 方案因此对 UDP 是**伪证明**：map 自洽，engine 读到的 cmsg 仍是 token。任何"保留真实原目的且不改 engine"的方案都必须让**真实 IP/port header 抵达 TProxy listener**。
+2. **cgroup SOCK_ADDR 槽位是一个"随时可能被占、且占用时机不可预测"的共享资源。**
+
+   > **2026-08-25 实测更正。** 这一条我原先写的是"Android 15/16 已用 flags-0 **永久独占** root cgroup 的 SOCK_ADDR 槽位"，依据是归档的 `sm-s9180-sock-addr-occupancy-2026-08.md`。**在同一台设备上复测，该表述不成立**：`bpftool cgroup show` 对 `/sys/fs/cgroup`、`/sys/fs/cgroup/apps`、`/sys/fs/cgroup/system` 以及 `bpftool cgroup tree` 全树遍历，**返回的 attach 列表全部为空**；同时 `bpftool prog show` 显示 **8 个 `cgroup_sock_addr`、2 个 `cgroup_skb`、2 个 `cgroup_sockopt`、2 个 `cgroup_sock` 程序确实已加载**。参见 §16.2。
+   >
+   > 真实机制是：AOSP 的 bpfloader 在开机时**只 load + pin，不 attach**；attach 发生在对应功能被激活的时刻。所以槽位占用是**动态的**，不是常驻的。
+
+   这**削弱**了"槽位被占死"的说法，但**不改变结论**，理由反而更强了一层：一个只在 netd 激活某功能时才出现的冲突，比常驻冲突**更难处理**——它意味着产品可能在安装时工作正常，几小时后因为系统启用了某个特性而**静默失效**，且失效时机不可预测、不可复现。`hierarchy_allows_attach()` 对 flags-0 祖先拒绝后代同类型 attach 这条内核规则依然成立，只是触发时刻不确定。
+
+   可行的替代只剩"抢占 netd 槽位"（CHIZI/bpf2socks 的做法，会静默关掉 Android 自己的 connect hook）或"detach-promote-append"（无人实现，且 netd 重启即打架）。**产品不能建立在抢系统槽位、或建立在一个随时可能被系统收回的共享资源上。** 因此 0.9.0 **禁止任何 cgroup attach**。
+
+   注意第 1 条**不依赖**本条。即使槽位永远空着，UDP 原目的仍然无法用 cgroup 方案恢复——那是内核机制问题，与占用无关。**第 1 条单独就足以否决 cgroup 路线。**
+3. **TC + `bpf_sk_assign` 不改写 IP/port**，只把 socket 关联到 skb，由内核 local-route 交付。这正是官方 sing-box 能读到真实目的的机制根源。
+
+**采纳失败语义框架**：admission-bounded fail-open。未入场的新 TCP 首 SYN / 当前 UDP datagram 在**可检测的 redirect 前**失败走 Direct；越过 admission boundary 后的内部失败只能 drop/reset，绝不中途 direct 泄漏。这是可实现且诚实的合同。
+
+**采纳产品身份与范围收缩**：单一 `fluxd` + 官方零 patch sing-box；不做 nftables/TUN/SOCKMAP/多后端/远程订阅/WebUI/机型 catalog。
+
+## 0.2 我独立核验的地基事实
+
+| 断言 | 结论 | 依据 |
+|---|---|---|
+| `bpf_sk_assign()` 只在 TC ingress 合法，且在 6.5 之前**拒绝 `SO_REUSEPORT` socket**（`-ESOCKTNOSUPPORT`） | **已核验** | uapi 文档 + `net/core/filter.c`；SO_REUSEPORT 支持由 Lorenz Bauer 2023 系列（6.5）加入，**5.10/5.15 没有**。→ 注入的 inbound 必须不带 `SO_REUSEPORT`（见 §9.2）。 |
+| `bpf_sk_storage_get/delete` 与 `bpf_sk_fullsock` 在 `BPF_PROG_TYPE_SCHED_CLS/ACT` 可用 | **已核验** | `tc_cls_act_func_proto` 与 ebpf-docs 的 SCHED_ACT/SCHED_CLS helper 列表。 |
+| `skb->sk` 在 TC 是 `PTR_TO_SOCK_COMMON_OR_NULL`；`bpf_sk_fullsock()` 返回 `PTR_TO_SOCKET` 且**不取引用计数**；`bpf_sk_storage_get` 的 `arg2` 接受它 | **已核验** | Linux commit `46f8bc92758c`（引入 `__sk_buff->sk` + `bpf_sk_fullsock`，明示不 acquire reference）；`bpf_sk_storage_get_proto.arg2_type = ARG_PTR_TO_SOCKET`。 |
+| `BPF_MAP_TYPE_SK_STORAGE` 创建**强制要求 BTF**（`btf_key_type_id`/`btf_value_type_id` 非零、`max_entries==0`、`BPF_F_NO_PREALLOC`、`key_size==sizeof(int)`） | **已核验** | `bpf_sk_storage_map_alloc_check()`。→ 决定了加载器必须提供 BTF（见 §12.3）。 |
+| `CONFIG_VETH=y` 在 arm64 GKI `gki_defconfig`（android12-5.10 与 android13-5.15 均为 built-in） | **已核验** | `kernel/common` arm64 `gki_defconfig`。veth 不是可选模块，无需 `system_dlkm` 赌运气。 |
+| sing-box listen 字段**确实**支持 `bind_interface`/`routing_mark`/`reuse_addr`（1.12.0 起） | **已核验**（推翻我最初的怀疑） | 官方 `configuration/shared/listen` 文档。→ sentinel 方案技术上可行，我出于简化而删除，不是因为不可行（§0.3 D2）。 |
+| sing-box 1.13.0 **移除**了 inbound 上已弃用的 `sniff`/`sniff_override_destination`/`domain_strategy`/`udp_disable_domain_unmapping` | **已核验** | 同上文档的 deprecation 说明。→ 注入的 inbound **禁止**包含这些键。 |
+| sing-box TProxy 的 UDP 回写会**新建一个 socket、以 `IP_TRANSPARENT` 绑定原目的地址**再发给客户端 | **已核验** | 官方 issue #3646 明确描述该行为并记录"原目的端口被本机其他进程占用 → `address already in use`"。→ 必须把**本机自有地址**纳入 bypass（§0.3 D7）。 |
+| `cls_bpf` direct-action 返回 `TC_ACT_UNSPEC` 会**继续**同一 chain 的后续 classifier；`TC_ACT_OK` 会**终止** classifier chain | **已核验** | `cls_bpf_classify()` 对 `TC_ACT_UNSPEC` 执行 `continue`；`__tcf_classify()` 只在 `err >= 0` 时返回。→ egress"不接管"必须用 `TC_ACT_UNSPEC`，否则跳过 AOSP CLAT/OEM 后续程序。 |
+| `cls_bpf` 在 **ingress** 会 `__skb_push(skb, skb->mac_len)` 后再运行程序 | **已核验** | `cls_bpf_classify()`。→ ingress 程序看得到完整以太头。 |
+| `bpf_skb_change_head()` 的设计用途正是"L3 skb 补 MAC 头以便 redirect 进 L2 设备"，且**不需要重置 GSO** | **已核验** | 该 helper 源码注释原文。→ rmnet raw-IP / CLAT TUN 的处理方式被上游背书。 |
+| `eth_type_trans()` 会按目的 MAC 重新判定 `pkt_type`；不等于设备 MAC 即 `PACKET_OTHERHOST`，而 `ip_rcv()` 直接丢弃 `PACKET_OTHERHOST` | **已核验** | `eth_type_trans()` / `ip_rcv_core()`。→ 必须处理 `pkt_type`；**D17 选择在 ingress 用 `bpf_skb_change_type(PACKET_HOST)` 修正，而不是在 egress 改写 MAC**（§8.2）。 |
+| `IN_DEV_RPFILTER` 取 `max(all.rp_filter, dev.rp_filter)`，而 `IN_DEV_ACCEPT_LOCAL` 取 `or(all, dev)` | **已核验** | `include/linux/inetdevice.h` 的 `IN_DEV_MAXCONF` / `IN_DEV_ORCONF`。→ **只在 `flxrs1` 设 `rp_filter=0` 不够**；见 §8.4，这是前两版蓝图的实现级漏洞。 |
+
+## 0.3 我对前两版蓝图的修正（D1–D18）
+
+以下每条都是**本文与旧蓝图的实质差异**，实现者必须按本文执行。
+
+| # | 旧蓝图做法 | 本文做法 | 理由 |
+|---|---|---|---|
+| **D1** | egress 对每个 packet 做 `bpf_sk_lookup_tcp()` 反向查找 app full socket，再取 SK_STORAGE | 直接 `bpf_sk_fullsock(skb->sk)` 取 full socket | 省掉每包一次 socket hash 查找；并消除"反查到错误 socket / `sk_bound_dev_if` 不匹配导致查不到"的正确性风险。已核验 helper 可用且不需 release。 |
+| **D2** | 每 generation 注入 **4 个** inbound（actual v4/v6 + sentinel v4/v6，8 个 kernel socket），sentinel 带随机 `routing_mark` 作特权守卫 | 只注入 **2 个** inbound（`flux-in-v4` / `flux-in-v6`，4 个 kernel socket），删除 sentinel、mark、reject rule 与 egress 的第二次 lookup | sentinel 防御的是"恶意本地 app 抢绑"，而两版蓝图都在威胁模型里**明确声明不抵抗**该攻击。它保护的性质（liveness / 换代 fail-open）由 actual listener 的 lookup 已经完全提供。删掉去掉 2 个 inbound、4 个 socket、1 个 mark、1 条 route rule、1 次热路径 lookup 和整套 mark 语义。 |
+| **D3** | 内部以太头 source MAC 由 generation 一一编码（46 bit），boot 内禁止复用，ingress 逐包比对 | **不做 generation 编码**，不比对 MAC；来源边界就是设备本身。（本条最初还保留了"写固定 MAC pair"，后被 **D17 进一步取消**——egress 完全不写 MAC） | 该编码只防"换代瞬间 in-flight 的旧 packet 被错送给新 engine"。其后果是无害的：旧 SYN 被新 engine 当作一条新连接；旧 established 数据包在 ingress 不 assign、内核查不到 socket 直接 RST。用 46-bit 编码方案 + 逐包 6 字节比对换这个，是负收益。 |
+| **D4** | `flx_in` 内置由 `anchor_probe` 控制的 dead branch，使 program 持有全部 map 引用；crash 后从 TC program ID "reclaim" root maps，不可核验时禁止 detach | **删除 anchor 分支与 reclaim 机制**。daemon 启动时删除全部精确自有残留对象并重建 | reclaim 保护的是"已入场 TCP 的 SK_STORAGE 不丢失"，但 fluxd 死亡时 engine 因 `PDEATHSIG=SIGKILL` 必然一起死，那些 flow 已经无处可去。真正承担 fail-open 的是 **redirect 前的 listener lookup**（engine 没了 → lookup miss → 新流 Direct），它与 reclaim 无关。且 anchor 方案依赖"编译器不消除 dead branch"，还要用 `BPF_OBJ_GET_INFO_BY_FD` 事后验证——这是脆弱且不必要的复杂度。 |
+| **D5** | policy 热更新流程：publish `active=0` → 改 map → publish `active=1`；失败用内存快照回滚 | policy 热更新**不动 `active`**：先加（新 SELECTED / 新 bypass），后减（旧 UID 降级 DRAINING / 删旧 bypass）；失败不回滚，由 level-triggered reconcile 重算收敛 | 旧做法让"用户增删一个 app"这种低风险操作把**所有在场 TCP 连接的 packet 打成 drop**（`active=0` 期间 CAPTURED 必须 SHOT）。而 map 非原子更新的唯一后果是"窗口内的**新**连接看到混合策略"——新连接无论走 direct 还是 proxy 都是良性的。同时删掉快照/回滚代码，改用幂等收敛。 |
+| **D6** | 所有 IPv4 fragment / IPv6 Fragment Header 一律 Direct | ① 已有决策的 socket **不解析 L4** 直接按决策处理，因此已入场 TCP 的 fragment 跟随决策进入代理；② selected+active 的 UDP fragment 先按目的做 LPM bypass，未命中则 **drop**，绝不 direct | 旧规则是**数据泄漏**：一条已被代理的 TCP 流一旦发生 IP 分片，分片会被送到真实目的地。UDP 同理（首片进代理、后续片直连，既泄漏又破流）。修正后既无泄漏，又顺带让 CAPTURED 快路径省掉 L4 解析。 |
+| **D7** | 固定 bypass 只有回环/链路本地/多播 | 固定 bypass 追加 `198.18.0.0/15`、`2001:db8::/32`（listener 保留地址）；并由 reactor 从 rtnetlink 把**本机所有已配置单播地址**作为 `/32`、`/128` 动态注入 bypass | 已核验 sing-box TProxy 回写会 `IP_TRANSPARENT` 绑定原目的；若 app 访问本机自有地址上的服务而被捕获，回写 bind 会与真实本地服务**端口冲突**（官方 issue #3646）。捕获本机地址本身也毫无意义。 |
+| **D8** | package→UID 用 Android PackageManager 命令接口（`cmd package`），并解析 manifest 拒绝声明 `BIND_VPN_SERVICE` 的包 | 只读 `/data/system/packages.list` + `uid = user_id*100000 + app_id`；VPN provider 只在 `status`/`check` 里**告警**，不做硬门禁 | `cmd package` 走 binder，`service.sh` 在 late-start 运行时 `system_server` 可能未就绪，会引入启动顺序依赖与重试状态机。`packages.list` 是纯文件读取、可 inotify、无 binder。manifest 权限门禁需要 binder + 权限模型，而它防的只是"用户主动选了 VPN app"这一配置误用。 |
+| **D9** | 未限制可选 UID 范围 | **硬性只接受 app_id ∈ [10000, 19999]**（Android `FIRST_APPLICATION_UID..LAST_APPLICATION_UID`）；拒绝 root/system/isolated/sdk-sandbox | 结构性保证 engine（root，uid 0）永远不在 `uid_policy` 中，无需任何"自排除"逻辑；同时防止用户误选 `system_server` 这类会把设备打死的 UID。 |
+| **D10** | `build.rs` 用锁定版 `libbpf-rs`/`libbpf`，为 Android 静态构建 libbpf/libelf/zlib | **不链接 libbpf**（只 vendor 它的 header-only 宏，见 §12.1）。BPF 由 clang 编译，object 内嵌；加载器是 in-tree 的最小 Rust 实现（裸 `bpf(2)` + 自建 BTF blob + 按 map 符号名重定位） | ① 为 `aarch64-linux-android` 交叉构建 elfutils/libelf 是已知痛点；② 我们自著全部 ABI，不用 CO-RE，libbpf 的 99% 功能是负担；③ 本仓库现有 `crates/flux-platform/src/bpf/sys.rs`（661 行）已在同类设备上证明裸 syscall 路径可行；④ 交付物变成"纯 Rust + libc 单二进制"。 |
+| **D11** | 只有一个 product crate `fluxd` | 三个 crate：`flux-core`（纯逻辑、无 libc、可在 Windows 上 `cargo test`）+ `fluxd`（Linux/Android 运行时）+ `xtask`（构建打包） | 开发主机是 Windows。单 crate 意味着**本地一条单元测试都跑不了**（整个 crate 会拉进 Linux 专有代码）。`flux-core` 承载配置解析、CIDR canonicalize、UID 计算、effective JSON 生成、版本推导等全部纯决策逻辑，这些恰好是最值得单测的部分。删除旧 `flux-platform`/`flux-testkit`。 |
+| **D12** | 生产环境零 counter，只有 fault ringbuf | 增加 1 张 `PERCPU_ARRAY`（32 × u64），**只在决策/丢弃/故障事件上**自增，不在稳态每包上自增；`fluxd status` 读出 | "完全无可观测性"是真实的可用性缺陷：用户报"不生效"时无任何定位手段。per-CPU 自增在事件边上的成本是纳秒级且无锁。禁止 per-flow / PII / 地址级记录。 |
+| **D13** | 删除工作树与 `.git`，`git init` 全新历史 | ~~保留仓库与历史~~ → **所有者 2026-08-25 决定：按旧蓝图执行，删除 `.git` 后重新 `git init`** | 我原本建议保留历史（删 `.git` 不可逆且对产品零收益：历史不进 ZIP、不影响 fresh-install 语义）。所有者选择干净重建。技术设计完全不受影响；唯一后果是旧实现与审计出处只能从 §18.1 的仓库外归档目录查证，**因此归档步骤从"建议"升级为"必须"**。 |
+| **D14** | "新代码不得复制旧生产实现" | 数据面、策略/generation 机制**必须重写**；但 §18.3 列出的低层平台原语（rtnetlink 编解码、TC filter netlink、`bpf(2)` 封装、SEQPACKET、pidfd/进程、inotify、epoll）**应当移植并复审** | "全部从零"会把几千行已经调通的机械正确代码重写一遍，重新引入同类 bug。审计发现的缺陷集中在策略/抽象层，不在这些原语。 |
+| **D15** | egress 直接写包 / 原位覆盖以太头 | 对 skb 的任何写入**必须**先经 `bpf_skb_store_bytes()` 或 `bpf_skb_pull_data()`，禁止对可能 clone 的 skb 做裸直写 | TCP 重传路径的 skb 是 `skb_clone()` 的，共享数据缓冲区；裸直写会**破坏仍在写队列里的原始 skb**。两个 helper 都会经 `skb_ensure_writable()`/`bpf_try_make_writable()` 解共享。 |
+| **D16** | listener 绑定非本地地址但未把该地址纳入 bypass | `198.18.0.0/15` 与 `2001:db8::/32` 进固定 bypass | 否则 app 主动访问该地址段会被捕获并送进 listener，构成自环。 |
+| **D17** | egress 改写内部以太头的 dst/src MAC 以满足 `eth_type_trans()` | **egress 不改写 MAC**；ingress 调 `bpf_skb_change_type(skb, PACKET_HOST)`。control 结构删掉 `peer_mac`/`host_mac` | 见 §8.2 的对照表。结果：**L2 捕获稳态零 packet 写入、零 clone 复制**（TCP 重传 skb 是 clone，写它必然触发 `skb_ensure_writable()` 复制一份）；L3 只写 2 字节 EtherType；control 结构 104 → 96 字节。上游先例见 dae 的 `tproxy_dae0peer_ingress`。 |
+| **D18** | 系统 DNS 不在捕获范围（前两版蓝图与我前几轮的结论都错） | **系统 DNS 精准 per-app 捕获，零额外机制。** 因为 AOSP 用 `fchown()` 把明文 DNS socket 的 owner 改成发起解析的 app，而 `bpf_get_socket_uid()` 读的 `sk->sk_uid` 跟随 `fchown` | 见 §1.3.1–§1.3.4。这是本轮最重要的发现：`xt_owner` 读 `f_cred->fsuid` 所以看不到，eBPF 读 `sk_uid` 所以看得到——**整个 iptables 生态被迫全设备劫持 :53 的根因就在这里**。连带作废了前几轮设想的 `cookie_tag_map` 路线（不再需要读 AOSP 私有 map）与"engine 换专用 UID"的前提。 |
+
+## 0.4 我保留的旧蓝图关键结论
+
+- **4 KiB base page only**。官方 `sing-box-1.13.19-android-arm64` 资产四个 `PT_LOAD` 的 `p_align` 全为 `0x1000`，不满足 AOSP 16 KiB ELF 要求。0.9.0 在 `sysconf(_SC_PAGESIZE) != 4096` 时保持 Inactive/Direct，不启动 engine、不建数据面。不重编上游、不用 app 兼容模式冒充原生支持。
+- **`TC_ACT_UNSPEC` / first-applicable classifier** 合同（§8.5）。
+- **map-in-map + freeze 的不可变 control snapshot 发布协议**（§6.4）。
+- **generation 单调、pointer swap 是唯一 commit point**（§9.4）。
+- **不 attach cgroup、不写 Android fwmark、不动 netd RPDB、永不删除 `clsact`**。
+- **Phase 0 先于清库与编码**。
+
+## 0.5 克隆源码复核（2026-08-25）
+
+七个同类/上游项目已浅克隆到仓库外可丢弃目录 `clone/`（已加入 `.gitignore`，**永不进入产品树**）：`CHIZI-0618/AndroidTProxyShell`、`CHIZI-0618/box4magisk`、`taamarin/box_for_magisk`、`CHIZI-0618/sing-box@testing-ebpf-cilium`（commit `45a5bd8`）、`SagerNet/sing-box@v1.13.19`、`daeuniverse/dae`、`daeuniverse/honk`。下表是**逐行读源码**得到的事实，取代前几节里基于文档/搜索的间接引用。
+
+### 0.5.1 官方 sing-box `v1.13.19`：本设计依赖的四点全部成立
+
+| 断言 | 源码位置 | 结论 |
+|---|---|---|
+| tproxy listener 设置 `IP_TRANSPARENT`（v6 时另设 `IPV6_TRANSPARENT`），UDP 另设 `IP_RECVORIGDSTADDR`（v6 时另设 `IPV6_RECVORIGDSTADDR`） | `common/redir/tproxy_linux.go:15-32` | 成立 |
+| **整个代码树没有任何 `SO_REUSEPORT` / `ReusePort`** | 全树 `rg` 零命中 | **§9.2 的硬约束成立**：5.15 的 `bpf_sk_assign()` 不会返回 `-ESOCKTNOSUPPORT` |
+| TCP 原目的 = accepted conn 的 `LocalAddr()` | `protocol/redirect/tproxy.go:77` | 成立 |
+| UDP 原目的 = `IP(V6)_RECVORIGDSTADDR` cmsg | `protocol/redirect/tproxy.go:95` → `common/redir/tproxy_linux.go:46-59` | 成立 |
+| UDP 回写新建 socket 并 **bind 原目的地址** + `IP_TRANSPARENT` | `protocol/redirect/tproxy.go:136-149`（`ListenPacket(..., destination.String())` + `redir.TProxyWriteBack()`） | 成立 → **D7 的本机地址 bypass 是必需的**，否则原目的落在本机地址上时 bind 会与真实本地服务撞端口 |
+| `ListenOptions` 含 `BindInterface` / `RoutingMark` / `ReuseAddr` / `NetNs` | `option/inbound.go:66-88` | 成立（§9.3 禁止对注入 inbound 使用前两者的理由不变） |
+
+**一处需要修正的细节**：`redir.TProxy()` 第 16 行**无条件**设置 `SO_REUSEADDR`。所以 §9.1 里"禁止设置 `reuse_addr`"在效果上是多余的——sing-box 自己一定会设。真正重要的只有"不得有 `SO_REUSEPORT`"，而这一条由全树零命中保证。保留"不注入该键"是为了让 effective JSON 最小，不是为了改变 socket 行为。
+
+### 0.5.2 CHIZI sing-box eBPF 分支：确认它在 Android 上是"抢占 netd 槽位"
+
+这是对 §0.1(2) 最重要的一手验证。`common/ebpf/loader.go:207-218`：
+
+```go
+func attachProgramRaw(target int, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) error {
+    const allowMulti = 2
+    err := rawAttachProgram(target, program, attachType, allowMulti)   // 先试 BPF_F_ALLOW_MULTI
+    if err == nil { return nil }
+    if !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.EPERM) &&
+        !errors.Is(err, unix.ENOTSUP) && !errors.Is(err, unix.EOPNOTSUPP) {
+        return err
+    }
+    return rawAttachProgram(target, program, attachType, 0)            // 回落 flags=0
+}
+```
+
+在 Android 15/16 的 root cgroup（`flags=0` 被 netd 独占）上，这条路径必然走完全程：`link.AttachRawLink` 失败 → MULTI 因 flags 不匹配返回 `EPERM` → **`flags=0` 覆盖掉 netd 的程序**。而 `common/ebpf/cgroup_attachment.go:42` 的清理只 detach 名字前缀为 `sb_ebpf_` 的程序：
+
+```go
+if strings.HasPrefix(info.Name, "sb_ebpf_") { ... rawDetachProgram(...) }
+```
+
+**netd 的 `connect4/6`、`sendmsg4/6`、`recvmsg4/6` 被替换后不会被恢复，直到 netd 自己重启。** 这不是旧版本遗留——上面是 cilium 重构后的当前 commit。他们的 `common/ebpf/README.md` 全文没有出现 `netd`、`occupancy conflict`、`replace existing program` 之类的说明，即该行为未在文档中披露。
+
+**这条证据把"抢占槽位"从二手笔记升级为一手源码事实，是 0.9.0 禁止任何 cgroup attach 的直接依据（§3.2、§19）。**
+
+### 0.5.3 CHIZI 如何拿到系统 DNS：cgroup root + 端口 53 越过 UID 策略
+
+`common/ebpf/native/cgroup.bpf.c:491-494`（`sendmsg`/`connect` 三处同构）：
+
+```c
+bool force_dns     = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
+bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
+if (port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
+if (!force_dns && uid_bypassed(config)) return 1;      /* hijack 模式下 :53 跳过 UID 判定 */
+```
+
+组合起来是：**在 cgroup2 root 上 attach（因此看得见包括 netd 在内的所有 socket）+ `dns_mode: hijack` 时让端口 53 完全跳过 UID include/exclude**。这正是 §21.1 的选项 B（全设备 DNS 劫持），只是实现在 cgroup 层而不是 iptables 层。它**没有**做到 per-app DNS——它是放弃了 DNS 的 per-app 语义。
+
+自环防护上他们用的是 **TGID/PID**（`cgroup_program.go` 的 `selfTGID`，配 `config->engine_pid`），因为 cgroup hook 有进程上下文。**TC egress 没有这个上下文**（packet 可能在 softirq 中发出，`bpf_get_current_pid_tgid()` 不可用），所以我们若要做选项 B，只能靠专用非 root UID——这是 cgroup hook 相对 TC 的一项真实优势，也是 §21.1 里选项 B 代价的根源。
+
+他们自己的发布说明同样承认 per-app 边界：「包名策略只保证由目标 UID 直接创建的 socket。系统 DNS、DownloadManager、isolated process、SDK sandbox 等代发流量可能属于其他 UID」。
+
+### 0.5.4 AndroidTProxyShell：`local default dev lo` 在 Android 上是生产验证过的
+
+`tproxy.sh:1401-1418` / `1420-1435`：
+
+```sh
+ip  rule  add fwmark "$MARK_VALUE"  table "$TABLE_ID" pref "$TABLE_ID"
+ip  route replace local 0.0.0.0/0 dev lo table "$TABLE_ID"
+ip -6 rule  add fwmark "$MARK_VALUE6" table "$TABLE_ID" pref "$TABLE_ID"
+ip -6 route replace local ::/0 dev lo table "$TABLE_ID"
+```
+
+三点可迁移结论：
+
+1. **`local <default> dev lo` 的本地交付技巧在 rooted Android 上是生产做法**，不是纸面推断。§8.3 因此风险很低。
+2. **他们创建的链全部挂在 `mangle PREROUTING` 与 `mangle OUTPUT`，从不碰 `filter INPUT`**（链清单见 `tproxy.sh:968`）。他们的本机流量路径是 OUTPUT 打 mark → 策略路由送到 `lo` → 从 `lo` 重新入栈 → PREROUTING 的 TPROXY → **INPUT**。既然无需在 INPUT 开口就能工作，说明 **Android 默认的 `filter INPUT` 不会丢弃这类本地交付流量**。这实质性降低了 §16 Q6 的风险，但**不是完全证明**：他们的包 `iif = lo`，我们的包 `iif = flxrs1`，Android 可能有 `-i lo` 的快捷放行。Q6 仍要在设备上核。
+3. **他们从不设置 `rp_filter` 或 `accept_local`**（全脚本只写 `ip_forward` / `ipv6 forwarding`）。原因在内核里：`__fib_validate_source()` 有一条 `dev_match = dev_match || (res.type == RTN_LOCAL && dev == net->loopback_dev)` 的早退分支——**包从 `lo` 进来就直接过关**。我们的包从 `flxrs1` 进来，走不到这条分支，所以 §8.4 的 `rp_filter` 依赖是**本设计独有的新风险，没有任何现有项目替我们验证过**。Phase 0 Q5 必须实测。
+
+另外两点对照：
+
+- `tproxy.sh:1045-1046` 的 `BYPASS_IP` 链有 `-m addrtype --dst-type LOCAL -p udp ! --dport 53 -j ACCEPT`，即**显式绕过发往本机地址的流量**——独立印证了 D7。
+- `tproxy.sh:1002` 用 `-m owner --uid-owner "$CORE_USER" --gid-owner "$CORE_GROUP" -j ACCEPT` 排除内核自身，并在 `xt_owner` 不可用时回落到 `ROUTING_MARK`；`1370-1371` 在全局 DNS 劫持前先按 uid/gid 放行 core。**全设备 DNS 劫持必须配 core 自排除**，再次印证 §21.1 选项 B 的代价。
+- `tproxy.sh:1272-1279` 用 `CONNMARK --mark "$mark/0xff"` 并注释「PREROUTING 阶段加上 /$mark 掩码识别被 MIUI 染色的连接」——OEM 会往连接上盖自己的 mark。这是"不占用 Android fwmark"（§3.1）的又一条现实依据。
+
+### 0.5.5 dae / honk：进程身份来自 cgroup hook，Android 上不可移植
+
+`honk/crates/honk-ebpf/src/cgroup.rs`（dae `tproxy.c` 的 Rust 移植）里 `cgroup_sock(sock_create)`、`cgroup_sock_addr(connect4/6)`、`cgroup_sock_addr(sendmsg4/6)` 五个程序**只做一件事**：`update_map_elem_by_cookie(cookie)` 后返回 `CGROUP_ALLOW`，用来维护 `COOKIE_PID_MAP`。dae 的 `docs/en/how-it-works.md` 也写明进程名靠"在 cgroupv2 挂载点监控 socket/connect/sendmsg 系统调用"获得。
+
+**结论**：dae 的 per-process 能力依赖的正是 Android 已独占的那几个 attach type。它的 TC 数据面原语（TC → veth → `bpf_sk_assign`）可以借鉴，它的进程身份机制不能。
+
+### 0.5.6 AOSP DnsResolver / netd：per-app DNS 的源码链（D18 的依据）
+
+克隆了 `platform/packages/modules/DnsResolver`、`platform/packages/modules/Connectivity`、`platform/system/netd`。完整论证在 §1.3.1–§1.3.4，此处只列证据位置：
+
+| 事实 | 位置 |
+|---|---|
+| 明文 DNS 用**请求者 UID**，除非 `enforce_dns_uid` | `aosp-DnsResolver/res_send.cpp:789`、`:1092` |
+| `resolv_tag_socket()` 在 tag 之后**执行 `fchown(sock, uid, -1)`** | `aosp-DnsResolver/resolv_private.h:245-256` |
+| 官方文档口径："plaintext DNS queries are sent by the application's UID using `fchown()`"，默认 `false: set application uid on DNS sockets` | `aosp-DnsResolver/binder/android/net/ResolverOptionsParcel.aidl:48-57` |
+| **`iptables -m owner` 看不到 `fchown` 后的 UID** | `aosp-DnsResolver/tests/resolv_test_utils.h:48-49` |
+| DoT/DoH 刻意归属 `AID_DNS` | `aosp-DnsResolver/DnsTlsSocket.cpp:82`、`DnsTlsTransport.cpp:107`、`PrivateDnsConfiguration.cpp:593` |
+| netd 侧 tag 回调（`TAG_SYSTEM_DNS`） | `aosp-netd/server/main.cpp:92-95`、`FwmarkServer.cpp:297` |
+| 内核语义：`sk_uid` 随 `socket()` / `fchown()` / `accept()` 更新 | Linux commit `86741ec25462`（`sockfs_setattr()`） |
+
+### 0.5.7 bpf2socks / asteriskd：另一条路，以及从中直接照搬的工程细节
+
+`clone/bpf2socks` 的架构是 cgroup connect 改写到 token/本地地址 → **用户态 bridge**（`bridge_tcp.c` 1161 行 + `bridge_udp.c` 3282 行）→ SOCKS5。两点直接相关：
+
+- 它的 bridge socket **设置了 `SO_REUSEPORT`**（`bridge.c:95`、`:125`、`:152`、`:189`），并配一个 `SEC("sk_reuseport")` 程序（`tc_redirect.bpf.c:660`）在 reuseport 组内选 socket。**这条路与 `bpf_sk_assign` 互斥**：6.5 之前 assign 对 reuseport socket 直接返回 `-ESOCKTNOSUPPORT`（§0.2）。所以"engine listener 不得有 SO_REUSEPORT"不是我们的偏好，而是两种架构的分岔点。
+- 全树**没有** `bpf_sk_assign` / `bpf_redirect` / `bpf_sk_lookup`（`rg` 零命中）。它选择了在用户态复制字节，我们选择把 skb 直接交给内核 socket。前者多两次拷贝加一次上下文切换。
+- 它用**legacy `struct bpf_map_def SEC("maps")`**（`tc_redirect.bpf.c:113-137`）在 Android 上加载成功——独立印证了 §12.2「C 只声明 map 符号、参数真相源在 Rust 侧」这条路可行，不必依赖 BTF map 定义。
+
+**从这两个项目直接照搬进本蓝图的具体条目**（每条都已落到相应章节）：
+
+| 来源 | 照搬到 |
+|---|---|
+| TC filter 所有权按 `{TCA_BPF_ID, TCA_BPF_TAG, TCA_BPF_NAME, FLAGS, FLAGS_GEN}` 五路精确匹配（`asteriskd_tc_netlink.c:170-177`） | §8.5 的 ownership 谓词 |
+| netlink dump 属性 allowlist + 未知/重复即 foreign（`:141-157`） | §8.5 |
+| 双次 dump 比对的 TOCTOU 守卫（`bpf_util.c:411-454`） | §8.5 |
+| `clsact` 带 `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK` 判 foreign（`asteriskd_tc_netlink.c:333-341`） | §8.5 |
+| 只在独占创建时才删 `clsact`（`asteriskd_tc_plan.c:36-46`） | §8.5（我们更严：**永不删**） |
+| 1500 ms 尾随 debounce + overrun 触发全量重 dump（`asteriskd_network.c:147-164`） | §10.4.1 |
+| 每次 TC 操作前重新 `if_nametoindex`（`asteriskd_runtime.c:3806`） | §10.4.1 |
+| verifier log 因缓冲不足重试并恢复原 errno（`bpf_util.c:177-189`） | §12.7 第 3 条 |
+| `__NR_bpf` / 常量的按架构兜底（`bpf_util.c:16-36`） | §12.7 第 1–2 条 |
+| ELF sanity gate + `R_BPF_64_64` + map 名绑定表（`bpf_object.c:23-172`、`:250-257`） | §12.7 第 4–5 条 |
+| `BPF_PROG_GET_FD_BY_ID` 后复核 id（`bpf_util.c:352-370`） | §12.7 第 6 条 |
+| 能力判定=真实 attach 再 detach，绝不查版本（`connect_prog.c:1980-2013`） | §3.7、§12.7 第 10 条 |
+| child exec 前的固定顺序 + parent PID 复查 + `(pid, starttime)` 复合身份（`asteriskd_process.c:332-390`） | §13.3 |
+| readiness = "已验证的进程拥有那个特定端口"，不是"进程活着"（`asteriskd_process.c:572-666`） | §9.5 |
+| effect journal 的 `probe_original`/`apply`/`verify`/`undo` 与**重入时复用原始基线**（`asteriskd_effect_journal.c:84-109`、`:157-184`） | §15.4(1)；我们因为每次重建 veth 而不需要基线，但规则同源 |
+| 抽象 unix socket 作为自清理的单实例锁（`asteriskd_control.c:56`） | §10.3 记为**已评估的替代方案**：我们用 `flock` 是为了让 socket 路径可被 `uninstall.sh` 检查；抽象 socket 的自清理优点已由 §8.7 步骤 2 的"启动即删残留"覆盖 |
+
+**明确不照搬的**：shell out 到 `tc`（§12.8）、token 地址改写、`SO_REUSEPORT` 分片、用户态 pump、`IPPROTO_RAW` 兜底、丢弃 IPv6 DNS、":53 覆盖一切 bypass"、删除 Android tethering offload filter、手写 BPF 汇编器、"永不重启"策略。理由见 §19。
+
+### 0.5.8 dae 的 TC 数据面逐项对照（revision `caa6f5e`）
+
+**与本设计一致的部分（可作为先例引用）**：
+
+| 项 | dae 源码 | 与本设计的关系 |
+|---|---|---|
+| 不改写目的地址 | `tproxy.c:2455-2456` 注释原文："We cannot modify the dest address here." | 一致。**注意 dae 的英文文档 `docs/en/how-it-works.md:36` 仍写着 WAN egress 会改写目的并关闭 checksum，与当前 C 代码矛盾。引用 dae 时只引 C，不引该文档。** |
+| WAN（本机流量）在 **TC egress** 捕获，`bpf_redirect(dae0, 0)` 后在 **peer ingress** `bpf_sk_assign` | `tproxy.c:1518-1522`、`2822-2845` | 与 §2.1 完全同构 |
+| `bpf_sk_assign` **只对 UDP 与 TCP `SYN && !ACK`**，established TCP 直接回栈 | `tproxy.c:551-555`；`2836-2839` 注释："Established TCP can return to the stack without bpf_sk_assign." | 与 §7.5 的 I3 else 分支完全一致——这是一次独立印证，不是巧合 |
+| `bpf_skb_change_type(skb, PACKET_HOST)` 在 peer ingress | `tproxy.c:2833` | **D17 的直接先例** |
+| L3 链路用 `bpf_skb_change_head` 补 14 字节以太头，`h_proto` 取自 `skb->protocol` | `tproxy.c:1628-1644` | 与 §3.3 的 `flx_cap_l3` 一致 |
+| L2/L3 由链路 `EncapType` 决定，不猜 | `control_plane_core.go:348-363`（`none/ipip/ppp/tun` → L3，`ether` → L2） | 与 §8.6 按 ARPHRD 分类一致 |
+| TC 程序里**没有任何** checksum helper | 全 `control/kern/` 无 `bpf_csum_diff` / `bpf_l3_csum_replace` / `bpf_l4_csum_replace` | 印证 §0.2 的推理：不改 L3/L4 就不需要动 checksum，`CHECKSUM_PARTIAL` 能穿过 veth |
+| map 满时 fail-closed（宁可 drop 也不泄漏） | `tproxy.c:2287-2302` | 与 §2.2.2 同一取向 |
+
+**本设计比 dae 简单的地方（读者对照时会问"return leg 去哪了"）**：
+
+dae 把 listener 放在**独立 netns `daens`** 里，所以回程必须再穿一次 veth——它为此维护 `redirect_track` map（`tproxy.c:120-127`）保存原接口与 MAC，并在 `tproxy_dae0_ingress` 里恢复 MAC、按 `from_wan` 决定 `BPF_F_INGRESS`（`tproxy.c:2952-2980`）。**0.9.0 把 engine 放在与 app 相同的初始 netns（§3.9），回程就是普通本地路由经 `lo`**，因此不需要 `redirect_track`、不需要 MAC 恢复、不需要第二个 redirect 方向。这是"同 netns"这个决定换来的实质简化。
+
+**两条硬教训**：
+
+- **`bpf_redirect_peer` 不要用**，而且**比我原先以为的更彻底**。我此前只把它记成"因 CVE-2025-37959 被 dae 禁用（`netns_utils.go:220`、`bpf_utils.go:496-514`）的待评估优化"。逐行读内核后它其实**结构上就不适用**：`BPF_F_PEER` 分支要求 ① `skb_at_tc_ingress(skb)` 且 ② 目标设备在**不同** netns（v6.1 `net/core/filter.c:2458-2471`），我们是 egress 侧 + 同 netns，两条都不满足。dae 源码自己也写了"NOT supported in egress direction"（`tproxy.c:1518-1523`）。**结论：这不是延期项，是不存在的选项**，必须为每个捕获包预算一次完整 `dev_queue_xmit` + backlog/NAPI 跳（已计入 §14.1）。
+- **关于 `skb->mark` 的一处更正。** 我此前（D3、§7.5）写过"veth 会 scrub 掉 mark"，**这对本设计的拓扑是错的**。`____dev_forward_skb()` 调 `skb_scrub_packet(skb, xnet)`，而 `skb_scrub_packet` 只在 `xnet == true` 时清 `skb->mark`（v6.1 `net/core/skbuff.c:5518-5523`）；`xnet` 由 `!net_eq(dev_net(dev), dev_net(skb->dev))` 算出。**同 netns 的 veth ⇒ `xnet == false` ⇒ mark 保留。** dae 需要 netkit 的 `scrub=NONE`（`netns_utils.go:219`）是因为它**跨 netns**，我们不跨。
+
+  结论不变但理由要换：我们**不用** mark 跨 hook 传信息，原因是 ① 根本不需要传（设备本身就是 provenance 边界）；② 用 mark 就要占 Android 的 fwmark 位空间（§3.1）。**不是因为传不过去。** 这一条必须写清楚，否则实现者会基于错误前提做决策。
+
+- **`nf_reset_ct()` 与 `skb_dst_drop()` 无条件执行**（同一函数内）。后果：conntrack 在 veth peer 的 PREROUTING **重新建立**，因此 netfilter 对每条被代理的流会看到两次，Android 的流量统计除了 §2.2.3(4) 的双 leg 之外还有一层 conntrack 重复计数。这是 TPROXY 类方案的共性，不特殊处理。
+
+### 0.5.9 内核源码逐行核对轮：三处推翻、一处升级为日常事件
+
+最后一轮把 v5.10 / v6.1 / v6.6 / v6.12 的相关源文件与四个 GKI 分支的 `gki_defconfig` 拉下来逐行读，另外读了 `aosp-netd` 与 `aosp-Connectivity` 的路由/TC/CLAT 侧。产出分四类：
+
+**(a) 推翻了我此前写下的三处论证**（结论都还成立，但理由是错的，已就地更正）：
+
+| 我原来的说法 | 实际 | 处理 |
+|---|---|---|
+| "veth 会 scrub 掉 `skb->mark`"（D3、§7.5） | 只在**跨 netns** 时清；同 netns 保留 | 上一节已更正。结论保留，理由换成"不需要 + 不占 fwmark 位" |
+| "`bpf_redirect_peer` 是被 CVE 挡住的待评估优化" | egress + 同 netns，**结构上不可用** | 已从 §22.2 延期表移出，改写进 §19 与 §22.3 |
+| "重定向到 `lo` 的问题是 blast radius" | `loopback_xmit()` 调 `skb_dst_force()`，`ip_route_input()` 被跳过，包按 output rtable 的 `dst->input` **直接丢弃**——机制上根本不成立 | §19 已换成决定性理由 |
+
+**(b) 一条从"异常"升级为"日常"的运维事实**：netd 在每次 interface 加入/离开网络时删 `clsact`，netd 重启还会清空所有 interface 的 clsact（§8.5.1）。这改变了 §26 状态机的形状——必须把捕获侧漂移与核心漂移分成两条路径，否则每次 Wi-Fi 重连都会让全设备代理流量瞬断。
+
+**(c) 把若干"估计"换成一手依据**：netd 的 `ip rule` 最低 priority 是 10000 且路由表偏移 1000（⇒ 我们的 pref 100 / table 20260 安全，§8.3）；AOSP 的 TC 优先级占用表（§8.5.2）；四个 GKI 分支的 config 逐项核对且 `CONFIG_NETKIT` 全部缺失（§4）；`bpf_sk_assign` 的 reuseport 拒绝行为在 6.5 前后的确切差异（§9.2）。
+
+**(d) 一条明确评估后拒绝的重构提议**：因为 `skb->sk` 确实活到 veth peer ingress，理论上可以"egress 无条件 redirect、全部策略收进 ingress"。拒绝理由见 §19——那要求把未选中流量也 redirect 一遍再原路送回，等于放弃"未选流量只付 1 helper + 1 hash miss"这条性能地基。
+
+同一轮还确认了两件已有设计的正确性：`flx_cap_l2`/`flx_cap_l3` 的拆分是**强制**的（§3.3.1，否则蜂窝数据全丢且无计数器），以及 rp_filter / accept_local 的马丁源丢包在本拓扑下是**必然**而非概率事件（§8.4）。
+
+### 0.5.10 TC attach 策略的同类实现对照：我的核心问题没有先例
+
+针对 §8.5.3 发现的 pref 冲突，把语料里**所有真正 attach TC filter 的项目**逐个读了 attach 层。
+
+| 项目 | pref 怎么定 | 冲突怎么处理 | attach 后验证什么 | TCX | 不接管时返回 |
+|---|---|---|---|---|---|
+| **dae** | 硬编码（LAN egress 1 / ingress 2、WAN egress 2 / ingress 1，`control_plane_core.go:474-724`） | 先 `FilterDel` 再 `FilterAdd`，`EEXIST` 当成功 | **不验证** | 无 | **`TC_ACT_OK` 23 处** / `TC_ACT_PIPE` 4 处 |
+| **honk** | 不自己设，交给 aya | 交给 aya | 只记 link id | 无 | `TC_ACT_PIPE` 为主 |
+| **chizi**（Android） | 默认常量 **1**，可配置（`shared_network_tc.go:27`） | 先 `FilterList`，**只**在 handle 相同时报错 | 重新 `FilterList` 确认可见 | **有，TCX 优先 + clsact 回落** | **`TC_ACT_UNSPEC`** |
+| **asteriskd**（Android） | 硬编码 `pref 1 / handle 1`（`asteriskd.h:2567`） | **探测到该槽位被外人占用就拒绝启动**（`asteriskd_tc_plan.c:129-135`，`"foreign TC resource collision"`） | **netlink dump 复核自有 filter 的身份**（object id / tag / name / da 标志） | 无 | `TC_ACT_PIPE`（bpf2socks） |
+| **mihomo**（已移除的历史组件） | 硬编码 0 / 1 | 不检查，`FilterAdd` 失败即启动失败 | 不验证 | 无 | `TC_ACT_OK` 几乎所有分支 |
+| **AOSP** | 跨子系统协调的固定值 1–5 | `NLM_F_EXCL｜NLM_F_CREATE`，且 `tcm_handle = TC_H_UNSPEC`（**让内核分配 handle**） | 不验证执行 | 无 | — |
+
+**四条"无先例"的结论**（宁可知道没人解决过，也不要假定有人解决过）：
+
+1. **动态选 pref：没有任何项目做。** 全部硬编码或交给用户配置。
+2. **验证程序是否真的执行：没有任何项目做。** asteriskd 最接近，但它复核的是**身份**（"我装的那条还在不在、是不是我的"），不是**执行**（"包有没有真的进来"）。这两者在被前面的 filter 遮挡时给出完全相反的答案——身份检查会通过。
+3. **检测"同 pref、不同 handle 的外来 filter 在我们之前跑"：没有先例。** chizi 只比 handle，asteriskd 只比一个精确的 `(pref, handle)` 元组。
+4. **TCX 的相对定位：没有先例。** chizi 是唯一用 TCX 的，但它的 `link.AttachTCX` **不带任何 `BPF_F_BEFORE`/`BPF_F_AFTER`**（`shared_network_tcx.go:91-95` 实测无 anchor 参数）。
+
+**三条可以直接拿来用的：**
+
+**(a) chizi 给了 `TC_ACT_UNSPEC` 一个我没记录过的独立理由。** 我原先的理由只有"`TC_ACT_OK` 会终止 chain，跳过 AOSP CLAT 与 OEM filter"。chizi 的注释补上了 TCX 侧：
+
+```c
+// TCX only continues with later TCX programs and the legacy clsact chain for
+// TC_ACT_UNSPEC. TC_ACT_PIPE stops the TCX program array before being mapped
+// to "next", which can skip tethering programs attached after sing-box.
+#define SB_SHARED_ACT_CONTINUE TC_ACT_UNSPEC
+```
+
+也就是说在 TCX 上 **`TC_ACT_PIPE` 同样会截断**，只有 `TC_ACT_UNSPEC` 会继续走到后续 TCX 程序与 legacy clsact 链。这条让 §7 的"不接管一律 `TC_ACT_UNSPEC`"从"clsact 时代的正确选择"升级为"clsact 与 TCX 两条路径下都唯一正确"，因此 §22.2.1 的 TCX 分支**不需要改任何返回值**。
+
+**(b) dae 在 Android 上会遮挡系统 filter，我们的分歧是对的。** `dae/control/kern/tproxy.c` 里 `return TC_ACT_OK` 出现 **23 次**、`TC_ACT_PIPE` 4 次。在 Linux 路由器上无害；搬到 Android 就会跳过 AOSP CLAT 与全部 OEM 程序。这是 §0.5.8"只引 dae 的 `control/kern/*.c` 当机制参考、不照搬其策略"的又一个具体例证。
+
+**(c) asteriskd 的身份复核值得叠加，但不能替代存活验证。** 它在 attach 之后用 `RTM_GETTFILTER` dump 比对 object id、program tag、bpf name 与 `da` 标志（`asteriskd_tc_netlink.c:119-177`）。这抓的是"我们的 filter 被人替换/删除"，与 §8.5.4 抓的"我们的 filter 在但跑不到"是**两类不同故障**，两者都要有。前者本设计已由 §8.5 的所有权谓词 + `RTM_NEWTFILTER` 监视覆盖。
+
+**(d) 一处刻意与 AOSP 不同**：AOSP 用 `tcm_handle = TC_H_UNSPEC` 让内核分配 handle，代价是**它无法凭 handle 认出自己的 filter**。我们固定 `handle 0x1`（探测用 `0x3`），正是为了让所有权谓词能精确自证（§8.5、§8.9.5）。这个分歧是有意的。
+
+**唯一没能核实的**：`accept_local` / `rp_filter` 在各厂商内核上的实际默认值（AOSP 自己从不设置这四个 sysctl，值完全来自厂商 defconfig 与 `init.rc`），以及模块 SELinux 域能否写 `/proc/sys/net/ipv4/conf/*/accept_local`。两者都已在 Phase 0 有对应条目，处置方式是运行时读取 + 失败即响亮报错。
+
+---
+
