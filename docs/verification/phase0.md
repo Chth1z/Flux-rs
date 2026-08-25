@@ -332,3 +332,55 @@ probe invocations:     15   （8 个 CPU 的 per-CPU 值求和）
 存活验证机制**本身已被这次实验证实可行**——探测程序、per-CPU 计数、attach/detach、读计数，整条链路跑通了，用的正是 §8.5.4 规定的形态（独立探测程序 + `TC_ACT_UNSPEC` + per-CPU 计数器）。
 
 剩下的只是把它从脚本搬进 `fluxd`。
+---
+
+## 16.6 Q1 已通过（2026-08-25，SM-S9180 / 5.15.211，基线内核）
+
+**权威结果**：设备就在产品基线 5.15 上，不是排练。工具：`tools/phase0/q1_probe.bpf.c` + `tools/phase0/q1-run-device.sh`，程序按 §7.3 的 E1/E2/E3 逐步复刻，并直接 include 真实的 `bpf/include/flux_abi.h`。
+
+### 16.6.1 verifier 接受了核心组合
+
+```
+128: sched_cls  name q1_probe  tag 36d64a56ccd8ce31  gpl
+     xlated 864B  jited 876B  memlock 4096B  map_ids 130,129  btf_id 52
+```
+
+即：`bpf_sk_storage_get()` 作用于 `bpf_sk_fullsock(skb->sk)` 返回的指针、在 TC egress、配一张 BTF 定义的 `SK_STORAGE` map（value 为 `struct flux_decision`）——**这个组合是整个设计的地基，现在已被基线内核接受**。
+
+### 16.6.2 计数结果
+
+在 `rmnet_data0`（**ARPHRD_RAWIP**，蜂窝，当时的主网）egress pref 2 上挂 20 秒：
+
+| 槽位 | 值 | 含义 |
+|---|---:|---|
+| `SEEN` | 172 | 后续包找到了已存在的决策 |
+| `CREATED` | 15 | 首次决策 |
+| `RACE_LOSER` | 0 | 无并发竞争败者 |
+| `ALLOC_FAIL` | 0 | `F_CREATE` 从未返回 NULL |
+| `CORRUPT` | 0 | 存储值从未被改动 |
+| `NO_FULLSOCK` | 0 | 每个 `skb->sk` 都能取到 fullsock |
+| `NOT_TCP` | 24 | 非 TCP（UDP/ICMP），正确识别 |
+| 接口 tx delta | **211** | |
+
+**`172 + 15 + 24 = 211`，恰好等于接口 tx delta。** 这个精确吻合同时证明两件事：程序看到了**100%** 的出向包（该接口上没有被遮挡），且分类是**穷尽的**（没有落到任何未计数的分支）。
+
+结论：**决策一次一 socket，之后每个包都复用同一份且未被改动。** `SEEN` 远大于 `CREATED` 就是这句话的证据。
+
+### 16.6.3 副产物：一条会让实现者发懵的平台限制
+
+第一版探测用 `__sync_fetch_and_add(seq, 1)` 生成唯一 id，**基线内核拒绝加载**：
+
+```
+BPF program load failed: Unknown error 524
+processed 167 insns (limit 1000000) ... peak_states 15
+failed to load: -524
+```
+
+`524` = `-ENOTSUPP`。关键在日志形状：**verifier 通过了**（167 条指令零抱怨），失败在其后的 JIT。原因是取原子操作的**返回值**会生成带 `BPF_FETCH` 的 `BPF_ATOMIC`，而 arm64 在 5.15 上不实现它。换成 `bpf_ktime_get_ns()` 后立即加载成功——诊断由此确证。
+
+已写进 §7.5.0 作为硬规则。产品**天然满足**（`counters` / `uid_stats` 都是 per-CPU，无需原子；generation 由用户态发布），但调试时随手加一个全局计数器就会踩中，而 `-524` 毫无指向性。
+
+### 16.6.4 未覆盖的部分
+
+- **socket 关闭后存储释放**：`SK_STORAGE` 没有可枚举的条目，`bpftool` 不便直接观察。语义由内核保证（随 socket 生命周期），且 `ALLOC_FAIL = 0` 说明没有容量压力。列为"依赖内核语义，未独立验证"。
+- **高并发竞争**：`RACE_LOSER = 0`，说明 8 个 `curl` 没有真正撞在一起。要观察竞争需要更激进的并发（`tools/phase0/q1-run.sh` 的 netns 版本用 40–100 个并发 connect 更容易触发），但那是**语义确认**而非风险项——`F_CREATE` 的原子性由内核保证，且败者拿到胜者的值本身就是期望行为。
