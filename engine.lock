@@ -2,25 +2,37 @@
 #
 # Flux ships and runs the UNMODIFIED official release binary. There is no patch,
 # no fork and no rebuild step. `xtask` verifies the downloaded asset against the
-# digest below and refuses to package on mismatch.
+# digests below and refuses to package on any mismatch.
 #
 # The blueprint's data-plane contract was verified line by line against
-# SagerNet/sing-box v1.13.19; see docs/blueprint.md §0.5.1 and §9.
+# SagerNet/sing-box v1.13.19; see docs/blueprint.md §0.5.1 and §9. In particular
+# that revision sets only SO_REUSEADDR, IP_TRANSPARENT/IPV6_TRANSPARENT and
+# IP_RECVORIGDSTADDR/IPV6_RECVORIGDSTADDR on its tproxy listener, and never
+# SO_REUSEPORT -- which matters because bpf_sk_assign() rejects a reuseport
+# listener outright on every kernel below 6.5 (§9.2).
 #
-# TODO(phase-6): fill in digest and size from the official release asset before
-# the first packaged build. Left empty on purpose so that packaging fails loudly
-# rather than silently accepting an unpinned binary.
+# Verified 2026-08-25 by downloading the asset and hashing it locally. The
+# archive digest matches the digest GitHub reports for the release asset.
 
 [engine]
 name = "sing-box"
 version = "1.13.19"
-source = "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-android-arm64.tar.gz"
-archive_sha256 = ""
-binary_path_in_archive = "sing-box-1.13.19-android-arm64/sing-box"
-binary_sha256 = ""
-binary_size = 0
+released = "2026-08-17T09:47:06Z"
 
-# Recorded because it decides whether the module works on 16 KiB base-page
-# devices. Official assets are still 0x1000; fluxd itself is built with
-# p_align >= 0x4000 (docs/blueprint.md §3.8).
+archive_url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-android-arm64.tar.gz"
+archive_sha256 = "e737ac40187563673e1fc282aebf1774e09f3b2057203872798968a2126fab53"
+archive_size = 18106459
+
+binary_path_in_archive = "sing-box-1.13.19-android-arm64/sing-box"
+binary_sha256 = "8279e9a05a5ee4e0700989a70517a86da29490113c85d2f84316a837f9b56b02"
+binary_size = 58641280
+
+# GPL-3.0-or-later. Shipped alongside the binary; see THIRD_PARTY_NOTICES.md.
+license_path_in_archive = "sing-box-1.13.19-android-arm64/LICENSE"
+
+# Measured, not assumed: all four PT_LOAD segments of the official aarch64
+# binary are 0x1000 aligned. Flux therefore cannot claim 16 KiB base-page
+# support on the strength of the engine alone; fluxd itself is built with
+# p_align >= 0x4000 and the gap is documented in docs/blueprint.md §3.8 and
+# §22.2. Re-measure on every version bump.
 max_load_p_align = "0x1000"
