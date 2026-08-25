@@ -91,7 +91,7 @@
 {
   "ok": true,
   "version": "0.9.0",
-  "abi_magic": "0xF10C0901",
+  "abi_magic": "0xF10C0903",
   "state": "Disabled" | "Inactive" | "Active",
   "generation": 7,
   "engine": {

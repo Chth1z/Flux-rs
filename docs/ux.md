@@ -77,7 +77,7 @@ apps = [
 ]
 
 # 额外不走代理的目的网段。回环、链路本地、多播与 listener 保留段
-# 已经无条件 bypass，不需要在这里重复（见 blueprint §7.2）。
+# 已经无条件 bypass，不需要在这里重复（见 blueprint §11.2）。
 bypass_v4 = ["192.168.0.0/16"]
 bypass_v6 = []
 ```

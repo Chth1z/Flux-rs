@@ -64,3 +64,15 @@
 | 数据面 ABI | `../bpf/include/flux_abi.h`（`crates/flux-core/src/abi.rs` 是手写镜像，offset 在**编译期**断言） |
 | engine 资产 | `../engine.lock` |
 | 实测数据 | `../tools/phase0/results/`，只增不改 |
+| 研究引用的第三方源码 | `../tools/clone-manifest.md` + `../tools/reclone.sh` 重建 `clone/`（源码本身不进 git） |
+
+## 定稿状态
+
+**设计已定稿**（2026-08-25）。全部开放项已关闭，见 `decisions/rejected-and-deferred.md` §21.1。
+
+| | 状态 |
+|---|---|
+| Phase 0 观测半场 | ✅ 完成 |
+| Phase 0 Q10（唯一能推翻主路线的） | ✅ **通过** |
+| Phase 0 Q1–Q9 | ⬜ 待做，已授权，工具链无障碍 |
+| 已知能推翻主路线的技术未知项 | **无** |

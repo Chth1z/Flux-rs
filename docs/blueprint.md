@@ -1,10 +1,25 @@
 # Flux-rs 0.9.0 终极设计蓝图与开发指南
 
 - 文档编号：`FLUX-BP-0.9.0-FINAL`
-- 日期：2026-08-25（Asia/Hong_Kong）
-- 性质：**唯一实现合同**。取代 `audit/2026-08-24-final-ebpf-blueprint/final-blueprint.md`（`FLUX-BP-0.9.0`）与 `audit/2026-08-25-flux-rs-0.9.0-impl-blueprint/implementation-blueprint.md`（`FLUX-BP-0.9.0-IMPL`）。二者冲突处一律以本文为准。
+- **状态：已定稿**（2026-08-25，Asia/Hong_Kong）。全部开放项已关闭，见 `decisions/rejected-and-deferred.md` §21.1。
+- 性质：**唯一实现合同**。与 `docs/` 下任何其它文件冲突时以本文为准。
 - 读者：实现者（人或模型）。本文假设读者不了解旧仓库，也不需要读旧文档。
-- 配套文件：`reference/flux_abi.h`（BPF/用户态共享 ABI 真相源）、`reference/flux.bpf.c`（数据面骨架）。
+- ABI 真相源：`bpf/include/flux_abi.h`（`FLUX_ABI_MAGIC = 0xF10C0903`）；数据面骨架：`bpf/flux.bpf.c`。
+- 本文只是文档集的一部分，按读者拆分。导航与「章节编号 → 文件」映射见 `docs/README.md`。
+
+## 定稿时的证据状态
+
+写这一段是为了让实现者一眼看出**哪些能当前提用、哪些还要自己验**。
+
+| | 状态 |
+|---|---|
+| Phase 0 **观测半场** | ✅ 已完成（`verification/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
+| Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
+| Phase 0 **Q1–Q9** | ⬜ 待做。已授权，工具链无障碍（WSL 编 BPF → `adb push` → 设备自带 `bpftool`） |
+| 能推翻主路线的技术未知项 | **无** |
+| 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
+
+设计期共推翻自己**七次**，全部在 `evidence/review-log.md` §0.5 留有「原说法 / 实际 / 处置」对照。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
 
 ## 术语强度
 
@@ -39,7 +54,7 @@
 | root 管理器 | Magisk / KernelSU / APatch 共同模块信封 |
 | 引擎 | 官方 sing-box，版本由 `engine.lock` 权威（首发 `1.13.19`），零 patch |
 | 许可证 | Flux-rs 自有代码 `GPL-3.0-only`；第三方按原许可证 |
-| 数据面 ABI | `FLUX_ABI_MAGIC`（见 `reference/flux_abi.h`），与 SemVer 无关 |
+| 数据面 ABI | `FLUX_ABI_MAGIC`（见 `bpf/include/flux_abi.h`），与 SemVer 无关 |
 
 ## 1.2 0.9.0 必须做
 
@@ -207,11 +222,11 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 ---
 
-## 1.5 eBPF 能力边界：已评估的加速手段与容量
+## 1.6 eBPF 能力边界：已评估的加速手段与容量
 
 本节回答三个问题：分流够不够精准、eBPF 能不能做加速、能不能承载大规模 CIDR。它们是同一个问题的三面，所以放在一起。
 
-### 1.5.1 大规模 CIDR bypass：能，而且严格优于 ipset
+### 1.6.1 大规模 CIDR bypass：能，而且严格优于 ipset
 
 `BPF_MAP_TYPE_LPM_TRIE` 就是为这件事设计的。与旧版 Flux 的 `BYPASS_SET_BACKEND=zone|ipset` 相比：
 
@@ -226,7 +241,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 **因此 `FLUX_LPM_MAX_ENTRIES` 从 128 提到 65536。** 参考量级：`chnroute` 的 IPv4 列表约 1 万条，完全在范围内。批量装载用 `BPF_MAP_UPDATE_BATCH`（5.6+，基线 5.15 具备），一次 syscall 灌入上千条。
 
-### 1.5.2 但这不是"把路由策略搬进 Flux"
+### 1.6.2 但这不是"把路由策略搬进 Flux"
 
 §1.4 规定 Flux 只做 UID 粗分流，域名与规则归 sing-box。大 CIDR 集看似越界，**框架要摆正**：
 
@@ -239,7 +254,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 1. **只能按目的 IP，不能按域名。** 它补充而不取代 sing-box 的域名规则。
 2. **bypass 的判定在 sing-box 之前，且是终局的。** 若某域名解析到一个被 bypass 的 IP，即使用户在 sing-box 里希望它走代理，**也不会被捕获**。这个优先级必须在文档和 `explain` 输出里说明，否则会成为"我配了规则为什么不生效"的困惑来源。
 
-### 1.5.3 容量：实测暴露的缺陷
+### 1.6.3 容量：实测暴露的缺陷
 
 一台真机（SM-S9180）的 `packages.list` 里，`[10000,19999]` 范围内有 **429 个 app**。而原先的 `FLUX_UID_SELECTED_MAX = 128`、`FLUX_UID_POLICY_MAX_ENTRIES = 512`。
 
@@ -251,10 +266,10 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 |---|---:|---:|---|
 | `FLUX_UID_SELECTED_MAX` | 128 | **1024** | 覆盖"装满 app 的设备上全选"，实测 429，留一倍余量 |
 | `FLUX_UID_POLICY_MAX_ENTRIES` | 512 | **4096** | 必须容纳 selected + 一个 boot 内累积的 draining。HASH 预分配 4096 × 约 64 B ≈ 256 KB，可接受 |
-| `FLUX_LPM_MAX_ENTRIES` | 128 | **65536** | §1.5.1。`NO_PREALLOC` 强制，未用不占 |
-| `FLUX_LPM_SELF_ADDR_RESERVE` | 32 | **64** | §1.5.4 的 flag 过滤能压住 churn，但 IPv6 隐私地址仍会轮换 |
+| `FLUX_LPM_MAX_ENTRIES` | 128 | **65536** | §1.6.1。`NO_PREALLOC` 强制，未用不占 |
+| `FLUX_SELF_ADDR_MAX_ENTRIES` | 32 | **64** | §1.6.4 的 flag 过滤能压住 churn，但 IPv6 隐私地址仍会轮换 |
 
-### 1.5.3a 一个必须先处理的内核缺陷：LPM trie 在 6.6.0–6.6.46 会崩
+### 1.6.3a 一个必须先处理的内核缺陷：LPM trie 在 6.6.0–6.6.46 会崩
 
 把 CIDR bypass 建在 `LPM_TRIE` 上之前，有一个**内核崩溃**风险要处理，来源是 CHIZI 的 sing-box eBPF 分支文档（它在 Android 上长期实测）：
 
@@ -264,15 +279,15 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 三条处置：
 
-1. **本机地址集改用精确 HASH，不用 LPM。** 这一条独立于缺陷也成立，而且是更好的设计：本机地址永远是全长前缀（`/32`、`/128`），用 LPM 做精确匹配本就是浪费。HASH 是 O(1)、删除干净（对 §1.5.4 的 IPv6 隐私地址轮换尤其重要）。CHIZI 也正是这么规避的——"使用精确 HASH map 保存本机地址，规避部分 Linux 6.6 LPM trie 崩溃问题"。
+1. **本机地址集改用精确 HASH，不用 LPM。** 这一条独立于缺陷也成立，而且是更好的设计：本机地址永远是全长前缀（`/32`、`/128`），用 LPM 做精确匹配本就是浪费。HASH 是 O(1)、删除干净（对 §1.6.4 的 IPv6 隐私地址轮换尤其重要）。CHIZI 也正是这么规避的——"使用精确 HASH map 保存本机地址，规避部分 Linux 6.6 LPM trie 崩溃问题"。
    
-   因此 map 集从 9 张变 10 张：`bypass_v4` / `bypass_v6` 保留 `LPM_TRIE` 供**前缀**用，新增 `self_addr_v4` / `self_addr_v6` 用 `HASH` 存本机地址。`FLUX_LPM_SELF_ADDR_RESERVE` 随之取消——两者不再共用容量。
+   因此 map 集从 9 张变 12 张（D23 的 uid_stats 也在其中）：`bypass_v4` / `bypass_v6` 保留 `LPM_TRIE` 供**前缀**用，新增 `self_addr_v4` / `self_addr_v6` 用 `HASH` 存本机地址。`FLUX_SELF_ADDR_MAX_ENTRIES` 随之取消——两者不再共用容量。
 
 2. **大 CIDR 集仍需 LPM，因此必须版本门禁。** 内核在 6.6.0–6.6.46 区间且用户配了 `bypass.files` 时，**拒绝加载该策略并明确报告**，而不是照常加载然后等着崩。判定方式仍是运行时探测优先，但这一条**只能靠版本判断**——崩溃无法安全探测。这是全设计里唯一允许按版本 gate 的地方，理由要写在代码注释里。
 
 3. **固定 bypass 集（回环、私网、多播、listener）条目很少且全是短前缀**，风险面小，但为一致起见同样受第 2 条门禁保护。
 
-### 1.5.4 本机地址 bypass 必须按 address flag 过滤
+### 1.6.4 本机地址 bypass 必须按 address flag 过滤
 
 D7 规定把本机所有单播地址动态注入 bypass。**这个规定不完整**，旧版 Flux 的 `addrsyncd` 暴露了缺口——它的配置里有一项 `ignore_addr_flags`，可选值是 `temporary | optimistic | deprecated | tentative | dadfailed | stable_privacy | managetempaddr`。
 
@@ -282,26 +297,26 @@ D7 规定把本机所有单播地址动态注入 bypass。**这个规定不完�
 |---|---|
 | `tentative` | DAD 未完成，地址还不可用。此时注入是错的 |
 | `dadfailed` | 地址冲突，永不可用 |
-| `temporary` / `stable_privacy` | **IPv6 隐私扩展地址会定期轮换**（常见为每天）。不过滤就会持续累积，撑爆 `LPM_SELF_ADDR_RESERVE` |
+| `temporary` / `stable_privacy` | **IPv6 隐私扩展地址会定期轮换**（常见为每天）。不过滤就会持续累积，撑爆 `SELF_ADDR_MAX_ENTRIES` |
 | `deprecated` | 仍服务于既有连接，**要保留**——不能因为它被弃用就移除 bypass |
 
-因此 §10.4 的地址观测必须：读 `IFA_FLAGS`；`tentative`/`dadfailed` **不注入**；`deprecated` **保留**；`temporary`/`stable_privacy` 注入但**按 LRU 淘汰**，上限即 `FLUX_LPM_SELF_ADDR_RESERVE`。
+因此 §10.4 的地址观测必须：读 `IFA_FLAGS`；`tentative`/`dadfailed` **不注入**；`deprecated` **保留**；`temporary`/`stable_privacy` 注入但**按 LRU 淘汰**，上限即 `FLUX_SELF_ADDR_MAX_ENTRIES`。
 
-### 1.5.5 逐项评估过的加速手段
+### 1.6.5 逐项评估过的加速手段
 
 | 手段 | 结论 |
 |---|---|
 | **旧版的 `PERFORMANCE_MODE`**（`-m socket` + conntrack `--ctdir REPLY -j ACCEPT` 快路径） | **已被结构性超越。** 那是为了让已建立连接跳过规则链遍历；我们的 `tcp_decision`（`SK_STORAGE`）是 per-socket O(1) 查找，根本没有链可遍历（§7.3 的 E2 在 E3 之前）。无需移植 |
 | **旧版的 `MSS_CLAMP_ENABLE`**（钳制 TCP MSS 以修运营商网络） | **在本架构下结构性地不需要。** app 的 TCP 由本机 transparent socket **终结**，只走 app→veth→本地 socket，路径 MTU 是 veth 的 65535；sing-box 到服务器是**另一条** TCP 连接，由内核正常协商 MSS。app 的 TCP 从不穿越运营商路径，所以那个问题不会发生。这是终结型代理相对转发型的固有优势 |
 | **旧版的 `BLOCK_QUIC`** | **不需要，且属于错误的层。** 我们正确捕获 UDP，QUIC 会被交给 sing-box。若用户的出口不支持 UDP relay 而希望强制 TCP 回落，那是**策略**，应当写在 sing-box 的 route rule（`{"network":"udp","port":443,"outbound":"block"}`），不是 Flux 的开关 |
-| **`SOCKMAP` / `sk_msg` 内核内 splice** | **拒绝，两条独立理由。** ① 需要 sing-box 把自己的 socket 放进 sockmap，违反"官方未修改二进制"（§3.8）；② splice 只在不需要变换数据时成立，而代理的意义通常正是加密——唯一可 splice 的是 `direct` 出口，而那种流量我们本来就在 §1.5.1 里 bypass 掉了。零收益 |
+| **`SOCKMAP` / `sk_msg` 内核内 splice** | **拒绝，两条独立理由。** ① 需要 sing-box 把自己的 socket 放进 sockmap，违反"官方未修改二进制"（§3.8）；② splice 只在不需要变换数据时成立，而代理的意义通常正是加密——唯一可 splice 的是 `direct` 出口，而那种流量我们本来就在 §1.6.1 里 bypass 掉了。零收益 |
 | **XDP** | 不适用。XDP 只有入向、且在协议栈之前，**没有 socket 上下文**，拿不到 UID |
 | **`BPF_PROG_TYPE_SOCK_OPS`**（可用于设 MSS、拥塞控制等） | **禁止**。它是 cgroup attach 类型，§0.1 已全面禁止 cgroup attach |
 | **`bpf_redirect_peer` 省一跳** | 结构上不可用（§19）：要求 TC ingress 且跨 netns |
 | **GSO 超级包穿越 veth** | **这已经是一项加速**，且是免费的。`__is_skb_forwardable()` 对 GSO skb 有显式豁免，所以大包整个穿过 veth，遍历次数按段数下降（§16 Q4 已核实机制） |
-| **per-UID 字节/包计数** | **建议做**，见 §1.5.6 |
+| **per-UID 字节/包计数** | **建议做**，见 §1.6.6 |
 
-### 1.5.6 per-UID 计数：唯一建议新增的数据面功能
+### 1.6.6 per-UID 计数：唯一建议新增的数据面功能
 
 现有 counters 只在决策边沿递增（§6），所以能回答"有没有在工作"，但不能回答"哪个应用走了多少"。而后者是用户最常问的问题之一，也是"系统统计会翻倍"这条边界的直接补偿（§2.2.3(4)）。
 
@@ -528,8 +543,8 @@ Flux-rs/
 ├── LICENSE / README.md / CHANGELOG.md / THIRD_PARTY_NOTICES.md
 ├── licenses/…
 ├── bpf/
-│   ├── flux.bpf.c                 # 唯一 BPF 源文件（见 reference/flux.bpf.c）
-│   └── include/flux_abi.h         # C 与 Rust 共享 ABI 真相源（见 reference/flux_abi.h）
+│   ├── flux.bpf.c                 # 唯一 BPF 源文件（见 bpf/flux.bpf.c）
+│   └── include/flux_abi.h         # C 与 Rust 共享 ABI 真相源（见 bpf/include/flux_abi.h）
 ├── crates/
 │   ├── flux-core/                 # 纯逻辑，无 libc / 无 syscall / 跨平台可测
 │   │   └── src/
@@ -567,15 +582,18 @@ Flux-rs/
 
 # 第 6 部分：BPF ABI
 
-`bpf/include/flux_abi.h` 是唯一真相源，见 `reference/flux_abi.h`。`flux-core/src/abi.rs` 是手写镜像，并**必须**带 `#[test]` 断言每个 `size_of` / 字段 offset 与 C 一致（`xtask` 在 CI 里用 clang 打印 offset 对照）。改动任何布局**必须**同时改 `FLUX_ABI_MAGIC`。
+`bpf/include/flux_abi.h` 是唯一真相源，见 `bpf/include/flux_abi.h`。`flux-core/src/abi.rs` 是手写镜像，并**必须**带 `#[test]` 断言每个 `size_of` / 字段 offset 与 C 一致（`xtask` 在 CI 里用 clang 打印 offset 对照）。改动任何布局**必须**同时改 `FLUX_ABI_MAGIC`。
 
-## 6.1 map 集合（稳态 9 个 kernel object）
+## 6.1 map 集合（稳态 12 个 kernel object）
 
 | 名称 | 类型 | key | value | max_entries / flags |
 |---|---|---|---|---|
-| `uid_policy` | `HASH` | `__u32 uid` | `__u8` (`FLUX_UID_*`) | 512 |
-| `bypass_v4` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` | 128，`BPF_F_NO_PREALLOC` |
-| `bypass_v6` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` | 128，`BPF_F_NO_PREALLOC` |
+| `uid_policy` | `HASH` | `__u32 uid` | `__u8` (`FLUX_UID_*`) | 4096 |
+| `bypass_v4` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` | 65536，`BPF_F_NO_PREALLOC`（内核强制，故 `max_entries` 只是上限） |
+| `bypass_v6` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` | 65536，同上 |
+| `self_addr_v4` | `HASH` | `__u8[4]` | `__u8` | 256（D20：本机地址是全长前缀，不进 LPM） |
+| `self_addr_v6` | `HASH` | `__u8[16]` | `__u8` | 256，同上 |
+| `uid_stats` | `PERCPU_HASH` | `__u32 uid` | `struct flux_uid_stats`（16 B） | 4096（D23，只在已捕获包上更新） |
 | `tcp_decision` | `SK_STORAGE` | `int`（隐式） | `struct flux_decision`（16 B） | 0，`BPF_F_NO_PREALLOC`，**需 BTF** |
 | `control_root` | `ARRAY_OF_MAPS` | `__u32 0` | 当前 leaf 引用 | 1 |
 | `control_leaf` | `ARRAY`（inner） | `__u32 0` | `struct flux_control` | 1，写满后 `BPF_MAP_FREEZE` |
@@ -583,7 +601,7 @@ Flux-rs/
 | `fault_events` | `RINGBUF` | — | `struct flux_fault_event`（32 B） | 16384 bytes |
 | `counters` | `PERCPU_ARRAY` | `__u32 idx` | `__u64` | 32 |
 
-- 发布期短暂同时存在 old/new 两个 `control_leaf`，其它时刻共 9 个。
+- 发布期短暂同时存在 old/new 两个 `control_leaf`，其它时刻共 12 个。
 - `fault_events` 固定 16384 是同时满足"2 的幂且 PAGE_SIZE 对齐"在 4 KiB 与 16 KiB 下的最小通用值，避免 ABI 分叉。
 - map 默认**不 pin**。
 - **禁止**引入会让 selected packet 全局争用的 `bpf_spin_lock`、per-packet telemetry、per-flow map，或声称大 struct 的 `ARRAY` update 是原子的。新增任何 map 必须写明热路径与生命周期成本。
@@ -603,7 +621,7 @@ struct flux_decision {
 
 ## 6.3 `flux_control`（不可变 snapshot）
 
-字段见 `reference/flux_abi.h`。要点：
+字段见 `bpf/include/flux_abi.h`。要点：
 
 - `abi_magic`、`generation`、`active`；
 - `flxrs0_ifindex`（redirect 目标）、`flxrs1_ifindex`；
@@ -836,7 +854,9 @@ I4  if UDP:
 
 **硬不变量：同一 boot 内任何曾可能创建过 TCP decision 的 UID entry 都不得从 `uid_policy` 删除**，只能保留为 `SELECTED` 或 `DRAINING`。这维持了"UID miss ⇒ 走最短 Direct 路径"的语义（否则删除后旧 CAPTURED socket 的包会在 E1 就 `UNSPEC`，泄漏到真实目的）。`DRAINING` entry 最晚在设备重启后消失。
 
-上限：总 UID entry ≤ 512，其中 SELECTED ≤ 128。候选配置若会超限，热更新被拒绝并保持当前策略。
+上限：总 UID entry ≤ 4096，其中 SELECTED ≤ 1024。候选配置若会超限，热更新被拒绝并保持当前策略。
+
+这两个数字是按实测定的，不是猜的：一台真机 `[10000,19999]` 范围内有 **429** 个 app，所以原先的 512/128 让"代理全部第三方应用"结构上不可能；而上一段那条"`DRAINING` 永不删除"的不变量意味着每改一次选择都会累积条目，429 选中再改几次就撑爆 512（§1.6.3）。
 
 ---
 
@@ -1126,8 +1146,8 @@ int flx_verify(struct __sk_buff *skb) {
 2. **清理**：按 ownership 谓词枚举并删除全部残留自有对象（TC filter、RPDB rule、route table 条目、veth）。发现"同名但不匹配"的对象 → 冲突，Inactive 并报告。
 3. 检查 `all.rp_filter`；创建 veth、设置 MTU/sysctl/UP。（**不需要读 MAC**——D17 之后 control 结构里没有 MAC 字段。）
 4. 创建 route table 20260 条目与两条 RPDB 规则。
-5. 加载 BTF 与 9 个 map、3 个 program；注册 ringbuf 到 epoll；publish 初始 frozen `active=0` leaf。
-6. 解析 `packages.list` 与配置，填充 `uid_policy` 与两张 LPM（含固定 + 本机地址 bypass）。
+5. 加载 BTF 与 12 个 map、4 个 program（含 §8.5.4 的 `flx_verify` 探测程序）；注册 ringbuf 到 epoll；publish 初始 frozen `active=0` leaf。
+6. 解析 `packages.list` 与配置，填充 `uid_policy`、两张 bypass LPM（固定 + 用户 CIDR）与两张 `self_addr` HASH（本机地址，D20）。
 7. 生成 effective JSON → `sing-box check` → 启动 child → 等待 4 个 socket 通过 SOCK_DIAG + PID/inode 核验。
 8. 在 `flxrs1` 创建 `clsact` 并 attach `flx_in`（**先于** egress，保证回送侧就绪）。
 9. 逐个处理可支持的 interface（每个独立，失败只排除该 interface）：按 §8.5.3 dump 该 parent 选出可用 pref → 按 §8.5.4 挂 `flx_verify` 做存活验证 → 通过后卸下探测、在同一 pref 挂 `flx_cap_l2`/`flx_cap_l3`。
@@ -1278,25 +1298,27 @@ dump 用 `RTM_GETTFILTER` + `NLM_F_DUMP`，`tcmsg{ tcm_ifindex, tcm_parent }`。
 
 移植旧版 Flux 的 `conf/template.json` 时发现的，**属于设计缺陷而非配置错误**，因为它源于两边各自都合理的选择。
 
-sing-box 的 `fakeip` 默认地址段是 `198.18.0.0/15`（v4）与 `fc00::/18`（v6）。而 Flux 的固定 bypass 集（§7.2、D16）包含：
+> **已处置（D21，2026-08-25）。** 本节保留为记录：症状是"DNS 正常、应用连得上、什么都打不开"，几乎不可能靠猜诊断出来，所以值得写下来。
 
-- `198.18.0.0/15` —— 因为 listener 绑在 `198.18.0.2`，整段进 bypass 以防自环；
+sing-box 的 `fakeip` 默认地址段是 `198.18.0.0/15`（v4）与 `fc00::/18`（v6）。而 Flux **当时**的固定 bypass 集（§11.2、D16）包含：
+
+- `198.18.0.0/15` —— 因为 listener 曾绑在 `198.18.0.2`，整段进 bypass 以防自环；
 - `fc00::/7` —— 作为 ULA 私有地址段。
 
 **两边完全重叠。** 后果是致命的：fakeip 的全部意义就是让应用连向那个假地址、然后被代理截获；而被 Flux bypass 意味着**那些包根本不会被捕获**。fakeip 会静默地完全失效——DNS 返回假地址，应用连上去，包直连出去，然后什么都连不上。
 
 ### 9.0.1 处置
 
-**第一，把 listener 的 bypass 从整个前缀收窄。** 原本 bypass 整个 `/15` 与 `/32` 是过度的：防自环只需要 bypass **listener 的确切地址**。这一条独立成立，与 fakeip 无关。
+**第一，把 listener 的 bypass 从整个前缀收窄到确切地址。** 原本 bypass 整个 `/15` 与 `/32` 是过度的：防自环只需要"选中 app 不能连上 listener 本身"。这一条独立成立，与 fakeip 无关。
 
-**第二，listener 地址移出 fakeip 的惯用段。** fakeip 用 `198.18.0.0/15` 是这个生态的既成惯例，用户有肌肉记忆；Flux 选 `198.18.0.2` 只是"某个不可路由地址"，任意性更高。**该让的是 Flux。** 建议改为：
+**第二，listener 地址移出 fakeip 的惯用段。** fakeip 用 `198.18.0.0/15` 是这个生态的既成惯例且更早，用户有肌肉记忆；Flux 原先选 `198.18.0.2` 只是"某个不可路由地址"，任意性更高。**该让的是 Flux。** 已改为：
 
-| | 现在 | 建议 |
+| | 原 | 现 |
 |---|---|---|
-| v4 listener | `198.18.0.2` | `198.51.100.1`（RFC 5737 TEST-NET-2） |
-| v4 bypass | `198.18.0.0/15` | `198.51.100.0/24` |
-| v6 listener | `2001:db8::2` | `2001:db8:0:1::2` |
-| v6 bypass | `2001:db8::/32` | `2001:db8:0:1::/64` |
+| v4 listener | `198.18.0.2` | **`198.51.100.1`**（RFC 5737 TEST-NET-2） |
+| v4 bypass | `198.18.0.0/15` | **`198.51.100.1/32`** |
+| v6 listener | `2001:db8::2` | **`2001:db8:0:1::2`** |
+| v6 bypass | `2001:db8::/32` | **`2001:db8:0:1::2/128`** |
 
 v6 的 fakeip 段则**必须由模板避开 ULA**（`fc00::/7` 作为私有地址段的 bypass 是正当的，不该为 fakeip 让路），建议 `2001:db8:f::/48`。
 
@@ -1304,14 +1326,14 @@ v6 的 fakeip 段则**必须由模板避开 ULA**（`fc00::/7` 作为私有地�
 
 同类的交叉校验还应覆盖：`fakeip` 段与 `tun` 段（若用户自己加了 tun）、`clash_api` 的监听地址是否为回环、以及用户在 `bypass.files` 里加载的大列表是否意外包含了 fakeip 段。
 
-> **状态：模板已按上表调整并加了注释（`module/template.json`），但 `flux_abi.h` 里的 listener 地址常量尚未改动。** 那一改会牵动 §7.2 的固定 bypass 清单、§8.9 的 netlink 规格与 `abi.rs` 的断言，属于需要一次完整改动的事项，不适合仓促进行。列为待办。
+> **状态：已全部落地（2026-08-25 定稿）。** `bpf/include/flux_abi.h` 的 `FLUX_LISTEN_V4_STR` / `FLUX_LISTEN_V6_STR`、`crates/flux-core/src/abi.rs` 的镜像、`crates/flux-core/src/cidr.rs` 的固定 bypass 清单、以及 `module/template.json` 的 fakeip 段全部已改，`FLUX_ABI_MAGIC` 提到 `0xF10C0903`。第三条的交叉校验属于 `fluxd check` 的实现范围。
 
 ## 9.1 注入的 inbound（每 generation 两个，4 个 kernel socket）
 
 | tag | family | listen | listen_port | 说明 |
 |---|---|---|---|---|
-| `flux-in-v4` | IPv4 | `198.18.0.2` | 随机 `actual4` | `type: "tproxy"`，TCP+UDP |
-| `flux-in-v6` | IPv6 | `2001:db8::2` | 随机 `actual6` | `type: "tproxy"`，TCP+UDP |
+| `flux-in-v4` | IPv4 | `198.51.100.1` | 随机 `actual4` | `type: "tproxy"`，TCP+UDP |
+| `flux-in-v6` | IPv6 | `2001:db8:0:1::2` | 随机 `actual6` | `type: "tproxy"`，TCP+UDP |
 
 生成方式：深拷贝用户 `Value`；断言 `inbounds` 缺失或为空数组；写入上述两个对象。**不注入** `route.rules`、不改用户 DNS/outbounds/log。
 
@@ -1403,7 +1425,7 @@ hot candidate 无效时**保持当前 `Active` generation**并附带 candidate e
 ```rust
 // ---------- flux-core/src/config.rs ----------
 pub struct FluxConfig {
-    pub apps: Vec<AppSelector>,     // canonical、去重、<= 128
+    pub apps: Vec<AppSelector>,     // canonical、去重、<= 1024
     pub bypass_v4: Vec<Ipv4Cidr>,   // 不含固定项
     pub bypass_v6: Vec<Ipv6Cidr>,
 }
@@ -1436,7 +1458,7 @@ pub fn build_effective(user: &serde_json::Value, p: &EngineParams)
 
 // ---------- fluxd/src/dataplane.rs ----------
 pub struct Dataplane {
-    objs: LoadedObjects,          // 9 个 map + 3 个 prog 的 OwnedFd
+    objs: LoadedObjects,          // 12 个 map + 4 个 prog 的 OwnedFd
     control_root: MapFd,
     leaf: Option<OwnedFd>,        // 当前 frozen leaf
     veth: VethOwned,              // 两端 ifindex + alias（不含 MAC，见 D17）
@@ -1590,16 +1612,19 @@ bypass_cidrs = [
 ]
 ```
 
-硬限：文件 256 KiB；`apps` ≤ 128；解析后总 UID entry ≤ 512；IPv4/IPv6 LPM 各 ≤ 128（含固定项与本机地址项）；package 字符串与 CIDR 必须 canonical 且无重复。超限是清晰的配置错误，**不截断、不部分应用**。
+硬限：文件 256 KiB；`apps` ≤ 1024；解析后总 UID entry ≤ 4096；IPv4/IPv6 LPM 各 ≤ 65536（**本机地址不占 LPM**，见 D20）；package 字符串与 CIDR 必须 canonical 且无重复。超限是清晰的配置错误，**不截断、不部分应用**。
 
-**固定安全 bypass（硬编码注入）**：
+**固定安全 bypass（硬编码注入）**，权威清单在 `crates/flux-core/src/cidr.rs`：
 
-- IPv4：`0.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`224.0.0.0/4`、`255.255.255.255/32`、`198.18.0.0/15`
-- IPv6：`::/128`、`::1/128`、`fe80::/10`、`ff00::/8`、`2001:db8::/32`
+- IPv4：`0.0.0.0/8`、`10.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`、`198.51.100.1/32`（listener 本身）、`224.0.0.0/4`、`255.255.255.255/32`
+- IPv6：`::/128`、`::1/128`、`fc00::/7`、`fe80::/10`、`ff00::/8`、`2001:db8:0:1::2/128`（listener 本身）
 
-**动态本机地址 bypass**：reactor 把每个 live 的本机单播地址作为 `/32`（IPv4）或 `/128`（IPv6）注入，地址增删时同步。预留 32 个 LPM 槽位给它们；超出则拒绝激活并报告（不静默丢弃）。
+两点说明：
 
-RFC1918、CGNAT、ULA **不是**硬编码 bypass；是否 direct 由用户 CIDR 或 sing-box 规则决定。
+- **listener 只 bypass 确切地址，不是整段前缀**（D21）。原先保留整个 `/15` 与 `/32` 是过度的——防自环只需要"选中 app 不能连上 listener 本身"——而那个过度保留正好和 sing-box 的 fakeip 惯用段重叠，会让 fakeip 静默完全失效（§9.0）。
+- **RFC1918 与 ULA 是硬编码 bypass。** 它们是私有地址，代理它们没有意义，且 `ip_is_private` 那类规则在 sing-box 侧也一样会判 direct——在内核里提前放行省掉一次无用的用户态往返（§1.6.2 的同一个理由）。
+
+**动态本机地址 bypass**：reactor 把每个 live 的本机单播地址注入**专用的 `self_addr_v4` / `self_addr_v6` HASH map**，不进 LPM（D20：本机地址永远是全长前缀，用 trie 做精确匹配是浪费；HASH 删除干净；且规避 6.6.0–6.6.46 的 LPM trie 崩溃）。容量 `FLUX_SELF_ADDR_MAX_ENTRIES = 256`，按 `IFA_FLAGS` 过滤并对 IPv6 隐私地址做最久未见淘汰（§1.6.4）。
 
 ## 11.3 package 解析（无 binder）
 
@@ -1644,7 +1669,7 @@ clang -target bpf -O2 -g -Wall -Wextra -Werror \
 
 ## 12.2 map 创建
 
-**由 Rust 侧显式创建，不从 ELF 推断。** `fluxd/src/bpf/maps.rs` 用一张常量表描述 9 个 map 的 `map_type`、`key_size`、`value_size`、`max_entries`、`map_flags`、`name`，逐个 `BPF_MAP_CREATE`。这样 C 文件里的 map 定义只是符号占位，参数的唯一真相源在 Rust（并由 `flux_abi.h` 约束 value 布局）。
+**由 Rust 侧显式创建，不从 ELF 推断。** `fluxd/src/bpf/maps.rs` 用一张常量表描述 12 个 map（清单与顺序见 `flux-core::abi::MAP_NAMES`）的 `map_type`、`key_size`、`value_size`、`max_entries`、`map_flags`、`name`，逐个 `BPF_MAP_CREATE`。这样 C 文件里的 map 定义只是符号占位，参数的唯一真相源在 Rust（并由 `flux_abi.h` 约束 value 布局）。
 
 `control_leaf` 的 inner map 先创建，再以其 fd 作为 `inner_map_fd` 创建 `control_root`。
 
@@ -1665,7 +1690,7 @@ types:
         members: magic:[2]@0, mode:[u8]@32, reserved:[4]@40, generation:[3]@64
 ```
 
-（`u8` 需要一条自己的 `BTF_KIND_INT`；实际实现按 `reference/flux_abi.h` 的最终布局生成。）
+（`u8` 需要一条自己的 `BTF_KIND_INT`；实际实现按 `bpf/include/flux_abi.h` 的最终布局生成。）
 
 然后以 `btf_fd = <该 blob>`、`btf_key_type_id = 1`、`btf_value_type_id = 5` 创建 `tcp_decision`。
 
@@ -1952,7 +1977,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
    - `audit/2026-08-25-flux-rs-0.9.0-impl-blueprint/`；
    - `audit/2026-08-24-full-repository-line-audit/`、`audit/2026-08-24-design-and-code-audit/`；
    - `archive/2026-08-25-superseded/`（2026-08-25 文档治理已把旧 `docs/**`、`CONTEXT.md`、`README*`、`CHANGELOG.md`、`notes.md`、`task_plan.md` 全部移入，含**不可复现的真机证据**；该目录被 `.gitignore` 排除，因此不在 git 里，必须显式复制）；
-   - **`audit/2026-08-25-flux-rs-0.9.0-final/`（本设计包本身）。这是本清单里最容易致命的一条**：`.gitignore:27` 的 `/audit/` 规则意味着**本蓝图、`reference/flux_abi.h`、`reference/flux.bpf.c` 全都不在 git 里**，因此 `git bundle --all` **不会**包含它们。一旦先删工作树再想起来，唯一的设计合同就永久丢失，`git reflog` 也救不回来——它从未被 git 跟踪过。**执行第 3 步之前，必须先把这个目录复制到仓库之外并核对 SHA-256。**
+   - **`audit/2026-08-25-flux-rs-0.9.0-final/`（本设计包本身）。这是本清单里最容易致命的一条**：`.gitignore:27` 的 `/audit/` 规则意味着**本蓝图、`bpf/include/flux_abi.h`、`bpf/flux.bpf.c` 全都不在 git 里**，因此 `git bundle --all` **不会**包含它们。一旦先删工作树再想起来，唯一的设计合同就永久丢失，`git reflog` 也救不回来——它从未被 git 跟踪过。**执行第 3 步之前，必须先把这个目录复制到仓库之外并核对 SHA-256。**
    - **§18.3 列出的、计划移植的全部源文件**（因为 `git init` 之后再也 `git show` 不到它们）；
    - 一份 `git bundle create ../Flux-rs-legacy.bundle --all`（**强烈建议**：一个文件，离线可读，是"删历史"与"能查证"的唯一交集）。
      > **`--all` 不包含 stash。** 本仓库现有 **18 个 stash**，其中只有 `stash@{0}` 是真 ref（`refs/stash`），`stash@{1..17}` 存在于 `refs/stash` 的 **reflog** 里，而 bundle **不携带 reflog**。要保留就必须先把每个 stash 变成真 ref：`git tag archive/stash-<N> stash@{<N>}`（逐个），再 bundle。否则 17 个 stash 静默消失。
@@ -1974,7 +1999,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | `META-INF/`、`webroot/`、`conf/`、`flux_service.sh`、`customize.sh`、`uninstall.sh` | 删除；从 §13.1 的 allowlist 重建 |
 | `tests/shell/**`、`xtask` 的资格/canary/preflight 子命令 | 删除 |
 | 旧版本号/schema/protocol/manifest 数字（module `v0.1.0-dev`、config schema 5、control protocol v9、capability schema 3、package manifest schema 4） | 删除；只保留 `0.9.0` 与 `FLUX_ABI_MAGIC` |
-| `clone/`（第三方研究源码） | **直接删除，不进归档**。它可随时按 §0.5 的清单与 commit 重新克隆；把第三方源码放进归档反而增加"新代码抄了旧第三方实现"的风险 |
+| `clone/`（第三方研究源码） | **保留为开发辅助资产**（2026-08-25 所有者决定，改变了原先"直接删除"的处置）。设计里几乎每一条关于 AOSP、内核和同类实现的断言，依据都在这里。**但第三方源码不进 git**：进 git 的是 `tools/clone-manifest.md`（仓库 + 固定 commit）与 `tools/reclone.sh`，二者能完整重建，同时避免仓库膨胀（约 80 MB）、许可证与来源混杂、以及"新代码抄了旧第三方实现"的嫌疑。`clone/` 由 `.gitignore` 排除 |
 | `target/`、缓存、临时下载 | 删除，由 `.gitignore` + clean staging 隔离 |
 
 执行原则是"清空后按 allowlist 新建"，不是逐文件修补。
@@ -2180,5 +2205,5 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 ---
 
 - 文档结束。字段与不变量以本文为实现合同。
-- ABI 真相源：`reference/flux_abi.h`；数据面骨架：`reference/flux.bpf.c`。
+- ABI 真相源：`bpf/include/flux_abi.h`；数据面骨架：`bpf/flux.bpf.c`。
 - 一手依据索引见同目录 `README.md`。

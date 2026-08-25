@@ -8,10 +8,15 @@
 /// Prefixes that are permanently in the bypass set, whatever the user config
 /// says.
 ///
-/// The listener prefixes are included because sing-box's TProxy UDP write-back
+/// The listener address is included because sing-box's TProxy UDP write-back
 /// binds the original destination with `IP_TRANSPARENT`; if a selected app could
-/// target the listener address, the write-back would collide with the listener
-/// itself (blueprint D7, D16, upstream issue #3646).
+/// target the listener, the write-back would collide with the listener itself
+/// (blueprint D7, D16, upstream issue #3646).
+///
+/// Note it is the exact listener address, not its prefix. Reserving a whole
+/// prefix was overkill for self-loop prevention and it collided with sing-box's
+/// conventional fakeip range, which made fakeip fail silently and completely
+/// (blueprint D21, §9.0).
 pub const FIXED_BYPASS_V4: &[&str] = &[
     "0.0.0.0/8",
     "10.0.0.0/8",
@@ -19,7 +24,7 @@ pub const FIXED_BYPASS_V4: &[&str] = &[
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.168.0.0/16",
-    "198.18.0.0/15", // listener reservation
+    "198.51.100.1/32", // the listener itself, nothing wider
     "224.0.0.0/4",
     "255.255.255.255/32",
 ];
@@ -31,7 +36,7 @@ pub const FIXED_BYPASS_V6: &[&str] = &[
     "fc00::/7",
     "fe80::/10",
     "ff00::/8",
-    "2001:db8::/32", // listener reservation
+    "2001:db8:0:1::2/128", // the listener itself, nothing wider
 ];
 
 /// Why a user-supplied prefix was rejected.

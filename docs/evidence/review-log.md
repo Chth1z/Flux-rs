@@ -52,7 +52,7 @@
 | `eth_type_trans()` 会按目的 MAC 重新判定 `pkt_type`；不等于设备 MAC 即 `PACKET_OTHERHOST`，而 `ip_rcv()` 直接丢弃 `PACKET_OTHERHOST` | **已核验** | `eth_type_trans()` / `ip_rcv_core()`。→ 必须处理 `pkt_type`；**D17 选择在 ingress 用 `bpf_skb_change_type(PACKET_HOST)` 修正，而不是在 egress 改写 MAC**（§8.2）。 |
 | `IN_DEV_RPFILTER` 取 `max(all.rp_filter, dev.rp_filter)`，而 `IN_DEV_ACCEPT_LOCAL` 取 `or(all, dev)` | **已核验** | `include/linux/inetdevice.h` 的 `IN_DEV_MAXCONF` / `IN_DEV_ORCONF`。→ **只在 `flxrs1` 设 `rp_filter=0` 不够**；见 §8.4，这是前两版蓝图的实现级漏洞。 |
 
-## 0.3 我对前两版蓝图的修正（D1–D18）
+## 0.3 我对前两版蓝图的修正（D1–D23）
 
 以下每条都是**本文与旧蓝图的实质差异**，实现者必须按本文执行。
 
@@ -76,6 +76,33 @@
 | **D16** | listener 绑定非本地地址但未把该地址纳入 bypass | `198.18.0.0/15` 与 `2001:db8::/32` 进固定 bypass | 否则 app 主动访问该地址段会被捕获并送进 listener，构成自环。 |
 | **D17** | egress 改写内部以太头的 dst/src MAC 以满足 `eth_type_trans()` | **egress 不改写 MAC**；ingress 调 `bpf_skb_change_type(skb, PACKET_HOST)`。control 结构删掉 `peer_mac`/`host_mac` | 见 §8.2 的对照表。结果：**L2 捕获稳态零 packet 写入、零 clone 复制**（TCP 重传 skb 是 clone，写它必然触发 `skb_ensure_writable()` 复制一份）；L3 只写 2 字节 EtherType；control 结构 104 → 96 字节。上游先例见 dae 的 `tproxy_dae0peer_ingress`。 |
 | **D18** | 系统 DNS 不在捕获范围（前两版蓝图与我前几轮的结论都错） | **系统 DNS 精准 per-app 捕获，零额外机制。** 因为 AOSP 用 `fchown()` 把明文 DNS socket 的 owner 改成发起解析的 app，而 `bpf_get_socket_uid()` 读的 `sk->sk_uid` 跟随 `fchown` | 见 §1.3.1–§1.3.4。这是本轮最重要的发现：`xt_owner` 读 `f_cred->fsuid` 所以看不到，eBPF 读 `sk_uid` 所以看得到——**整个 iptables 生态被迫全设备劫持 :53 的根因就在这里**。连带作废了前几轮设想的 `cookie_tag_map` 路线（不再需要读 AOSP 私有 map）与"engine 换专用 UID"的前提。 |
+
+## 0.3a 定稿轮新增的决定（D19–D23，2026-08-25 所有者拍板）
+
+D1–D23 是对**前两版蓝图**的修正。以下五条是本轮实测与调研之后新增或改变的决定，全部已由项目所有者确认。
+
+| # | 决定 | 依据 |
+|---|---|---|
+| **D19** | **不给 sing-box 打补丁。** 永久使用官方未修改的二进制 | 打补丁确实会让若干问题**结构性变简单**——cgroup hook 可以绕开 TC pref 冲突、`rp_filter`、raw-IP 补头三个难点，token 地址方案也随之可行（CHIZI 的分支正是如此）。**但那不是"更容易"，是"另一种难"**：他们自己的文档里有内核崩溃规避、按版本拒启动、mode × ipv6_mode 矩阵，且仍标注为实验性。决定性的权衡是：**厂商 TC 冲突是可检测、可按接口降级的局部问题，而维护一个 sing-box fork 是永久且无界的承诺**；加上用户信任面应当落在官方签名二进制上。代价也要诚实记下：拿不到他们 `testing-observability` 分支的指标（§1.5.6 的 per-UID 计数是我们这一半的对称补偿），且不能直接复用 `bypass_rule_set`——**但后者有解**，见 D22 |
+| **D20** | 本机地址从 bypass 的 `LPM_TRIE` **移出**，改用专用的精确 `HASH` map（`self_addr_v4/v6`）；大 CIDR 集仍用 LPM，但在 **6.6.0–6.6.46** 内核上拒绝加载并报告 | 两条理由叠加。① **更好的设计**：本机地址永远是全长前缀，用 trie 做精确匹配本就是浪费，而 `HASH` 删除干净，对 IPv6 隐私地址轮换尤其重要。② **规避内核崩溃**：CHIZI 的文档记录了 LPM trie 在 6.6.0–6.6.46 的 UBSAN 崩溃，而 `android15-6.6` 就在支持范围内——**症状是设备重启，不是功能失效**。这是全设计里唯一允许按内核版本 gate 的地方，因为崩溃无法安全探测 |
+| **D21** | listener 地址移出 sing-box 的 fakeip 惯用段：`198.18.0.2` → **`198.51.100.1`**，`2001:db8::2` → **`2001:db8:0:1::2`**；固定 bypass 只收**确切地址**，不再收整个前缀 | 移植旧版模板时发现的**设计缺陷**。fakeip 默认用 `198.18.0.0/15`，而旧的 listener 保留把整个 `/15` 放进了 bypass —— 于是**每个 fakeip 地址都不会被捕获，fakeip 静默完全失效**（DNS 正常、应用连得上、什么都打不开）。惯例是他们的且更早，所以该让的是 Flux。同时认识到"防自环只需 bypass listener 本身"，收窄前缀这一条独立成立。**真正的解法是第三条**：`fluxd check` 必须交叉校验 fakeip 段与 bypass 集是否相交（§9.0.1） |
+| **D22** | 支持**大规模 CIDR bypass**（`FLUX_LPM_MAX_ENTRIES` 128 → 65536），并可用官方 sing-box 的 `rule-set decompile` 从 `.srs` 展开 CIDR | `LPM_TRIE` 被内核强制 `NO_PREALLOC`，所以 `max_entries` 只是上限、未用不占内存；万条量级是常规负载，严格优于 ipset。**框架要摆正**：这不是把路由策略搬进 Flux，而是避免一次已知无用的用户态往返——境内地址反正会被判 direct，捕获它再送回是纯浪费。`rule-set decompile` 让我们在不打补丁的前提下复用 sing-box 自己的规则集作为唯一真相源（呼应 D19 的代价那一栏） |
+| **D23** | 新增 **per-UID 字节/包计数**（`uid_stats`，`PERCPU_HASH`），只在已捕获的包上更新 | 现有 counters 只在决策边沿递增，能回答"有没有在工作"但不能回答"哪个应用走了多少"，而后者是用户最常问的问题之一，也是"系统统计翻倍"（§2.2.3(4)）的直接补偿。成本可控：被捕获的包已付了一次 redirect，再加一次 per-CPU hash 是边际的，**未选中流量一行都不碰**。明确不记目的地址、端口、时间序列——**不保存任何能重建访问历史的东西**。导出为 Prometheus 文本格式，但**不开 HTTP 端口**（Android loopback 不按应用隔离，指标会暴露"哪些应用在被代理"） |
+
+### 容量与 map 集的连带变化
+
+D20 与 D23 把 map 集从 9 张变成 12 张，容量也随实测调整（§1.5.3）：
+
+| 常量 | 原 | 现 | 依据 |
+|---|---:|---:|---|
+| `FLUX_UID_SELECTED_MAX` | 128 | 1024 | 实测一台真机 `[10000,19999]` 内有 **429** 个 app，原值让"全选"结构上不可能 |
+| `FLUX_UID_POLICY_MAX_ENTRIES` | 512 | 4096 | 必须容纳 selected + 一个 boot 内累积的 draining（后者永不删除） |
+| `FLUX_LPM_MAX_ENTRIES` | 128 | 65536 | D22 |
+| ~~`FLUX_LPM_SELF_ADDR_RESERVE`~~ | 32 | **取消** | D20：本机地址不再与 LPM 共用容量 |
+| `FLUX_SELF_ADDR_MAX_ENTRIES` | — | 256 | D20 新增 |
+| `FLUX_UID_STATS_MAX_ENTRIES` | — | 4096 | D23 新增，与 `uid_policy` 对齐 |
+
+`FLUX_ABI_MAGIC` 因此从 `0xF10C0902` 提到 **`0xF10C0903`**。
 
 ## 0.4 我保留的旧蓝图关键结论
 
