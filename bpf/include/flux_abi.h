@@ -25,6 +25,15 @@
 /* ------------------------------------------------------------------ magic */
 
 /* Bump on ANY layout, map-set or semantic change. Not related to SemVer.
+ * 0xF10C0902: added the flx_verify probe program and FLUX_CNT_SAW_PACKET, for
+ *             the positive liveness check in docs/blueprint.md section 8.5.4.
+ *             Needed because a vendor filter at a lower TC preference can
+ *             terminate the classifier chain, so "attach succeeded" does not
+ *             imply "our program runs". Deliberately a SEPARATE program rather
+ *             than a flag in flux_control: unselected traffic never reaches
+ *             ctrl() (see cap_core E1), so a control-flag design would have
+ *             required pulling the snapshot lookup to the top of the hot path
+ *             for every packet on the device.
  * 0xF10C0901: dropped peer_mac/host_mac; ingress forces PACKET_HOST instead.
  *
  * Scope note: purely userspace-side attach parameters -- the FLUX_TC_PREF_*
@@ -32,7 +41,7 @@
  * kernel/userspace data contract and do not require a bump, because no BPF
  * program reads them. Only struct layouts and the map set do.
  */
-#define FLUX_ABI_MAGIC 0xF10C0901u
+#define FLUX_ABI_MAGIC 0xF10C0902u
 
 /* Guards against reading uninitialised or foreign socket storage. */
 #define FLUX_DECISION_MAGIC 0xD3C15100u
@@ -249,7 +258,11 @@ enum flux_counter {
 	FLUX_CNT_IN_DROP_ASSIGN = 15,
 	FLUX_CNT_IN_DROP_PARSE = 16,
 	FLUX_CNT_IN_DROP_SNAPSHOT = 17,
-	FLUX_CNT__MAX = 18, /* <= FLUX_COUNTER_SLOTS */
+	/* Touched ONLY by flx_verify, never by the capture or ingress entries.
+	 * See blueprint section 8.5.4.
+	 */
+	FLUX_CNT_SAW_PACKET = 18,
+	FLUX_CNT__MAX = 19, /* <= FLUX_COUNTER_SLOTS */
 };
 
 /* ------------------------------------------------------------ parse limits
@@ -269,6 +282,13 @@ enum flux_counter {
 #define FLUX_PROG_CAP_L2 "flx_cap_l2" /* egress, ARPHRD_ETHER               */
 #define FLUX_PROG_CAP_L3 "flx_cap_l3" /* egress, ARPHRD_RAWIP / CLAT tun    */
 #define FLUX_PROG_IN     "flx_in"     /* ingress on flxrs1                  */
+#define FLUX_PROG_VERIFY "flx_verify" /* liveness probe, section 8.5.4      */
+
+/* Handle used by the liveness probe while it is attached. Distinct from the
+ * capture handle so the ownership predicate can never confuse the two, and so
+ * a crash mid-verification leaves an object we can still identify and remove.
+ */
+#define FLUX_TC_HANDLE_VERIFY 0x3
 
 /* TC identity. The full ownership predicate additionally covers netns,
  * ifindex, ifname, parent/direction, kind == "bpf", direct-action, program

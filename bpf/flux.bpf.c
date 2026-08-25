@@ -607,9 +607,32 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 
 // ----------------------------------------------------------------- programs
 
-// Ethernet-like egress (Wi-Fi and friends). Attached at chain 0, pref 1,
-// protocol all, handle 0x1, direct-action, and it MUST be the first
-// applicable classifier so that TC_ACT_UNSPEC still reaches AOSP/OEM filters.
+// Liveness probe. Attached at the SAME parent and preference the capture entry
+// is about to take, with handle FLUX_TC_HANDLE_VERIFY, then removed once
+// fluxd has read the counter. Its only job is to prove the classifier chain
+// actually reaches that position.
+//
+// This has to be a separate program rather than a flag inside cap_core,
+// because unselected traffic returns at E1 and never reaches ctrl() -- a
+// control-flag design would have forced the snapshot lookup to the top of the
+// hot path for every packet on the device. Here the cost is paid only while
+// the probe is attached, and the capture entries stay untouched.
+//
+// TC_ACT_UNSPEC so the chain continues exactly as it would without us: the
+// probe must not change the fate of a single packet. See blueprint 8.5.4.
+SEC("tc/verify")
+int flx_verify(struct __sk_buff *skb)
+{
+	(void)skb;
+	cnt(FLUX_CNT_SAW_PACKET);
+	return TC_ACT_UNSPEC;
+}
+
+// Ethernet-like egress (Wi-Fi and friends). Attached at chain 0, direct-action,
+// protocol all, handle 0x1, at a preference chosen by dumping the parent first
+// (FLUX_TC_PREF_PREFERRED and friends -- pref 1 is NOT ours to assume; Samsung
+// holds it on wlan0 on the measured device). It MUST be the first applicable
+// classifier so that TC_ACT_UNSPEC still reaches AOSP/OEM filters.
 SEC("tc/cap_l2")
 int flx_cap_l2(struct __sk_buff *skb)
 {

@@ -14,9 +14,11 @@
 
 /// Bumped on ANY layout, map-set or semantic change. Unrelated to SemVer.
 ///
-/// `0xF10C0901` dropped `peer_mac` / `host_mac`; ingress forces `PACKET_HOST`
-/// instead (blueprint D17).
-pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0901;
+/// * `0xF10C0902` added the [`PROG_VERIFY`] probe program and
+///   [`Counter::SawPacket`] for the positive liveness check (blueprint §8.5.4).
+/// * `0xF10C0901` dropped `peer_mac` / `host_mac`; ingress forces
+///   `PACKET_HOST` instead (blueprint D17).
+pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0902;
 
 /// Guards against reading uninitialised or foreign socket storage.
 pub const FLUX_DECISION_MAGIC: u32 = 0xD3C1_5100;
@@ -119,6 +121,11 @@ pub const PROG_CAP_L2: &str = "flx_cap_l2";
 pub const PROG_CAP_L3: &str = "flx_cap_l3";
 /// Ingress entry on the veth peer.
 pub const PROG_IN: &str = "flx_in";
+/// Liveness probe, attached and removed during activation (blueprint §8.5.4).
+pub const PROG_VERIFY: &str = "flx_verify";
+
+/// Every program symbol the loader must find in the embedded object.
+pub const PROG_NAMES: [&str; 4] = [PROG_CAP_L2, PROG_CAP_L3, PROG_IN, PROG_VERIFY];
 
 // ----------------------------------------------------------- network objects
 
@@ -144,6 +151,10 @@ pub const TC_CHAIN: u32 = 0;
 pub const TC_HANDLE_EGRESS: u32 = 0x1;
 /// TC handle of the ingress filter.
 pub const TC_HANDLE_INGRESS: u32 = 0x2;
+/// TC handle used by the liveness probe while attached. Distinct from the
+/// capture handle so the ownership predicate can never confuse the two, and so
+/// a crash mid-verification leaves an object we can still identify and remove.
+pub const TC_HANDLE_VERIFY: u32 = 0x3;
 
 /// First-choice egress preference, deliberately past the preference vendors
 /// use.
@@ -383,11 +394,14 @@ pub enum Counter {
     InDropParse = 16,
     /// Ingress saw an invalid control snapshot.
     InDropSnapshot = 17,
+    /// Touched only by the [`PROG_VERIFY`] probe, never by the capture or
+    /// ingress entries (blueprint §8.5.4).
+    SawPacket = 18,
 }
 
 impl Counter {
     /// One past the highest slot in use. Must stay `<= COUNTER_SLOTS`.
-    pub const MAX: u32 = 18;
+    pub const MAX: u32 = 19;
 }
 
 // -------------------------------------------------- compile-time ABI checks
@@ -430,6 +444,16 @@ const _: () = assert!(
 const _: () = assert!(
     TC_PREF_MIN <= TC_PREF_PREFERRED && TC_PREF_PREFERRED < TC_PREF_CLAT_MAX,
     "the preferred TC egress preference must be usable on a CLAT interface"
+);
+
+// The ownership predicate distinguishes our objects by handle, so a collision
+// here would make a leftover verification filter indistinguishable from a live
+// capture filter after a crash.
+const _: () = assert!(
+    TC_HANDLE_EGRESS != TC_HANDLE_INGRESS
+        && TC_HANDLE_EGRESS != TC_HANDLE_VERIFY
+        && TC_HANDLE_INGRESS != TC_HANDLE_VERIFY,
+    "TC handles must be pairwise distinct"
 );
 
 #[cfg(test)]
@@ -507,6 +531,32 @@ mod tests {
         seen.sort_unstable();
         for pair in seen.windows(2) {
             assert_ne!(pair[0], pair[1], "duplicate map name in MAP_NAMES");
+        }
+    }
+
+    #[test]
+    fn prog_name_table_has_no_duplicates() {
+        let mut seen = PROG_NAMES;
+        seen.sort_unstable();
+        for pair in seen.windows(2) {
+            assert_ne!(pair[0], pair[1], "duplicate program name in PROG_NAMES");
+        }
+    }
+
+    #[test]
+    fn object_symbol_names_are_plausible_c_identifiers() {
+        // The loader binds relocations by symbol name, so a stray space or
+        // hyphen here would fail at load time on a device rather than in CI.
+        for name in MAP_NAMES.iter().chain(PROG_NAMES.iter()) {
+            assert!(!name.is_empty());
+            assert!(
+                name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "{name} is not a valid C identifier"
+            );
+            assert!(
+                !name.starts_with(|c: char| c.is_ascii_digit()),
+                "{name} starts with a digit"
+            );
         }
     }
 }
