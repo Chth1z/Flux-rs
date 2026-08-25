@@ -477,7 +477,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 ```
 选中 app 的 socket
- └─(1) 受支持物理接口 TC egress（chain 0 / pref 1 / direct-action）
+ └─(1) 受支持物理接口 TC egress（chain 0 / direct-action / pref 见 §8.5.3 动态选取）
         flx_cap_l2（ARPHRD_ETHER）或 flx_cap_l3（ARPHRD_RAWIP / 已确认 CLAT TUN）
         ├─ 未选 / bypass / 未入场失败 → TC_ACT_UNSPEC（继续 AOSP CLAT/OEM，走 Android 原路径）
         ├─ 越过 admission 后失败      → TC_ACT_SHOT
@@ -533,7 +533,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 3. **event-loop 活锁不可检测**：进程活着、listener socket 仍在、但 event loop 停止工作时，本数据面看不出来，该期间新流仍会被捕获并卡住。0.9.0 **不设** heartbeat / 周期探测 / watchdog packet。官方 sing-box 源码也允许个别 accept/read 致命错误关闭单个 listener 而不退出进程——这一类**会**被 §7.4 的 fault 通知在下一个相关 packet 上发现并自愈；"完全无流量时的内部故障"不会。
 4. **双 leg 统计**：AOSP 的 UID/interface accounting 会看到 app 原 leg，sing-box 另建 root outbound 又是第二 leg。Flux 不篡改 TrafficStats 去"抵消"，系统设置里的按 UID 流量因此不等于物理链路字节。
 5. **interface churn 窗口**：物理 interface 在 Android 上频繁变动——Wi-Fi↔蜂窝切换、每个 PDN 一个 `rmnet_data*` 的出现与消失、netd 按需创建销毁 `v4-*` CLAT。从"新 interface 变为 up 并开始承载流量"到"fluxd 收到 rtnetlink 事件并 attach 完 filter"之间存在一个**无法消除的窗口**，该窗口内的流量走 Android 原路径（即 Direct）。这与 §2.2.1 的 fail-open 语义一致，不是缺陷，但**必须公开**：0.9.0 不宣称"接管所有时刻的所有流量"。窗口大小取决于 rtnetlink 送达延迟与 §10.4 的 debounce，量级为百毫秒。**同一个窗口还会因 netd 删 `clsact` 而周期性重开**——见 §8.5.1，那不是异常而是日常。
-6. **被代理流量失去 app 请求的 DSCP 标记**。AOSP 的 `dscpPolicy` 装在物理 interface 的 **egress pref 5**（`DscpPolicyTracker.java:50-51`），而我们在 pref 1 对捕获包返回 `TC_ACT_REDIRECT`，chain 就此终止——dscpPolicy 看不到这些包。sing-box 随后发出的**出站 leg** 仍会经过 dscpPolicy，但那是 root 的 socket，带不上 app 通过 `ConnectivityManager` 申请的 per-UID DSCP 策略。**净效果：被代理流量的 app 级 QoS 标记丢失。** 影响面限于依赖 DSCP 的运营商网络。改到 pref ≥ 6 不能解决（见 §8.5.2 结论 3）。
+6. **被代理流量失去 app 请求的 DSCP 标记**。AOSP 的 `dscpPolicy` 装在物理 interface 的 **egress pref 5**（`DscpPolicyTracker.java:50-51`），而我们对捕获包返回 `TC_ACT_REDIRECT`，chain 就此终止——只要我们的 pref 小于 5，dscpPolicy 就看不到这些包。sing-box 随后发出的**出站 leg** 仍会经过 dscpPolicy，但那是 root 的 socket，带不上 app 通过 `ConnectivityManager` 申请的 per-UID DSCP 策略。**净效果：被代理流量的 app 级 QoS 标记丢失。** 影响面限于依赖 DSCP 的运营商网络，且本机实测三星另有 `tosMarker` 五个 egress 程序，受影响的下游比这一条写的更多。
 7. **conntrack 双计**。veth 跨越时 `skb_scrub_packet()` 必然 `nf_reset_ct()`，所以每条被代理的流会在 veth peer 的 PREROUTING 重新建立 conntrack，netfilter 因此看到两次。这与本节第 4 条的双 leg 统计叠加。TPROXY 类方案共性，不特殊处理。
 
 ## 2.3 为什么不可能自环（结构性论证，不是缓解措施）
@@ -616,7 +616,7 @@ static int __bpf_redirect(struct sk_buff *skb, struct net_device *dev, u32 flags
 
 AOSP `ClatCoordinator` 创建 `v4-*` raw-IP TUN，并在其 egress 用固定低 priority 的 TC BPF 做 IPv4→IPv6 翻译。IPv4 packet 在 `v4-*` egress 仍带原 app socket UID；翻译后的物理 IPv6 通常已属 `AID_CLAT`，不能再作为 app 选择依据。
 
-Flux 支持 CLAT 的**全部**条件：① link 是 TUN/raw-IP 且名字匹配 `v4-*`；② 存在 CLAT 特征地址与关联 underlay；③ TC dump 中存在可识别的 AOSP CLAT egress filter；④ Flux 能在同 chain 以 pref 1 + IPv4 protocol + 固定 handle 安装且**位于其之前**；⑤ Phase 0 已在该设备证明 UID/GSO/checksum/MTU/header 转换正确。任一条件不明 → 该 interface Direct。**Flux 不删除、不移动、不替换 AOSP 的 filter。** 不硬编码 AOSP 的 priority 数值，只要求 dump 顺序满足 first-applicable 谓词。
+Flux 支持 CLAT 的**全部**条件：① link 是 TUN/raw-IP 且名字匹配 `v4-*`；② 存在 CLAT 特征地址与关联 underlay；③ TC dump 中存在可识别的 AOSP CLAT egress filter；④ Flux 能在同 chain 以**某个小于 `FLUX_TC_PREF_CLAT_MAX`(4) 的可用 pref** + IPv4 protocol + handle `0x1` 安装且**位于 CLAT 之前**（§8.5.3；若 1–3 全被占则该条件不成立）；⑤ Phase 0 已在该设备证明 UID/GSO/checksum/MTU/header 转换正确。任一条件不明 → 该 interface Direct。**Flux 不删除、不移动、不替换 AOSP 的 filter。** 不硬编码 AOSP 的 priority 数值，只要求 dump 顺序满足 first-applicable 谓词。
 
 ## 3.5 VPN / TUN
 
@@ -1139,7 +1139,11 @@ IPv6 没有 rp_filter，无此问题。
 
 **`clsact` 的 foreign 判定**：若 dump 显示该 `clsact` 携带 `TCA_INGRESS_BLOCK`(13) 或 `TCA_EGRESS_BLOCK`(14)，或 `TCA_OPTIONS` 非空，则判为 foreign 并**排除该 interface**——共享 block 意味着另一个控制器在通过我们看不见的间接层管理 filter（`asteriskd_tc_netlink.c:333-341`）。这是 §8.5 "block/goto 使 chain 0 不可达"的具体检测手段。
 
-**first-applicable 要求**：三个 filter 必须是各自 protocol 在 chain 0 的首个适用 classifier。Direct 用 `TC_ACT_UNSPEC` 交给全部后续系统程序。pref 1 被未知 filter 占用、存在更早适用 classifier、`block`/`goto` 使 chain 0 不可达、或 attach 后 dump 顺序不满足谓词 → 该 interface **不得**标为 active。已知 AOSP ingress accounting 返回 `TC_ACT_UNSPEC`、CLAT translation 返回 `TC_ACT_PIPE`，但这不能替 OEM 程序背书；固定 first-applicable 顺序比维护 program-name 白名单更小、更可证明。
+**可达性要求**（原"first-applicable 要求"，2026-08-25 按实测放宽）：我们的 filter 不需要是 chain 0 的**首个** classifier——那个要求在实测面前站不住，因为厂商可能已占 pref 1 而 tc 的 pref 最小就是 1（§8.5.3）。真正的要求是**在我们之前没有会终止 chain 的 classifier**。
+
+这个条件**无法从 dump 推断**：dump 只告诉你谁在前面，不告诉你它返回什么。已知 AOSP ingress accounting 返回 `TC_ACT_UNSPEC`、CLAT translation 返回 `TC_ACT_PIPE`，但这不能替任何 OEM 程序背书。因此判定方式是**实测而非推理**：§8.5.4 的存活验证。
+
+Direct 用 `TC_ACT_UNSPEC` 交给全部后续系统程序。以下任一成立 → 该 interface **不得**标为 active：`block`/`goto` 使 chain 0 不可达；attach 后 dump 顺序不满足所有权谓词；小于 `FLUX_TC_PREF_CLAT_MAX` 的 pref 在 `v4-*` 上全被占用；**或存活验证判定被遮挡**。
 
 **`clsact` 规则**：Flux 可在不存在时创建，但**永不删除** `clsact`（crash 后无法证明是谁最初创建；而且删掉它会连带破坏 tethering 与 CLAT）。只删除精确自有 filter；**禁止** flush qdisc 或 chain。
 
@@ -1182,8 +1186,8 @@ AOSP 自己在 `ConnectivityService.java:12231-12240` 记录了这个约束："*
 **三条结论**：
 
 1. **ingress pref 1 在物理 interface 上是冲突的**（`tc police`）。这不影响我们——我们的 ingress filter 只装在自有的 `flxrs1` 上，那里没有别人。
-2. **egress pref 1 无硬冲突**，`v4-*` 上的 CLAT egress 在 pref 4，我们在 pref 1 先跑，正是 §3.4 要求的顺序。
-3. **但 egress pref 5 的 `dscpPolicy` 会被跳过**：被捕获的包在 pref 1 返回 `TC_ACT_REDIRECT`，chain 终止，dscpPolicy 看不到它。后果见 §2.2.3(6)。
+2. ~~**egress pref 1 无硬冲突**~~ —— **这一条已被 §8.5.3 的实测推翻**。就 AOSP 自身而言 egress pref 1 确实空着（CLAT 在 4、dscpPolicy 在 5），但**这张表只涵盖 AOSP，不涵盖 OEM**：三星的 `semUidBPF` 就占着 egress pref 1。约束仍然成立的部分是"必须排在 CLAT(pref 4) 之前"。
+3. **egress pref 5 的 `dscpPolicy` 会被跳过**：只要我们的 pref 小于 5，被捕获的包在我们这里返回 `TC_ACT_REDIRECT`，chain 终止，dscpPolicy 看不到它。后果见 §2.2.3(6)。
 
 ### 8.5.3 厂商已经占了 egress pref 1：pref 不能硬编码
 
@@ -1199,9 +1203,9 @@ filter protocol all pref 1 bpf chain 0 handle 0x1 \
 
 **三条由此推出的硬约束**：
 
-1. **pref 1 不是我们能预定的。** tc 的 priority 取值是 `1..0xFFFF`，1 已是最小值，所以在厂商占了 pref 1 的接口上，**我们无法排到它前面**。`FLUX_TC_PREF` 必须从"固定值 1"改成"**dump 后选出的最低可用值**"，并把实际取到的 pref 记进所有权谓词与 `status`。
+1. **pref 1 不是我们能预定的。** tc 的 priority 取值是 `1..0xFFFF`，1 已是最小值，所以在厂商占了 pref 1 的接口上，**我们无法排到它前面**。原先的固定常量 `FLUX_TC_PREF` 已删除，换成 `FLUX_TC_PREF_PREFERRED`(2) / `_MIN`(1) / `_CLAT_MAX`(4) 三个边界值 + **dump 后动态选取**，并把实际取到的 pref 记进所有权谓词与 `status`。
 2. **在 CLAT 的 `v4-*` 上仍必须 < 4**（AOSP CLAT egress 在 pref 4，§3.4）。若 1/2/3 在该接口全被占，**排序约束无法满足 → 排除该 interface**，不要降级到 pref ≥ 4。
-3. **"attach 成功"不再等于"能工作"。** 如果 pref 1 的厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，classifier chain 会在我们之前终止，我们的程序**一个包也收不到，而 attach 本身完全成功**。因此激活流程必须增加一步**正向存活验证**：attach 之后用已知流量确认我们的 per-CPU counter 真的在涨；不涨就 `Inactive` 并报告 `tc_chain_shadowed`。这条是本次实测新增的要求，§8.7 步骤 9 之后、步骤 10 之前执行。
+3. **"attach 成功"不再等于"能工作"。** 如果 pref 更低的厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，classifier chain 会在我们之前终止，我们的程序**一个包也收不到，而 attach 本身完全成功**。因此激活流程必须增加一步**正向存活验证**，机制见 **§8.5.4**；判定被遮挡时**只排除该 interface**（不是整体 `Inactive`），并报告 `tc_chain_shadowed`。执行位置是 §8.7 步骤 9 之后、步骤 10 之前。
 
 **还有一个竞态，比上面三条更难处理。** 探针第一次运行时，`wlan0` 已连上、已有全局地址、已有 `clsact`，但**还没有 filter**；几分钟后三星才把 egress 程序挂上（程序本身在开机后 7 秒就由 bpfloader 加载并 pin 了，`loaded_at` 与 attach 时刻是两件事）。含义：
 
@@ -1210,6 +1214,52 @@ filter protocol all pref 1 bpf chain 0 handle 0x1 \
 - 因此**即使 pref 1 当时是空的，也不应该占它**。选 pref 的策略是"满足排序约束的前提下，避开厂商惯用的 pref 1"，并靠 §10.4 的 `RTM_NEWTFILTER` 事件持续监视自己那一条是否还在、以及是否有新 filter 插到我们前面。
 
 **这一条同时改变了 §2.2.3(6) 的影响面评估**：本机除 AOSP 的 `dscpPolicy` 外，三星还有 `tosMarker` 系列**五个** egress 程序（`classify_ack` / `classify_uid` / `classify_queue_mapping` / `set_queue_mapping` / `set_tos_mobile`）以及 `mnxbNetd`、`semUidBPF_ape`、`tcpAccECN` 的 ether 变体。被捕获流量绕过的下游 filter 比蓝图原先设想的多得多。
+
+### 8.5.4 正向存活验证：唯一与厂商无关的"我们真的在工作"判据
+
+§8.5.3 约束 3 提出了要求，这里定稿机制。**这是整个设计里唯一不依赖任何厂商知识的健康检查**，因此它的实现方式必须是确定的，不能留给实现者发挥。
+
+**要解决的问题**：`attach` 系统调用返回成功，只证明 filter 挂上了；不证明它会被执行。若同一 chain 上有一个 pref 更低的程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，`__tcf_classify` 就地终止，我们的程序**一个包都收不到，且没有任何错误码**。这是本设计最可能"装上了但什么都没发生"的失效模式，而在陌生 OEM 上我们无法预知谁在前面。
+
+**为什么不能用现有的计数器判断**：§6 规定 counters **只在决策/丢弃/fault 边沿**递增，为的是让未选中流量的稳态per-packet 成本保持为"1 helper + 1 hash miss"（§14.1）。如果设备上此刻没有被选中的 app 在通信，所有计数器都不动——而这与"程序没被执行"完全无法区分。
+
+**为什么不能用 `tc -s filter show` 的内核统计**：`cls_bpf` 在 direct-action 模式下不走 `tcf_exts_exec`，不更新 `bstats`。而且本机的 `iproute2-ss171113` 对 `tc -s filter show` 返回空（实测），这条路在真机上根本不可靠。
+
+**一条被否决的设计，先说清楚为什么**：最自然的想法是在 `flux_control` 里加一个 `verify` 标志，让 `flx_cap_l2/l3` 在取到快照后顺手计数。**这行不通。** 看 §7.3 的 E1：未选中流量在 `uid_policy` 查不到时就 `return TC_ACT_UNSPEC` 了，**根本走不到 `ctrl()`**——`ctrl()` 只在"已有决策"的 E2 分支里被调用。要让标志生效，就得把快照查找提到热路径最顶端，对**设备上每一个出向包**多付两次 map 查找，这直接摧毁 §14.1 的性能地基。为一个只在激活时用 2 秒的检查付永久代价，不划算。
+
+**采用的机制：一个独立的探测程序 `flx_verify`。**
+
+```c
+SEC("tc/verify")
+int flx_verify(struct __sk_buff *skb) {
+	cnt(FLUX_CNT_SAW_PACKET);
+	return TC_ACT_UNSPEC;   /* 不改变任何包的命运 */
+}
+```
+
+流程（插在 §8.7 步骤 9 与步骤 10 之间，逐 interface 执行）：
+
+1. 按 §8.5.3 dump 该 parent，选出目标 pref **P**。
+2. 在 `(parent, protocol all, pref P, handle FLUX_TC_HANDLE_VERIFY)` 挂上 `flx_verify`。
+3. 读 `counters[FLUX_CNT_SAW_PACKET]` 记基线，等一个 timerfd 窗口（建议 2 s），再读。
+4. **判定**：
+   - 差值 > 0 → **pref P 可达**。卸下探测程序，在同一 pref P 挂上真正的 capture 程序（handle `0x1`）。两者都是同 parent、同 protocol、同 pref 的 direct-action `cls_bpf`，位置完全等价，所以"探测能跑"即"capture 能跑"。
+   - 差值 == 0 → **必须区分两种原因**，否则会把"当时没流量"误报成"被遮挡"：读该 interface 的 `/sys/class/net/<if>/statistics/tx_packets` 在同一窗口内是否增长。
+     - tx 在涨而计数不动 → **确认被遮挡**。记 `tc_chain_shadowed`，把该 interface 移出 active 集，并在 `status` 里**点名**同 chain 上 pref 低于 P 的那些 filter（用户在陌生机型上靠这条自证）。
+     - tx 也不涨 → 只是没流量，**不作结论**。退避后重试（复用 §10.4 的 timerfd）；到退避上限仍无流量则标注"未验证"并**允许激活**——不能因为用户当时没上网就拒绝服务。
+5. 全部 interface 处理完，才做步骤 10 那一次 pointer swap 发布 `active = 1`。
+
+**五条硬约束**：
+
+- 验证全程 `active` **必须**为 0。让流量在"尚未确认能工作"的状态下被捕获，等于拿用户的连接做实验。反过来说，因为 `active == 0`，**卸下探测到挂上 capture 之间的那个微秒级空档是无害的**。
+- `flx_verify` **只能**返回 `TC_ACT_UNSPEC`。它是观测器，不是策略。
+- `FLUX_CNT_SAW_PACKET` **只由 `flx_verify` 触碰**，capture 与 ingress 程序一行都不许写它。这条是把"零热路径成本"这个性质固定下来的唯一办法。
+- handle 用独立的 `0x3`，不复用 capture 的 `0x1`：所有权谓词因此永不混淆两者，而且**验证中途崩溃留下的残留仍然可被精确识别并删除**（§8.7 步骤 3 的清理要认这个 handle）。
+- 判定失败**只排除该 interface**，不进 `Inactive`——与 §26 不变量 4 对捕获侧的处置一致。
+
+**它顺带覆盖的其它失效**：attach 到了错误的 parent、interface 已 down 但 filter 还在、以及 chain 上出现了新的、pref 更低的厂商 filter。三者都表现为"tx 在涨而计数不动"。
+
+**再验证**：稳态下若 reactor 收到 `RTM_NEWTFILTER` 且新 filter 的 pref 低于我们，可以在 **P+1** 挂一次探测——若 P+1 可达则 P 必然可达，于是无需动我们自己的 filter 就能确认仍在工作。这是这套设计相对"控制位"方案的额外好处。
 
 ## 8.6 interface admission
 
@@ -1236,8 +1286,8 @@ filter protocol all pref 1 bpf chain 0 handle 0x1 \
 6. 解析 `packages.list` 与配置，填充 `uid_policy` 与两张 LPM（含固定 + 本机地址 bypass）。
 7. 生成 effective JSON → `sing-box check` → 启动 child → 等待 4 个 socket 通过 SOCK_DIAG + PID/inode 核验。
 8. 在 `flxrs1` 创建 `clsact` 并 attach `flx_in`（**先于** egress，保证回送侧就绪）。
-9. 逐个 attach 可支持的 egress filter（每个独立，失败只排除该 interface）。
-10. 最后一次 `control_root` pointer swap，发布完整 generation snapshot 与 `active=1`。
+9. 逐个处理可支持的 interface（每个独立，失败只排除该 interface）：按 §8.5.3 dump 该 parent 选出可用 pref → 按 §8.5.4 挂 `flx_verify` 做存活验证 → 通过后卸下探测、在同一 pref 挂 `flx_cap_l2`/`flx_cap_l3`。
+10. 最后一次 `control_root` pointer swap，发布完整 generation snapshot 与 `active=1`。**在此之前 `active` 全程为 0，所以第 9 步的验证不会改变任何流量的走向。**
 
 正常停止：先 publish `active=0` leaf，再关 engine。
 
@@ -2020,7 +2070,7 @@ v4/v6、connected 与 unconnected UDP 经 assign 后，sing-box 收到的 `IP_RE
 4. **GSO**：确认 TCP GSO 超级包（大文件上传，TSO 开启）能穿过 veth 并被本地栈正确处理；`CHECKSUM_PARTIAL` 在接收侧应被 `skb_csum_unnecessary` 跳过校验。依据：`__is_skb_forwardable()` 对 GSO skb 有显式豁免（v6.1 `include/linux/netdevice.h:3913-3917`），所以超级包会原样到达 peer。
 5. **UDP GSO（`UDP_SEGMENT`）**：QUIC 客户端（Cronet）会用 `UDP_SEGMENT` 发超级包。接收侧应由 `udp_queue_rcv_skb()` 的 `udp_unexpected_gso()` → `udp_rcv_segment()` 分段后再入 socket 队列。**必须实测**：让一个选中的 app 跑 QUIC 大流量，确认 engine 收到的是正确的一个个 datagram 而不是一个巨包。dae 曾因此在自己的客户端里默认关掉 UDP GSO（PR #391）——我们不能关 app 的，只能确认内核路径成立。
 6. **路由前置条件的最小集**：分别以 `all.rp_filter = 0/1`、`flxrs1.accept_local = 0/1`、**`ip_forward = 0/1`**、`arp_filter` 默认值跑矩阵，确定**真正必需的最小集**。§8.4 的预测是「需要 `flxrs1.rp_filter=0` + `accept_local=1` + `all.rp_filter=0`，不需要 `ip_forward`、不需要 `arp_filter`」；dae 三者都设了（`netns_utils.go:437-450`）。失败时**直接上 `pwru` + `kfree_skb_reason`**，不要猜（§8.4.1 有 dae 的原始 trace 可对照）。
-7. **first-applicable**：Flux 的 pref 1 是否确在最前；`TC_ACT_UNSPEC` 之后后续 filter 的计数器是否增长。
+7. **可达性与共存**：Flux 取到的 pref 之前没有终止 chain 的 classifier（用 §8.5.4 的存活验证判定，不靠 dump 推断）；`TC_ACT_UNSPEC` 之后后续 filter 的计数器仍在增长。
 
 *断言*：大文件双向传输 checksum 正确；`all.rp_filter=1` 时确实 martian-source 丢包（证明 §8.4 的检查是必要的，不是多余的保守）；`ip_forward=0` 下端到端成功（否则触发 §21 的范围变更）；后续 filter 计数器有增长。
 
@@ -2128,7 +2178,100 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 | **旧架构残留仍在设备上**:`/data/adb/flux`、`/sys/fs/bpf/flux/`(空目录)、以及**仍然安装着的 `flux` 模块** | 在 0.9.0 上机测试前**必须清理**,否则新旧模块会争同一批对象与目录 |
 | `private_dns_mode = opportunistic` | D18 依赖的明文 DNS 路径在此模式下**确实存在**(机会性 DoT,失败回落明文)。但上游支持 DoT 时查询走 853 加密,那部分不在捕获范围内——与 §1.3 的残余边界一致 |
 
-## 16.3 通过标准
+## 16.3 这份结果有多少能外推到别的手机
+
+**产品面向的不是三星。** 一台设备的实测必须先分层,才能知道哪些结论可以当作普适事实写进设计、哪些只能当作"某一族设备的样本"。下面按**依据的来源**分层——层级越高,外推越可靠。
+
+### 16.3.1 第 1 层：AOSP 源码强制,每台 Android 设备都一样
+
+这些不是"在这台设备上观察到",而是"AOSP 的代码就这么写的,实测只是确认没被厂商改掉"。**可以直接当作设计前提。**
+
+| 事实 | 依据 | 设计中的用处 |
+|---|---|---|
+| netd 的 `ip rule` 最低 priority = 10000,1–9999 空闲 | `RouteController.h:34` | §8.3 选 pref 100 |
+| netd 路由表 = `1000 + ifindex` | `RouteController.h:100` | §8.3 选 table 20260 |
+| fwmark 位布局(netId 0–15、16–20 netd 语义、31 wakeup) | `Fwmark.h:24-53` | §3.1 |
+| netd 随 interface 加入/离开网络创建并删除 `clsact` | `RouteController.cpp:1201`、`NetworkController.cpp:152` | §8.5.1、§26 不变量 4 |
+| AOSP 自身的 TC 优先级占用(ingress 1/2/3/4,egress 4/5) | `ConnectivityService.java`、`ClatCoordinator.java`、`DscpPolicyTracker.java` | §8.5.2 |
+| CLAT 的 `v4-*` 是 `ARPHRD_NONE` | `ClatCoordinator.java:471` 自述 | §3.3.1 |
+| `packages.list` 10 字段、`uid = userId*100000 + appId` | AOSP | D8 |
+| DnsResolver 用 `fchown` 把 DNS socket 归属改回 app | `res_send.cpp:789/1092` | D18 |
+
+### 16.3.2 第 2 层：GKI 强制的内核 config,Android 12+ 新机可靠
+
+`CONFIG_VETH` / `NET_CLS_BPF` / `NET_SCH_INGRESS` / `BPF_SYSCALL` / `CGROUP_BPF` / `DEBUG_INFO_BTF` 全为 `y`、`CONFIG_NETKIT` 缺失——这四项在四个 GKI 分支的 `gki_defconfig` 里逐项核对过(§4),本机实测一致。
+
+**但有两个真实的例外**,设计不能假定 GKI:
+
+1. **从旧版本升级上来的设备可能不是 GKI**。Google 只要求**新发布**的设备用 GKI;由 Android 11 升级到 13/14 的机型可能仍是厂商自建内核。
+2. **KernelSU 的 LKM / late-load 模式跑在厂商原版内核上**(§13.2.0 记录了 `KSU_RUNTIME_MODE`)。这类设备的 config 缺失概率显著更高。
+
+所以 §4 的规则不变:**每一项都必须在 activation 时以"实际调用成功"验证,而不是查版本或查 config。** 本机 `/proc/config.gz` 可读是运气,不是保证。
+
+### 16.3.3 第 3 层：SoC 厂商,覆盖面大但绝不通用
+
+| 观察 | 归属 | 外推边界 |
+|---|---|---|
+| `rmnet_data*` 是 `ARPHRD_RAWIP` | **高通**的 rmnet 驱动 | 联发科用 `ccmni*`、三星 Exynos 用 `rmnet*`/`umts_*`,**命名与 ARPHRD 都可能不同** |
+| `rmnet_ipa0`(MTU 9216) | 高通 IPA 硬件加速 | 其它平台无此设备 |
+| `qcom_qos_reset_POSTROUTING` 对本机源地址出向流量 `--set-xmark 0x0/0xffffffff` | 高通 | 但它独立印证了 §19 拒绝 mark 方案是对的 |
+
+**由此得到一条设计硬规则(本设计已经满足,此处明确写下)**:**interface admission 只按 `ARPHRD` 类型判定,绝不按名字匹配。** 唯一的例外是 CLAT 的 `v4-*` 前缀,而那是 AOSP 源码里写死的命名约定(第 1 层)。任何形如"名字以 `rmnet` 开头就当蜂窝"的代码都会在联发科设备上错。
+
+### 16.3.4 第 4 层：OEM 特有,**不可外推**——本次最重要的发现就在这一层
+
+| 观察 | 归属 |
+|---|---|
+| `semUidBPF` 占据 egress `chain 0/pref 1/handle 0x1` | 三星 |
+| `tosMarker` 五个 egress 程序、`mnxbNetd`、`semSmartHS`、`semUidBPF_ape`、`tcpAccECN` | 三星 |
+| 14 个 `epdg*`(`ARPHRD_NONE`,VoWiFi) | 三星 |
+| 86 个 prog pin / 115 个 map pin | 三星(原生 AOSP 少得多) |
+
+**§8.5.3 的 pref 冲突是三星特有的,但"某个 OEM 占了 egress pref 1"这个*类别*是普适风险。** 小米、OPPO、vivo、荣耀都有自己的网络增强 BPF,谁占了哪个 pref 无法从任何公开来源推断。
+
+**因此外推的正确方式不是猜,而是改设计:**
+
+- 不预定任何 pref,dump 后动态选取(§8.5.3 已改)。
+- **attach 之后做正向存活验证**(§8.5.4),因为这是唯一与厂商无关的"我们真的在工作"的判据。
+- `status` 必须报告实际取到的 pref 与同一 chain 上的其它 filter,让用户在陌生机型上能自证。
+
+### 16.3.5 第 5 层：内核版本带——**不能从 Android 版本推断**
+
+本机是**最有说服力的反例**:**Android 16 / SDK 36,内核却是 5.15.211**。它是从 Android 13 升级来的,GKI 分支停在 `android13-5.15`。
+
+所以以下这类映射**只对新发布机型成立**,对升级机型无效:
+
+| Android | 新机的 GKI 分支 |
+|---|---|
+| 12 | 5.10 |
+| 13 | **5.15** |
+| 14 | 6.1 |
+| 15 | 6.6 |
+| 16 | 6.12 |
+
+受内核版本影响的三条机制:
+
+| 机制 | 分界 | 本机(5.15) |
+|---|---|---|
+| `bpf_sk_assign` 拒绝 `SO_REUSEPORT` listener | < 6.5 命中 | **命中**(§9.2) |
+| 未 hash socket 的引用泄漏 | < 6.5 命中 | **命中**,靠 §9.4 的顺序规避 |
+| **TCX attach** | ≥ 6.6 可用 | **不可用** |
+
+**这三条都必须运行时探测,禁止读 `uname -r` 判定。** 厂商会回移特性,升级机型的内核也不跟随系统版本。
+
+### 16.3.6 结论：本次测试的外推价值
+
+| 问题 | 回答 |
+|---|---|
+| 第 1、2 层结论能当普适前提吗 | **能**(第 2 层附带 GKI 例外的运行时验证要求) |
+| `rmnet = RAWIP`、因此需要 L3 分支 | **需要 L3 分支这个结论普适**(总有非以太的蜂窝口);但**具体名字与类型不普适**,必须按 ARPHRD 判定 |
+| 三星占 pref 1 这件事能外推吗 | **不能**。但"OEM 可能占 pref 1"作为**风险类别**普适,已据此改成动态选 pref + 存活验证 |
+| `rp_filter=0`、`ip_forward=0` 能外推吗 | 这是**内核默认值**且 AOSP 从不设置(§8.4.1),所以**大概率**如此;但厂商可以在 `init.rc` 里改,**§8.4 的运行时读取 + 冲突即响亮失败不能省** |
+| 一台设备够吗 | **不够,但它把设计从"猜"推进到了"知道要测什么"**。真正需要的补充样本是:一台**联发科**设备(验证 `ccmni` 的 ARPHRD)、一台 **6.6+ 新机**(验证 TCX 路径)、一台**非三星 OEM**(验证 pref 冲突的普遍性) |
+
+**这一节的方法论要求**:今后每次在新机型上跑 `tools/phase0/observe.sh`,结论都要按上面五层归类再写进文档。把 OEM 层的观察当成普适事实,是这份设计最容易犯的错。
+
+## 16.4 通过标准
 
 - `2 family × 2 protocol` 的 TCP/UDP 原目的**逐字节**一致，4 个 socket 全部完成 readiness 核验。
 - 任何 pre-redirect 的未入场失败保留原 skb（真实目的侧能看到该连接直连成功）；任何 post-boundary 失败明确 drop（真实目的侧看不到任何字节）。
@@ -2428,7 +2571,24 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 | WebUI / 自有 Clash 代理层 | sing-box 自带 Clash API 与 `observability`，重复造一层只增加攻击面 | 用户直接连 sing-box 的 `clash_api` |
 | 管理器 App | 控制协议已是版本化 JSON over SEQPACKET（§10.3），且命令幂等 | 加命令即可，协议不需要改造 |
 | 16 KiB base page | 由固定 engine 资产的 `p_align` 决定，不是我们能选的（§3.8） | 官方资产达到 `p_align >= 0x4000` 后改 `engine.lock` 与一处 page-size 判定 |
-| **TCX attach（6.6+）** | **基线内核 5.15 根本没有这个 API**，不是"以后再优化"。它能消除 §8.5.1 整类失败（netd 删 clsact 连带删我们的 filter），但只对 6.6+ 设备有效 | 在 §12.5 的 attach 层加一个分支：探测到 `BPF_LINK_CREATE` 支持 `BPF_TCX_INGRESS`/`BPF_TCX_EGRESS` 就用 link，否则回落 clsact filter。所有权谓词相应换成 link id。三个 BPF 程序与全部 map **一行不改** |
+| **TCX attach（6.6+）** | 见下方专门说明——它现在是**优先级最高的延期项**，因为它同时消灭两整类失败 | 在 §12.5 的 attach 层加一个分支：探测到 `BPF_LINK_CREATE` 支持 `BPF_TCX_INGRESS`/`BPF_TCX_EGRESS` 就用 link，否则回落 clsact filter。所有权谓词换成 link id。四个 BPF 程序与全部 map **一行不改** |
+
+### 22.2.1 为什么 TCX 是延期项里唯一值得优先做的
+
+2026-08-25 的实测把 TCX 的价值从"少一类运维噪音"提升到"消灭两整类失败"：
+
+| 它消灭的失败类 | 在 clsact 上的表现 |
+|---|---|
+| **netd 删 qdisc 连带删我们的 filter**（§8.5.1） | 每次 Wi-Fi 重连 / 蜂窝切换 / netd 重启都发生，需要 §26 不变量 4 那套局部重挂逻辑 |
+| **厂商占据更低的 pref 把我们挡在 chain 之外**（§8.5.3） | tc 的 pref 最小是 1，被占了就**无法排到前面**，只能靠 §8.5.4 检测出来然后放弃该 interface |
+
+TCX 是**独立的 attach 点**，不挂在 qdisc 上，所以 `tcQdiscDelDevClsact` 碰不到它；而且它用 `BPF_F_BEFORE` / `BPF_F_AFTER` 相对**现有条目**定位，legacy clsact 整体在这套序列里只算一个条目——也就是说在 6.6+ 上我们**可以排到厂商 clsact filter 之前**，§8.5.3 的整个困境直接消失。
+
+**但它不能替代 5.15 上的方案**，理由是 §16.3.5 那条实测事实：本机是 **Android 16 跑 5.15 内核**。内核版本不跟随系统版本，升级机型会长期停在 5.10/5.15/6.1。所以：
+
+- clsact 路径 + §8.5.3 动态选 pref + §8.5.4 存活验证是**必须实现的主路径**，不是兜底。
+- TCX 是**能力探测后的优选路径**，只在 6.6+ 上生效，且**探测方式是尝试 `BPF_LINK_CREATE` 是否成功，不是读 `uname -r`**（§16.3.5）。
+- 两条路径共用同一批程序与 map，差异只在 attach 层与所有权谓词。§8.5.4 的存活验证**两条路径都要跑**——TCX 也可能被别人抢先。
 
 ## 22.3 刻意不做，且将来也不做
 
@@ -2473,7 +2633,9 @@ nftables/iptables 后端、TUN 后端、cgroup attach、SOCKMAP/FD handoff、机
 | 4 个 socket 未在 deadline 内出现 | SOCK_DIAG 退避重查超时 | 停止 candidate，`Inactive` | `"engine_not_ready:2/4 sockets"` |
 | socket inode 与 candidate pid 不符 | `/proc/<pid>/fd` 交叉核验 | 停止 candidate，`Inactive` | `"engine_socket_owner_mismatch"` |
 | `clsact` 带 shared block | dump 见 `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK` | **排除该 interface**，其余继续 | 该 interface `excluded(clsact_shared_block)` |
-| pref 1 被未知 filter 占用 | dump + §8.5 谓词 | 排除该 interface | `excluded(tc_pref_occupied)` |
+| 无可用 pref（`v4-*` 上 1–3 全被占） | dump + §8.5.3 | 排除该 interface | `excluded(tc_no_usable_pref)` |
+| 取到 pref 但被前面的 filter 遮挡 | §8.5.4 存活验证：tx 在涨而 `SAW_PACKET` 不涨 | 排除该 interface，点名遮挡者 | `excluded(tc_chain_shadowed)` |
+| 存活验证窗口内无流量 | tx 也不涨 | 退避重试；到上限仍无流量则允许激活并标注 | `warn(tc_verify_no_traffic)` |
 | Flux filter 不是 first-applicable | dump **顺序** | 排除该 interface | `excluded(not_first_applicable)` |
 | candidate interface 超过 64 | 计数 | **整个新 topology 不 promote**，保持当前/Direct，不按名字截断 | `"too_many_interfaces:71"` |
 
