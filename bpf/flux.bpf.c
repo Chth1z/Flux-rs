@@ -70,6 +70,17 @@
 
 #include "flux_abi.h"
 
+// AF_INET / AF_INET6 live in <linux/socket.h>, which drags in definitions that
+// clash with the UAPI headers above under -target bpf. Every BPF project ends
+// up spelling the two constants out; they are frozen ABI, not implementation
+// detail. struct bpf_sock.family carries exactly these values.
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
+
 char LICENSE[] SEC("license") = "GPL";
 
 #ifndef BPF_SK_STORAGE_GET_F_CREATE
@@ -115,11 +126,25 @@ struct {
 	__type(value, struct flux_decision);
 } tcp_decision SEC(".maps");
 
+// The value size is spelled out rather than given as __type(value,
+// struct flux_control), and that is not a style choice. The program only ever
+// touches a flux_control through a pointer, so clang prunes it to a BTF forward
+// declaration -- confirmed on this object as "[95] FWD 'flux_control'". libbpf
+// parses this struct as the inner-map definition of control_root and cannot
+// size a FWD, so it refuses the whole object with:
+//
+//   map 'control_root.inner': can't determine value size for type [95]: -22
+//
+// which costs the project the ability to run `bpftool prog loadall` as a
+// verifier smoke test. The alternatives all add something unwanted: an
+// instantiated inner map the loader would have to ignore, or a dummy global
+// that turns into a .rodata/.bss map. An explicit size adds nothing, and
+// sizeof() still fails the build if the layout ever changes underneath it.
 struct control_leaf {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, struct flux_control);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(struct flux_control));
 };
 
 struct {
@@ -629,7 +654,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 //
 // TC_ACT_UNSPEC so the chain continues exactly as it would without us: the
 // probe must not change the fate of a single packet. See blueprint 8.5.4.
-SEC("tc/verify")
+SEC(FLUX_SEC_VERIFY)
 int flx_verify(struct __sk_buff *skb)
 {
 	(void)skb;
@@ -642,7 +667,7 @@ int flx_verify(struct __sk_buff *skb)
 // (FLUX_TC_PREF_PREFERRED and friends -- pref 1 is NOT ours to assume; Samsung
 // holds it on wlan0 on the measured device). It MUST be the first applicable
 // classifier so that TC_ACT_UNSPEC still reaches AOSP/OEM filters.
-SEC("tc/cap_l2")
+SEC(FLUX_SEC_CAP_L2)
 int flx_cap_l2(struct __sk_buff *skb)
 {
 	return cap_core(skb, 0);
@@ -651,7 +676,7 @@ int flx_cap_l2(struct __sk_buff *skb)
 // Raw-IP egress: Qualcomm rmnet (ARPHRD_RAWIP) and strictly identified CLAT
 // `v4-*` tunnels. skb->data is at the network header, so a 14 byte internal
 // Ethernet header is pushed before redirecting into the veth.
-SEC("tc/cap_l3")
+SEC(FLUX_SEC_CAP_L3)
 int flx_cap_l3(struct __sk_buff *skb)
 {
 	return cap_core(skb, 1);
@@ -664,7 +689,7 @@ int flx_cap_l3(struct __sk_buff *skb)
 // when crossing a netns, and both veth ends live in the root netns. We simply
 // have nothing to pass, and spending an Android fwmark bit to pass it would be
 // worse than free. Do not "fix" this by adding a mark.
-SEC("tc/in")
+SEC(FLUX_SEC_IN)
 int flx_in(struct __sk_buff *skb)
 {
 	const struct flux_control *c = ctrl();

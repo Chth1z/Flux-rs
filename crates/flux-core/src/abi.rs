@@ -184,6 +184,40 @@ pub const PROG_VERIFY: &str = "flx_verify";
 /// Every program symbol the loader must find in the embedded object.
 pub const PROG_NAMES: [&str; 4] = [PROG_CAP_L2, PROG_CAP_L3, PROG_IN, PROG_VERIFY];
 
+// ------------------------------------------------------------- ELF sections
+
+/// ELF section holding [`PROG_CAP_L2`].
+pub const SEC_CAP_L2: &str = "tc";
+/// ELF section holding [`PROG_CAP_L3`].
+pub const SEC_CAP_L3: &str = "classifier";
+/// ELF section holding [`PROG_IN`].
+pub const SEC_IN: &str = "tc/ingress";
+/// ELF section holding [`PROG_VERIFY`].
+pub const SEC_VERIFY: &str = "tc/egress";
+
+/// Program symbol paired with the section that holds it, in the order the
+/// loader walks them.
+///
+/// These names are constrained, not chosen for looks. libbpf recognises only a
+/// fixed set of section names for `BPF_PROG_TYPE_SCHED_CLS`, and an object using
+/// anything else cannot be loaded by `bpftool` at all -- which would cost the
+/// project its cheapest verifier gate. Measured on the baseline in
+/// `docs/verification/phase0.md` §16.7: `tc`, `classifier`, `tc/ingress`,
+/// `tc/egress` and `tcx/egress` all load and attach through legacy tc, any
+/// `<prefix>/<custom>` form fails to load, and `action` loads as `SCHED_ACT`
+/// and then cannot attach.
+///
+/// One program per section is also deliberate: several programs can share a
+/// single section, but then relocation offsets are section-relative rather than
+/// program-relative and the loader has to rebase them per function. Keeping one
+/// program per section removes that class of bug outright.
+pub const PROG_SECTIONS: [(&str, &str); 4] = [
+    (PROG_CAP_L2, SEC_CAP_L2),
+    (PROG_CAP_L3, SEC_CAP_L3),
+    (PROG_IN, SEC_IN),
+    (PROG_VERIFY, SEC_VERIFY),
+];
+
 // ----------------------------------------------------------- network objects
 
 /// veth end that receives redirected packets.

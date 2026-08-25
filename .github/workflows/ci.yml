@@ -66,6 +66,37 @@ jobs:
         run: cargo xtask abi-check
         continue-on-error: true # not implemented yet (blueprint §17 phase 7)
 
+      - name: Install bpftool
+        run: sudo apt-get install -y linux-tools-common linux-tools-generic
+
+      # The cheapest gate the project has, and it has already earned its place:
+      # the run that first exercised it found that every program carried an ELF
+      # section name libbpf refuses (SEC("tc/cap_l2") and friends), so not one
+      # of them could be loaded at all. Compiling had not noticed, because
+      # compiling never does. See docs/verification/phase0.md section 16.8.
+      #
+      # bpftool builds maps from the BTF declarations, whereas fluxd builds them
+      # explicitly in maps.rs (blueprint 12.2). So a pass here means the PROGRAM
+      # LOGIC verifies, not that the map parameters are right -- and the runner's
+      # kernel is x86_64 and newer than the arm64 5.15 baseline, so this
+      # supplements on-device verification rather than replacing it. A verifier
+      # rejection here is still real and worth failing the build over.
+      - name: Verifier gate
+        run: |
+          set -eu
+          obj=$(find target -name 'flux.bpf.o' -print -quit)
+          if [ -z "$obj" ]; then
+            echo "flux.bpf.o not produced by the build step above"; exit 1
+          fi
+          echo "object: $obj"
+          sudo bpftool prog loadall "$obj" /sys/fs/bpf/fluxci
+          echo "--- loaded:"
+          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
+          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
+          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_in
+          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_verify
+          sudo rm -rf /sys/fs/bpf/fluxci
+
   android:
     name: aarch64-linux-android
     runs-on: ubuntu-latest
