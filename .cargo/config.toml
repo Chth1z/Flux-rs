@@ -1,0 +1,12 @@
+[alias]
+xtask = "run -p xtask --"
+
+# Android cross-compilation. The linker is provided by NDK r27.3.13750724;
+# `cargo xtask` resolves and verifies the exact path, this alias only records
+# the API level the product targets.
+#
+# Set ANDROID_NDK_HOME and add the toolchain bin directory to PATH, or override
+# the linker here, before building for a device.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android31-clang"
+rustflags = ["-C", "target-feature=+crt-static"]

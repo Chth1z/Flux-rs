@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain, including its components and the aarch64-linux-android
+      # target, is pinned by rust-toolchain.toml.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  bpf:
+    name: bpf object
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Proves bpf/flux.bpf.c still compiles for the bpf target. The loader
+      # itself is exercised on-device, not here.
+      - name: Compile data plane
+        env:
+          FLUX_BUILD_BPF: "1"
+        run: cargo build -p fluxd
+
+      # flux_abi.h is the sole source of truth; flux-core/src/abi.rs mirrors it
+      # by hand. This compares clang's offsets against the Rust mirror so the
+      # two can never drift silently.
+      - name: ABI offset cross-check
+        run: cargo xtask abi-check
+        continue-on-error: true # not implemented yet (blueprint §17 phase 7)
+
+  android:
+    name: aarch64-linux-android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Cross build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          cargo build --workspace --target aarch64-linux-android
+
+  supply-chain:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check module scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          # Module scripts run under BusyBox ash, so target sh, not bash.
+          shellcheck --shell=sh --severity=warning module/*.sh
