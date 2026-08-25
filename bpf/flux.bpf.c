@@ -14,9 +14,18 @@
 // authoritative parameters and binds relocations by symbol name.
 //
 // Contract reminders that the implementer MUST NOT relax:
-//   * egress "not taking over" is ALWAYS TC_ACT_UNSPEC, never TC_ACT_OK.
-//     TC_ACT_OK ends the classifier chain and would skip AOSP CLAT / OEM
-//     filters that must still run for direct traffic.
+//   * egress "not taking over" is ALWAYS TC_ACT_UNSPEC, never TC_ACT_OK and
+//     never TC_ACT_PIPE. Two independent reasons:
+//       - on clsact, TC_ACT_OK ends the classifier chain and would skip AOSP
+//         CLAT and the OEM filters that must still run for direct traffic;
+//       - on TCX (if the attach layer ever takes that path), TC_ACT_PIPE
+//         truncates the TCX program array before it is mapped to "next", so it
+//         skips programs attached after us. Only TC_ACT_UNSPEC continues into
+//         both the remaining TCX programs and the legacy clsact chain.
+//     The TCX half is not our discovery: chizi's Android sing-box fork records
+//     it in common/ebpf/native/shared_network.bpf.c, and for the same reason.
+//     Note that dae returns TC_ACT_OK on 23 paths in control/kern/tproxy.c,
+//     which is fine on a Linux router and would be a bug here. Do not copy it.
 //   * once a valid CAPTURED decision has been observed, every later failure
 //     is TC_ACT_SHOT. Never fall back to the real destination.
 //   * every bpf_sk_lookup_* reference is released exactly once on every
