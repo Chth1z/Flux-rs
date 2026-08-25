@@ -17,6 +17,7 @@
 //! reading the section it cites.
 
 pub mod abi;
+pub mod btf;
 pub mod cidr;
 pub mod config;
 pub mod control_wire;
