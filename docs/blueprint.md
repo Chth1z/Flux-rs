@@ -1183,7 +1183,33 @@ AOSP 自己在 `ConnectivityService.java:12231-12240` 记录了这个约束："*
 
 1. **ingress pref 1 在物理 interface 上是冲突的**（`tc police`）。这不影响我们——我们的 ingress filter 只装在自有的 `flxrs1` 上，那里没有别人。
 2. **egress pref 1 无硬冲突**，`v4-*` 上的 CLAT egress 在 pref 4，我们在 pref 1 先跑，正是 §3.4 要求的顺序。
-3. **但 egress pref 5 的 `dscpPolicy` 会被跳过**：被捕获的包在 pref 1 返回 `TC_ACT_REDIRECT`，chain 终止，dscpPolicy 看不到它。后果见 §2.2.3(6)。**不要因此改到 pref ≥ 6**——那样一旦 pref < 6 的某个 filter 返回 `TC_ACT_PIPE`/`TC_ACT_OK`，chain 就在我们之前终止，我们**完全不会运行**。留在 pref 1 + `TC_ACT_UNSPEC` 是唯一自洽的选择。
+3. **但 egress pref 5 的 `dscpPolicy` 会被跳过**：被捕获的包在 pref 1 返回 `TC_ACT_REDIRECT`，chain 终止，dscpPolicy 看不到它。后果见 §2.2.3(6)。
+
+### 8.5.3 厂商已经占了 egress pref 1：pref 不能硬编码
+
+> **2026-08-25 实测推翻了 §8.5.2 的一个隐含前提。** 我原先假定"AOSP 只用 pref 1（ingress，`tc police`）、4、5，所以 **egress** pref 1 是我们的"。在 SM-S9180 / Android 16 上实测：
+
+```
+# tc filter show dev wlan0 parent ffff:fff3        (clsact egress)
+filter protocol all pref 1 bpf chain 0 handle 0x1 \
+    prog_semUidBPF_schedcls_egress_tsm_ether id 96 tag 2ef4ef809be2dd32 jited
+```
+
+三星的 `semUidBPF` 占据 **`chain 0` / `pref 1` / `handle 0x1` / `protocol all`**——与 `flux_abi.h` 里 `FLUX_TC_CHAIN` / `FLUX_TC_PREF` / `FLUX_TC_HANDLE_EGRESS` **完全相同的四元组**。ingress 侧同样被 `..._ingress_tsm_ether` 占据（对我们无影响，我们的 ingress 在自有 veth 上）。
+
+**三条由此推出的硬约束**：
+
+1. **pref 1 不是我们能预定的。** tc 的 priority 取值是 `1..0xFFFF`，1 已是最小值，所以在厂商占了 pref 1 的接口上，**我们无法排到它前面**。`FLUX_TC_PREF` 必须从"固定值 1"改成"**dump 后选出的最低可用值**"，并把实际取到的 pref 记进所有权谓词与 `status`。
+2. **在 CLAT 的 `v4-*` 上仍必须 < 4**（AOSP CLAT egress 在 pref 4，§3.4）。若 1/2/3 在该接口全被占，**排序约束无法满足 → 排除该 interface**，不要降级到 pref ≥ 4。
+3. **"attach 成功"不再等于"能工作"。** 如果 pref 1 的厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，classifier chain 会在我们之前终止，我们的程序**一个包也收不到，而 attach 本身完全成功**。因此激活流程必须增加一步**正向存活验证**：attach 之后用已知流量确认我们的 per-CPU counter 真的在涨；不涨就 `Inactive` 并报告 `tc_chain_shadowed`。这条是本次实测新增的要求，§8.7 步骤 9 之后、步骤 10 之前执行。
+
+**还有一个竞态，比上面三条更难处理。** 探针第一次运行时，`wlan0` 已连上、已有全局地址、已有 `clsact`，但**还没有 filter**；几分钟后三星才把 egress 程序挂上（程序本身在开机后 7 秒就由 bpfloader 加载并 pin 了，`loaded_at` 与 attach 时刻是两件事）。含义：
+
+- **一次性的冲突检查会漏。** 激活时 pref 1 空着，不代表它会一直空着。
+- **我们若先占了 pref 1**，厂商随后的 attach 要么失败（我们悄悄弄坏了三星的流量统计），要么用 `NLM_F_REPLACE` 把我们顶掉（捕获静默停止）。两种都不可接受。
+- 因此**即使 pref 1 当时是空的，也不应该占它**。选 pref 的策略是"满足排序约束的前提下，避开厂商惯用的 pref 1"，并靠 §10.4 的 `RTM_NEWTFILTER` 事件持续监视自己那一条是否还在、以及是否有新 filter 插到我们前面。
+
+**这一条同时改变了 §2.2.3(6) 的影响面评估**：本机除 AOSP 的 `dscpPolicy` 外，三星还有 `tosMarker` 系列**五个** egress 程序（`classify_ack` / `classify_uid` / `classify_queue_mapping` / `set_queue_mapping` / `set_tos_mobile`）以及 `mnxbNetd`、`semUidBPF_ape`、`tcpAccECN` 的 ether 变体。被捕获流量绕过的下游 filter 比蓝图原先设想的多得多。
 
 ## 8.6 interface admission
 
@@ -1966,9 +1992,9 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 
 Phase 0 在临时目录（`/tmp` 或独立 worktree）完成，只含一个最小 BPF C、一个小 loader、一份 netns 脚本与官方 sing-box。**不预建 Flux 框架，产物不进最终仓库。**
 
-先在 Linux 主机的 network namespace 里跑 Q1–Q5（**必须是 5.15 内核**，与产品基线一致），再在一台可恢复的目标 Android 设备上跑 Q6–Q9。
+先在 Linux 主机的 network namespace 里跑 Q1–Q5（**必须是 5.15 内核**，与产品基线一致），再在一台可恢复的目标 Android 设备上跑 Q6–Q10。**Q10 只能在真机上做**，因为它要验证的是厂商 filter 的行为。
 
-## 16.1 九个必答问题
+## 16.1 十个必答问题
 
 **Q1 — SK_STORAGE first-decision**
 在 TC egress 中对 `bpf_sk_fullsock(skb->sk)` 执行 `bpf_sk_storage_get(..., &initial, F_CREATE)`：verifier 是否接受？并发 SYN 是否由 `BPF_NOEXIST` 语义产生唯一 winner、loser 在 `CREATE` 返回 NULL 后能用只读重查稳定读回同一 winner？两种 state 是否在后续 egress 保持不变、并随 socket 关闭释放（无容量驱逐）？
@@ -2036,6 +2062,18 @@ engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时�
 
 6. 顺带验证 §1.3.5：在用户 JSON 里加一条 `{"package_name": ["<选中的包名>"], "outbound": "<某个出口>"}` 规则，确认它命中（`sing-box` debug 日志会打印匹配的 rule）。若 `tun.NewPackageManager` 在该设备失败，日志会有 warn，则 `package_name` 规则静默不匹配——记录为已知边界，不阻塞。
 
+**Q10 — 厂商 filter 在前时我们还会不会运行（阻塞项，2026-08-25 实测新增）**
+
+由 §8.5.3 的实测引出：三星在 `wlan0` egress 占据 `chain 0 / pref 1 / handle 0x1`，而 tc 的 priority 最小就是 1，所以我们只能排在它**后面**。而 `__tcf_classify` 一旦某个 filter 返回 `>= 0` 的动作就停止遍历——**如果厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，我们的程序一个包都收不到，同时 attach 本身完全成功、没有任何错误。** 这是本设计目前最可能"装上了但什么都没发生"的失效模式。
+
+1. 在 `wlan0` egress 的 **pref 2** 挂一个最小程序（只对每个包 `counters[0]++` 然后返回 `TC_ACT_UNSPEC`），产生已知流量，断言计数器**在涨**。
+2. 若不涨：说明厂商 pref 1 终止了 chain。改测 pref 1 是否可抢（`NLM_F_EXCL` 应当 `EEXIST`；**不要**用 `NLM_F_REPLACE` 去顶掉厂商的）。此时要么该 interface 只能排除，要么整条 clsact 路线在三星设备上不可用，**属于范围变更，回 §21 征求确认**。
+3. 在**蜂窝** interface 上重复：实测时 `rmnet_data0/1/8` 的 egress 是空的，pref 1 可用，但 `tosMarker_schedcls_egress_set_tos_mobile` 这个程序存在，说明它在某些条件下会挂上来。至少要确认"我们在 pref 2、厂商不在场"时计数器会涨。
+4. 验证 §8.5.3 的竞态：我们先占 pref 2 并保持运行，然后触发 Wi-Fi 重连，观察三星的 attach 是否成功、我们的 filter 是否仍在、以及 `RTM_NEWTFILTER` 事件是否被 reactor 正确收到。
+5. **由此固化一条激活步骤**：attach 之后、`publish active=1` 之前，必须用正向存活验证确认程序真的在跑（§8.5.3 约束 3）。这一步的实现方式也在本问中定稿。
+
+*断言*：pref 2 上的计数器在真实流量下增长；`NLM_F_EXCL` 对已占用的 pref 返回 `EEXIST` 而非静默成功；厂商重新 attach 后我们的 filter 仍在且仍在计数。
+
 **若第 1 或 3 条不成立，D18 被证伪**：那说明该内核的 `sockfs_setattr` → `sk_uid` 链路或 AOSP 的 `fchown` 行为与源码不符。此时必须回到设计，重新在旧的"不捕获系统 DNS"与"全设备劫持 :53"之间选择，**不得**靠特判 :53 端口蒙过去。
 
 ## 16.2 观测半场的实测结果（SM-S9180 / Android 16 / 5.15.211-Qkernel，2026-08-25）
@@ -2067,7 +2105,15 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 
 **(a) cgroup 槽位不是常驻占用。** 见 §0.1 第 2 条的更正框。`bpftool cgroup show` 对根、`/apps`、`/system` 与全树遍历**全部返回空**,但 8 个 `cgroup_sock_addr` 程序确实已加载。结论:bpfloader 开机只 load+pin,按需 attach。
 
-**(b) AOSP 的 TC 优先级表描述的是"潜在冲突",不是当前状态。** §8.5.2 那张表来自 AOSP 源码常量,是对的;但**本机当前 `tc filter show` 在所有 interface 上都是空的**,`bpftool net show` 的 xdp/tc/flow_dissector/netfilter **四项全空**,而同时有 **29 个 `sched_cls` 程序已加载**。也就是说 tethering / CLAT / `tc police` / `dscpPolicy` 的程序都躺在那里等激活。实际含义:egress pref 1 在常态下是空闲的,§8.5.2 的共存设计仍然必要,但触发条件比预想的稀疏。
+> **第二次复核(卸载旧模块、关闭 VPN、重启后)**:结论**完全一致**。全新启动、无 VPN、无 Flux 残留的干净状态下,cgroup attach 列表依然全空,而 8 个 `cgroup_sock_addr` 仍然已加载。这条更正**可复现,不是偶发**。
+
+**(b) 厂商已经占了 egress pref 1——这是本轮最重要的发现,已导致 ABI 与激活流程改动。** 详见 **§8.5.3**。
+
+第一轮采集时 `tc filter show` 在所有 interface 上都是空的,我据此写下"egress pref 1 在常态下是空闲的"。**第二轮推翻了它**:重启后主网变成 `wlan0`(ARPHRD_ETHER),三星的 `semUidBPF_schedcls_egress_tsm_ether` 占据了 `chain 0 / pref 1 / handle 0x1 / protocol all`——与 `flux_abi.h` 原先预定的四元组完全相同。
+
+两轮结果不同的原因本身就是一个发现:**厂商的 attach 时刻不可预测**。第一轮 `wlan0` 处于 down(主网是蜂窝),第二轮 `wlan0` 成为主网。更关键的是第二轮内部也自相矛盾——探针第 6 节报"无 filter",而同一次运行第 10 节的 `bpftool net show` 报"已 attach";核对时间戳后确认程序在开机后 7 秒就由 bpfloader 加载(`loaded_at`),但**挂到 `wlan0` 上是在链路已带全局地址之后好几分钟**。`loaded_at` 与 attach 时刻是两件事。
+
+因此:`FLUX_TC_PREF` 从固定常量改为 `FLUX_TC_PREF_PREFERRED`(2)/`_MIN`/`_CLAT_MAX` 三元组 + dump 后动态选取;激活流程新增"正向存活验证";Phase 0 新增 **Q10**。探针也已改为**采样两次**并显式用 clsact parent handle,否则会漏掉这类晚到的 attach。
 
 ### 16.2.3 蓝图完全没有预料到的
 

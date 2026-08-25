@@ -26,6 +26,11 @@
 
 /* Bump on ANY layout, map-set or semantic change. Not related to SemVer.
  * 0xF10C0901: dropped peer_mac/host_mac; ingress forces PACKET_HOST instead.
+ *
+ * Scope note: purely userspace-side attach parameters -- the FLUX_TC_PREF_*
+ * constants below, object names, interface names -- are NOT part of the
+ * kernel/userspace data contract and do not require a bump, because no BPF
+ * program reads them. Only struct layouts and the map set do.
  */
 #define FLUX_ABI_MAGIC 0xF10C0901u
 
@@ -270,9 +275,34 @@ enum flux_counter {
  * name, the program's map set, and the dump ORDER (first applicable).
  */
 #define FLUX_TC_CHAIN 0
-#define FLUX_TC_PREF 1
 #define FLUX_TC_HANDLE_EGRESS 0x1
 #define FLUX_TC_HANDLE_INGRESS 0x2
+
+/* Egress preference is NOT a fixed constant. Measured on SM-S9180 / Android 16:
+ * Samsung's semUidBPF already holds chain 0 / pref 1 / handle 0x1 /
+ * protocol all on wlan0's clsact egress -- the exact quadruple this header
+ * used to reserve. tc priorities start at 1, so on such an interface there is
+ * no way to order ahead of the vendor.
+ *
+ * The loader therefore DUMPS the parent first and picks the lowest preference
+ * that satisfies the ordering constraints, recording what it actually got.
+ * Two rules the loader must honour (docs/blueprint.md section 8.5.3):
+ *
+ *   - Avoid pref 1 even when it looks free. The vendor attaches late (observed
+ *     minutes after the link carried traffic), so taking pref 1 either breaks
+ *     the vendor's attach or gets silently replaced by it.
+ *   - On a CLAT v4-* interface the result MUST stay below FLUX_TC_PREF_CLAT_MAX,
+ *     because AOSP's CLAT egress translation sits at 4. If no such preference
+ *     is free, exclude the interface rather than ordering after CLAT.
+ *
+ * And because "attach succeeded" no longer implies "runs": a filter at a
+ * higher preference never executes if a lower one returns TC_ACT_OK or
+ * TC_ACT_PIPE. Activation must positively confirm the program observes traffic
+ * before publishing active=1.
+ */
+#define FLUX_TC_PREF_PREFERRED 2 /* first choice: past the vendor's usual 1 */
+#define FLUX_TC_PREF_MIN 1       /* tc floor; only if nothing else is possible */
+#define FLUX_TC_PREF_CLAT_MAX 4  /* must be strictly below on v4-* interfaces  */
 
 /* --------------------------------------------------------- network objects */
 
