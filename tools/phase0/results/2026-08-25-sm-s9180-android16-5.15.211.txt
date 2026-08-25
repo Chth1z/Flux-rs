@@ -1,0 +1,309 @@
+
+########## 0. context
+probe_version: 1
+date: 2026-08-25T03:32:41Z
+uptime_s: 980.23
+id: uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
+selinux: Enforcing
+kernel: 5.15.211-Qkernel-g9dd1df9bde
+pagesize: 4096
+ro.build.version.release: 16
+ro.build.version.sdk: 36
+ro.build.version.security_patch: 2026-04-05
+ro.product.cpu.abi: arm64-v8a
+ro.soc.manufacturer: QTI
+ro.soc.model: SM8550
+ro.board.platform: kalama
+ro.product.model: SM-S9180
+root_manager: magisk-or-unknown
+
+########## 1. kernel config (blueprint section 4)
+source: /proc/config.gz
+  CONFIG_VETH=y
+  CONFIG_DUMMY=y
+  CONFIG_TUN=y
+  CONFIG_NETKIT ABSENT
+  CONFIG_NET_SCH_INGRESS=y
+  CONFIG_NET_CLS_BPF=y
+  CONFIG_NET_CLS_ACT=y
+  CONFIG_NET_ACT_BPF=y
+  CONFIG_NET_ACT_MIRRED=y
+  CONFIG_BPF=y
+  CONFIG_BPF_SYSCALL=y
+  CONFIG_BPF_JIT=y
+  CONFIG_BPF_JIT_ALWAYS_ON=y
+  CONFIG_CGROUP_BPF=y
+  CONFIG_DEBUG_INFO_BTF=y
+  CONFIG_DEBUG_INFO_BTF_MODULES=y
+  CONFIG_IP_ADVANCED_ROUTER=y
+  CONFIG_IP_MULTIPLE_TABLES=y
+  CONFIG_NF_CONNTRACK=y
+  CONFIG_NETFILTER_XT_TARGET_TPROXY=y
+  CONFIG_NETFILTER_XT_MATCH_SOCKET=y
+  CONFIG_NAMESPACES=y
+  CONFIG_NET_NS=y
+
+########## 2. BTF availability
+/sys/kernel/btf/vmlinux bytes=5779111
+
+########## 3. sysctls that decide whether the veth return path works
+  /proc/sys/net/ipv4/conf/all/rp_filter = 0
+  /proc/sys/net/ipv4/conf/default/rp_filter = 0
+  /proc/sys/net/ipv4/conf/all/accept_local = 0
+  /proc/sys/net/ipv4/conf/all/arp_filter = 0
+  /proc/sys/net/ipv4/conf/all/route_localnet = 0
+  /proc/sys/net/ipv4/conf/all/src_valid_mark = 0
+  /proc/sys/net/ipv4/ip_forward = 0
+  /proc/sys/net/ipv6/conf/all/forwarding = 0
+  /proc/sys/net/ipv4/ip_local_port_range = 32768	60999
+  /proc/sys/net/core/bpf_jit_enable = 1
+  /proc/sys/net/core/bpf_jit_harden = 0
+  /proc/sys/kernel/unprivileged_bpf_disabled = 0
+--- any interface with a NON-ZERO rp_filter or non-default accept_local?
+  (nothing listed above means every interface is rp_filter=0 accept_local=0)
+--- sysctl node label (can a module domain write it?)
+-rw-r--r-- 1 root root u:object_r:proc_net:s0  0 2026-08-25 11:32 /proc/sys/net/ipv4/conf/all/accept_local
+
+########## 4. link types -- ARPHRD decides the L2 vs L3 egress entry
+  NAME             TYPE                 FLAGS    MTU
+  dummy0           ARPHRD_ETHER         0x83     1500
+  epdg0            ARPHRD_NONE/tun      0x1090   1500
+  epdg1            ARPHRD_NONE/tun      0x1090   1500
+  epdg10           ARPHRD_NONE/tun      0x1090   1500
+  epdg11           ARPHRD_NONE/tun      0x1090   1500
+  epdg12           ARPHRD_NONE/tun      0x1090   1500
+  epdg13           ARPHRD_NONE/tun      0x1090   1500
+  epdg2            ARPHRD_NONE/tun      0x1090   1500
+  epdg3            ARPHRD_NONE/tun      0x1090   1500
+  epdg4            ARPHRD_NONE/tun      0x1090   1500
+  epdg5            ARPHRD_NONE/tun      0x1090   1500
+  epdg6            ARPHRD_NONE/tun      0x1090   1500
+  epdg7            ARPHRD_NONE/tun      0x1090   1500
+  epdg8            ARPHRD_NONE/tun      0x1090   1500
+  epdg9            ARPHRD_NONE/tun      0x1090   1500
+  erspan0          ARPHRD_ETHER         0x1002   1450
+  gre0             type=778             0x80     1476
+  gretap0          ARPHRD_ETHER         0x1002   1462
+  ifb0             ARPHRD_ETHER         0x82     1500
+  ifb1             ARPHRD_ETHER         0x82     1500
+  ip6_vti0         type=769             0x80     1364
+  ip6gre0          type=823             0x80     1448
+  ip6tnl0          type=769             0x80     1452
+  ip_vti0          type=768             0x80     1480
+  lo               ARPHRD_LOOPBACK      0x9      65536
+  p2p0             ARPHRD_ETHER         0x1002   1500
+  rmnet_data0      ARPHRD_RAWIP         0x0      1460
+  rmnet_data1      ARPHRD_RAWIP         0x1      1432
+  rmnet_data10     ARPHRD_RAWIP         0x0      1500
+  rmnet_data11     ARPHRD_RAWIP         0x0      1500
+  rmnet_data12     ARPHRD_RAWIP         0x0      1500
+  rmnet_data13     ARPHRD_RAWIP         0x0      1500
+  rmnet_data14     ARPHRD_RAWIP         0x0      1500
+  rmnet_data2      ARPHRD_RAWIP         0x0      1500
+  rmnet_data3      ARPHRD_RAWIP         0x0      1500
+  rmnet_data4      ARPHRD_RAWIP         0x0      1500
+  rmnet_data5      ARPHRD_RAWIP         0x0      1500
+  rmnet_data6      ARPHRD_RAWIP         0x0      1500
+  rmnet_data7      ARPHRD_RAWIP         0x0      1500
+  rmnet_data8      ARPHRD_RAWIP         0x1      1400
+  rmnet_data9      ARPHRD_RAWIP         0x0      1500
+  rmnet_ipa0       ARPHRD_RAWIP         0x1      9216
+  sit0             type=776             0x80     1480
+  tunl0            type=768             0x80     1480
+  wifi-aware0      ARPHRD_ETHER         0x1002   1500
+  wlan0            ARPHRD_ETHER         0x1003   1500
+--- type histogram
+      8 1
+     16 519
+      2 768
+      2 769
+      1 772
+      1 776
+      1 778
+      1 823
+     14 65534
+--- interfaces carrying a global address (the ones admission would consider)
+  rmnet_data1  240e:540:redacted/64
+  rmnet_data8  2408:851e:redacted/64
+  wlan0  192.168.x.x/24
+  wlan0  2408:821a:redacted/64
+  wlan0  2408:821a:redacted/64
+
+########## 5. qdisc: does clsact exist, and on which interfaces?
+qdisc clsact ffff: dev rmnet_data1 parent ffff:fff1 
+qdisc clsact ffff: dev rmnet_data8 parent ffff:fff1 
+qdisc clsact ffff: dev wlan0 parent ffff:fff1 
+--- interfaces WITH clsact
+  rmnet_data1
+  rmnet_data8
+  wlan0
+
+########## 6. TC filters already attached (the AOSP/vendor priority map, in practice)
+sample 1:
+  --- wlan0
+      ingress: filter protocol all pref 1 bpf chain 0 
+      ingress: filter protocol all pref 1 bpf chain 0 handle 0x1 prog_semUidBPF_schedcls_ingress_tsm_ether:[*fsobj] not_in_hw id 95 tag 7416875fd330bd1c jited 
+      egress:  filter protocol all pref 1 bpf chain 0 
+      egress:  filter protocol all pref 1 bpf chain 0 handle 0x1 prog_semUidBPF_schedcls_egress_tsm_ether:[*fsobj] not_in_hw id 96 tag 2ef4ef809be2dd32 jited 
+sample 2, after 20s:
+  --- wlan0
+      ingress: filter protocol all pref 1 bpf chain 0 
+      ingress: filter protocol all pref 1 bpf chain 0 handle 0x1 prog_semUidBPF_schedcls_ingress_tsm_ether:[*fsobj] not_in_hw id 95 tag 7416875fd330bd1c jited 
+      egress:  filter protocol all pref 1 bpf chain 0 
+      egress:  filter protocol all pref 1 bpf chain 0 handle 0x1 prog_semUidBPF_schedcls_egress_tsm_ether:[*fsobj] not_in_hw id 96 tag 2ef4ef809be2dd32 jited 
+--- does anything hold OUR reserved triple? chain 0 pref 1 handle 0x1 egress
+  COLLISION on wlan0 egress
+  (blueprint reserves chain 0 / pref 1 / handle 0x1; see FLUX_TC_* in flux_abi.h)
+
+########## 7. ip rule ladder -- is the 1..9999 window free?
+--- lowest non-zero priority, v4 and v6
+10000:	from all fwmark 0xc0000/0xd0000 lookup legacy_system 
+10000:	from all fwmark 0xc0000/0xd0000 lookup legacy_system 
+--- any rule below 10000 (other than the kernel's local at 0)?
+  (nothing listed means 1..9999 is entirely free)
+--- is our chosen priority 100 taken?
+  v4 matches: 0
+  v6 matches: 0
+--- is our chosen table 20260 empty?
+  v4 routes: 0
+  v6 routes: 0
+--- full v4 ladder (for the record)
+  0:	from all lookup local 
+  10000:	from all fwmark 0xc0000/0xd0000 lookup legacy_system 
+  11000:	from all iif lo oif dummy0 uidrange 0-0 lookup dummy0 
+  11000:	from all iif lo oif rmnet_data1 uidrange 0-0 lookup rmnet_data1 
+  11000:	from all iif lo oif rmnet_data8 uidrange 0-0 lookup rmnet_data8 
+  11000:	from all iif lo oif wlan0 uidrange 0-0 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10121-10121 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10224-10224 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10267-10267 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10286-10286 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10374-10374 lookup wlan0 
+  15040:	from all fwmark 0x10067/0x1ffff iif lo uidrange 10399-10399 lookup wlan0 
+  16000:	from all fwmark 0x10063/0x1ffff iif lo lookup local_network 
+  16000:	from all fwmark 0xd0065/0xdffff iif lo lookup rmnet_data1 
+  16000:	from all fwmark 0xd0066/0xdffff iif lo lookup rmnet_data8 
+  16000:	from all fwmark 0x10067/0x1ffff iif lo lookup wlan0 
+  17000:	from all iif lo oif dummy0 lookup dummy0 
+  17000:	from all fwmark 0xc0000/0xc0000 iif lo oif rmnet_data1 lookup rmnet_data1 
+  17000:	from all fwmark 0xc0000/0xc0000 iif lo oif rmnet_data8 lookup rmnet_data8 
+  17000:	from all iif lo oif wlan0 lookup wlan0 
+  18000:	from all fwmark 0x0/0x10000 lookup legacy_system 
+  19000:	from all fwmark 0x0/0x10000 lookup legacy_network 
+  20000:	from all fwmark 0x0/0x10000 lookup local_network 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10121-10121 lookup wlan0 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10224-10224 lookup wlan0 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10267-10267 lookup wlan0 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10286-10286 lookup wlan0 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10374-10374 lookup wlan0 
+  22040:	from all fwmark 0x67/0x1ffff iif lo uidrange 10399-10399 lookup wlan0 
+  23000:	from all fwmark 0x67/0x1ffff iif lo lookup wlan0 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10121-10121 lookup wlan0_local 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10224-10224 lookup wlan0_local 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10267-10267 lookup wlan0_local 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10286-10286 lookup wlan0_local 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10374-10374 lookup wlan0_local 
+  25000:	from all fwmark 0x0/0x10000 iif lo uidrange 10399-10399 lookup wlan0_local 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10121-10121 lookup wlan0 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10224-10224 lookup wlan0 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10267-10267 lookup wlan0 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10286-10286 lookup wlan0 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10374-10374 lookup wlan0 
+  29040:	from all fwmark 0x0/0xffff iif lo uidrange 10399-10399 lookup wlan0 
+  31000:	from all fwmark 0x0/0xffff iif lo lookup wlan0 
+  32000:	from all unreachable
+
+########## 8. fwmark bits actually in use
+--- distinct masks in iptables mangle
+  0x0/0x100000
+  0x0/0xfffff
+  0x0/0xffffffff
+  0x30067/0x7fefffff
+  0x80000000/0x80000000
+  0xf0065/0x7fefffff
+  0xf0066/0x7fefffff
+--- rules that zero the whole mark (would destroy any mark-based design)
+  -A qcom_qos_reset_POSTROUTING -s 240e:540:redacted/128 -o rmnet_data1 -j MARK --set-xmark 0x0/0xffffffff
+  -A qcom_qos_reset_POSTROUTING -s 2408:851e:redacted/128 -o rmnet_data8 -j MARK --set-xmark 0x0/0xffffffff
+
+########## 9. cgroup BPF occupancy -- is any SOCK_ADDR slot actually attached?
+cgroup2 mount: none /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,memory_recursiveprot 0 0
+--- attachments at the v2 root
+  ID       AttachType      AttachFlags     Name           
+--- full tree walk
+  CgroupPath
+  ID       AttachType      AttachFlags     Name           
+  /sys/fs/cgroup
+--- depth-1 children, each checked individually
+  (no == lines above means no descendant holds an attachment either)
+
+########## 10. loaded BPF programs by type (loaded is not the same as attached)
+       29 sched_cls
+       19 kprobe
+       11 socket_filter
+       10 tracepoint
+        8 cgroup_sock_addr
+        2 cgroup_sockopt
+        2 cgroup_sock
+        2 cgroup_skb
+        1 sched_act
+        1 raw_tracepoint
+        1 netfilter
+--- where is anything attached? (xdp / tc / flow_dissector / netfilter)
+  xdp:
+  
+  tc:
+  wlan0(45) clsact/ingress prog_semUidBPF_schedcls_ingress_tsm_ether:[*fsobj] id 95
+  wlan0(45) clsact/egress prog_semUidBPF_schedcls_egress_tsm_ether:[*fsobj] id 96
+  
+  flow_dissector:
+  
+  netfilter:
+  
+--- pin counts
+  prog pins: 86
+  map pins:  115
+--- vendor BPF families present (prefix before the first underscore group)
+  fuseMedia
+  gpuMem
+  gpuWork
+  mnxbNetd
+  netlog
+  semSmartHS
+  semUidBPF
+  tcpAccECN
+  tosMarker
+
+########## 11. DNS posture
+private_dns_mode: opportunistic
+private_dns_specifier: null
+
+########## 12. packages.list shape
+readable, lines=561
+fields on first line: 10
+uid column min/max: 1000 10425 
+count inside the app range 10000..19999: 429
+
+########## 13. conflicting or leftover state
+  PRESENT: /data/adb/flux
+  absent:  /data/adb/flux-rs
+  absent:  /sys/fs/bpf/flux
+  absent:  /sys/fs/bpf/flux-rs
+--- installed root modules
+  bindhosts
+  hma_oss_zygisk
+  zygisk_lsposed
+  zygisksu
+--- other proxies running?
+--- veth or dummy interfaces already present?
+--- names colliding with ours?
+  free: flxrs0
+  free: flxrs1
+
+########## 14. limits relevant to BPF
+memlock_rlimit_kb: 65536
+note: kernel >= 5.11 accounts BPF memory to memcg, so memlock should not bind
+nr_open: 1048576
+nproc: 7
+
+########## done

@@ -140,12 +140,30 @@ pub const ROUTE_TABLE: u32 = 20_260;
 pub const ROUTE_PROTO: u8 = 202;
 /// TC chain the filters live on.
 pub const TC_CHAIN: u32 = 0;
-/// TC preference. Egress runs before AOSP CLAT (pref 4) and dscpPolicy (pref 5).
-pub const TC_PREF: u16 = 1;
 /// TC handle of the egress filter.
 pub const TC_HANDLE_EGRESS: u32 = 0x1;
 /// TC handle of the ingress filter.
 pub const TC_HANDLE_INGRESS: u32 = 0x2;
+
+/// First-choice egress preference, deliberately past the preference vendors
+/// use.
+///
+/// Egress preference is chosen at attach time, not fixed. Measured on
+/// SM-S9180 / Android 16, Samsung's `semUidBPF` already holds chain 0 /
+/// pref 1 / handle 0x1 / protocol all on `wlan0`'s clsact egress, and `tc`
+/// preferences start at 1, so there is no way to order ahead of it there.
+/// See `docs/blueprint.md` §8.5.3.
+pub const TC_PREF_PREFERRED: u16 = 2;
+
+/// The `tc` floor. Used only when no higher preference can satisfy the
+/// ordering constraints, and never preferred: the vendor attaches late, so
+/// taking pref 1 either breaks its attach or gets silently replaced by it.
+pub const TC_PREF_MIN: u16 = 1;
+
+/// On a CLAT `v4-*` interface the chosen preference must be strictly below
+/// this, because AOSP's CLAT egress translation sits at 4. If nothing below is
+/// free, exclude the interface rather than ordering after CLAT.
+pub const TC_PREF_CLAT_MAX: u16 = 4;
 
 // ------------------------------------------------------------------ uid_policy
 
@@ -407,6 +425,11 @@ const _: () = assert!(
 const _: () = assert!(
     LISTEN_PORT_MIN < LISTEN_PORT_MAX,
     "listener port draw range is empty"
+);
+
+const _: () = assert!(
+    TC_PREF_MIN <= TC_PREF_PREFERRED && TC_PREF_PREFERRED < TC_PREF_CLAT_MAX,
+    "the preferred TC egress preference must be usable on a CLAT interface"
 );
 
 #[cfg(test)]
