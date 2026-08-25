@@ -7,6 +7,7 @@
 | 你要做的事 | 读这个 |
 |---|---|
 | **我是用户，这东西是干什么的** | **`introduction.md`**（不含术语） |
+| **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
 | 实现某个模块 | `blueprint.md`，从头读到尾 |
 | 了解技术架构 | `architecture.md` |
 | 上机跑测试 | `verification/phase0.md` + `../tools/phase0/README.md` |
@@ -40,7 +41,7 @@
 | §14 | 性能与能效预算 | `blueprint.md` |
 | §15 | 验证策略 | `blueprint.md` |
 | §16 | Phase 0 十问 + 实测 + 外推分层 | `verification/phase0.md` |
-| §17 | 实施阶段 | `blueprint.md` |
+| §17 | 实施阶段 | `plan/implementation.md` |
 | §18 | 从旧仓库过渡 | `blueprint.md` |
 | §19 | 被拒绝的替代方案 | `decisions/rejected-and-deferred.md` |
 | §20 | 发布前最终验收 | `blueprint.md` |
@@ -77,5 +78,6 @@
 | Phase 0 Q1（SK_STORAGE first-decision） | ✅ **通过**（基线内核，§16.6） |
 | Phase 0 Q9（per-app DNS，D18 的赌注） | ✅ **通过**（§16.7） |
 | 产品数据面四个程序过验证器 | ✅ **通过**（基线内核，§16.8.5） |
-| Phase 0 Q2–Q8 | ⬜ 待做（Q2/Q3/Q4 需 sing-box 在位） |
+| Phase 0 Q2（listener / lookup / **assign 成功**） | ✅ **通过**（§16.10） |
+| Phase 0 Q3–Q8 | ⬜ 待做，**全部需先有代码**；归属见 `plan/implementation.md` §17.2 |
 | 已知能推翻主路线的技术未知项 | **无** |

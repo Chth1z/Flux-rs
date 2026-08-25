@@ -64,7 +64,10 @@ jobs:
       # two can never drift silently.
       - name: ABI offset cross-check
         run: cargo xtask abi-check
-        continue-on-error: true # not implemented yet (blueprint §17 phase 7)
+        # Implement in stage 1 and delete this line then; the stage does not
+        # exit until abi-check is real and green. See
+        # docs/plan/implementation.md section 17.4.
+        continue-on-error: true
 
       - name: Install bpftool
         run: sudo apt-get install -y linux-tools-common linux-tools-generic

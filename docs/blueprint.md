@@ -17,8 +17,9 @@
 | Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
 | Phase 0 **Q1**（SK_STORAGE first-decision） | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
 | Phase 0 **Q9**（per-app DNS，**D18 的赌注**） | ✅ **已通过**（§16.7）。明文 :53 上出现的是 `com.android.vending`（UID 10265）等 app UID，netd 的 1051 出现**零次** |
+| Phase 0 **Q2**（listener 身份、lookup、**assign 成功**） | ✅ **已通过**（§16.10）。官方 v1.13.19 的 4 个 socket 全部 inode 核验通过；lookup 4/4 命中；**`bpf_sk_assign()` 返回 0**，§9.2 由源码结论升级为实测结论 |
 | **产品数据面过验证器** | ✅ **四个程序全部通过**（§16.8.5，基线 5.15.211）。`sk_storage`/`sk_assign` 引用配平、`skb_change_head`、ARRAY_OF_MAPS 内层查找、LPM trie 均被接受 |
-| Phase 0 **Q2–Q8** | ⬜ 待做。已授权，工具链无障碍（WSL 编 BPF → `adb push` → 设备自带 `bpftool`）。其中 Q2/Q3/Q4 需要 sing-box 在位才能测 |
+| Phase 0 **Q3–Q8** | ⬜ 待做，**且全部无法在实现之前做**——它们要测的是 §17 各阶段产出的代码。分配见 §17.2 |
 | 能推翻主路线的技术未知项 | **无** |
 | 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
 
@@ -1977,16 +1978,9 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 > **已移出本文** → `docs/verification/phase0.md`。章节编号未变。工具在 `tools/phase0/`。
 # 第 17 部分：实施阶段
 
-| 阶段 | 交付物 | 退出条件 |
-|---:|---|---|
-| 0 | 可丢弃的 vertical spike | §16 全部关键 seam 通过 |
-| 1 | 仓库骨架、`flux-core` 全部纯逻辑 + 单测、xtask、module staging、版本与 engine pin | Windows 上 `cargo test -p flux-core` 全绿；`cargo xtask package` 两次 clean build hash 一致 |
-| 2 | `fluxd` layout/单实例/控制协议/CLI/reactor 骨架/engine 候选生命周期 | 冷启动与热更新事务在设备上闭环（尚无数据面） |
-| 3 | netlink：veth、route/RPDB、clsact/filter、interface admission、ownership 谓词、rp_filter 检查 | Direct / Active / 冲突 / 恢复四条路径闭环，`status` 逐 interface 有原因 |
-| 4 | 最小加载器（map/BTF/relocation/ringbuf）+ 三个 BPF entry + counters + fault 自愈 | 单台目标 Android 上双栈 TCP/UDP 短功能 smoke 通过 |
-| 5 | 三管理器 module lifecycle + release | 0.9.0 artifact / checksum / 文档一致 |
-
-每阶段保持可 build；**不为下一阶段预建抽象**。阶段 4 发现真实回归时只为该不变量加一个聚焦测试。
+> **已移出本文** → `docs/plan/implementation.md`。章节编号未变。
+>
+> 移出的同时**修掉了一个循环依赖**：旧版阶段 0 的退出条件写着「§16 全部关键 seam 通过」，而 §16 的 Q5 / Q7 / Q8 只能由阶段 5–7 产出的代码来测。新版 §17.2 把剩余问题逐条分配给**真正能跑它们的阶段**，每个阶段的退出条件都由该阶段自己满足。
 
 ---
 
