@@ -164,7 +164,46 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 ---
 
-## 7 Git 约定
+## 7 发布工程与社区流程
+
+这一节的内容来自对两个成熟同类项目的逐项阅读：[JingMatrix/Vector](https://github.com/JingMatrix/Vector)（12.2k star，3107 commit，支持 Android 8.1–17）与 [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk)（2.2k star，Rust daemon）。它们与 Flux-rs 的产品形态完全不同，但**发布与支持流程可以直接借用**，源码依据记在 `docs/evidence/review-log.md`。
+
+### 7.1 立即采纳
+
+| 实践 | 怎么做 | 为什么 |
+|---|---|---|
+| **安装时逐文件 SHA-256 校验** | 打包时为每个文件生成 `.sha256` 旁文件，`customize.sh` 用 `sha256sum -c` 逐个验证后再落地 | 在重启**之前**抓住下载损坏。NeoZygisk `module/src/verify.sh:37` |
+| **安装时的管理器版本矩阵** | `customize.sh` 检测 Magisk/KernelSU/APatch 并检查各自最低版本；**最低版本常量集中定义一处**，同时注入 shell 与 Rust | 避免"装上了才发现管理器太老"。NeoZygisk 把常量放在 `build.gradle.kts:21-25` 并 `env!` 进 Rust |
+| **拒绝 recovery 安装** | 只允许从管理器 App 安装 | recovery 环境下拿不到管理器的环境变量，检测全部失效 |
+| **拒绝多 root 实现共存** | 在 KSU/APatch 上检测到 `magisk` 二进制则中止 | 两套 root 同时在场时行为不可预测 |
+| **构建标识刻进一切** | `module.prop`、`fluxd version`、诊断包文件名与**压缩包注释**都带 版本 + git commit + 是否 debug | Vector 把构建身份写进 zip 注释，文件名被改了也还在 |
+| **每次 CI 同时产出 debug 与 release 两个 zip** | debug 版日志更详细、带 backtrace | issue 模板要求"用最新 debug 构建复现"，前提是 debug 构建随时可得 |
+| **canary 作为 GitHub prerelease 发布，不只是 Actions artifact** | 保留最近 N 个 `canary-<versionCode>` tag | **Actions artifact 需要登录才能下载**。Vector 在 workflow 注释里明确指出这一点并改用 prerelease（`core.yml:207-211`）。NeoZygisk 没做这一步，与它自己的 issue 模板要求矛盾 |
+| **issue 模板强制字段** | root 实现与版本、已装模块列表、**确切版本号（不接受"最新"）**、Android 版本、勾选"已用最新 debug 构建复现"、附诊断包 | 没有诊断包就关闭 issue。省下的是双方的时间 |
+| **`panic = "abort"`** | 已在 `Cargo.toml` | root daemon 应当响亮地死，由外部重启，而不是带着损坏状态继续 |
+| **debug 符号单独产出** | 发布的二进制 strip，符号作为独立 artifact 上传 | 体积与可调试性兼得 |
+
+### 7.2 以后再说
+
+原生 log 抓取（若 shell `logcat` 在某些 ROM 上不可靠）、认证 Unix socket 上的富 CLI、翻译 CI 门、按管理器的 `adb install` 开发任务。
+
+### 7.3 明确不采纳
+
+| 不采纳 | 理由 |
+|---|---|
+| **不固定的 Rust nightly** | NeoZygisk CI 用未固定的 nightly（`ci.yml:36`），可复现性风险。我们固定 stable + `Cargo.lock` |
+| **安装时禁用竞争模块** | Vector 会去 `touch` LSPosed 的 `disable`（`customize.sh`）。太激进。冲突应当**检测并报告**，不替用户处置 |
+| **只用 Actions artifact 分发 canary** | 见 §7.1 最后一条，用 prerelease |
+| **仅接受英文 issue** | Vector 的政策（README:71-75）适合它的社区规模，不适合现在 |
+| **随机化字符串以对抗检测** | 产品特定的隐蔽性需求，与本项目无关 |
+
+### 7.4 诊断包是支持流程的核心
+
+Vector 的 `FileSystem.getLogs`（`Vector/daemon/.../FileSystem.kt:524-625`）是最值得抄的一条：一键生成包含全部排查信息的压缩包。Flux-rs 的对应物是 `fluxd bugreport`，内容清单见 `docs/ux.md` §6。
+
+**它必须默认脱敏**，且与 `tools/phase0/observe.sh` **共用同一套过滤规则**（§2.3）。两处各写一套脱敏，必然有一处会漏。
+
+## 8 Git 约定
 
 - Conventional Commits：`feat` / `fix` / `docs` / `build` / `refactor` / `test` / `chore`。
 - commit message 的正文写**为什么**，不复述 diff 写了什么。推翻旧结论时写明推翻了什么、依据是什么。
@@ -174,7 +213,7 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 ---
 
-## 8 这份手册自己的维护
+## 9 这份手册自己的维护
 
 它应该随着「哪些事被证明该问、哪些不该问」而修订。修订的触发条件：
 
