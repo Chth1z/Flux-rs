@@ -14,6 +14,7 @@
 //! at the bottom and asserts the byte layout matches the struct definition in
 //! [`crate::abi`]; xtask additionally cross-checks against clang's `.BTF` in CI.
 
+#[cfg(test)]
 use crate::abi::Decision;
 
 /// `BTF_KIND_INT`.
@@ -122,17 +123,26 @@ pub fn flux_decision_btf() -> Vec<u8> {
         btf_info(BTF_KIND_STRUCT, 4),
         16,
         &[
-            s_magic, 2, 0, // magic: unsigned int @ bit 0
-            s_mode, 4, 32, // mode: unsigned char @ bit 32
-            s_reserved, 5, 40, // reserved: array @ bit 40
-            s_generation, 3, 64, // generation: unsigned long long @ bit 64
+            s_magic,
+            2,
+            0, // magic: unsigned int @ bit 0
+            s_mode,
+            4,
+            32, // mode: unsigned char @ bit 32
+            s_reserved,
+            5,
+            40, // reserved: array @ bit 40
+            s_generation,
+            3,
+            64, // generation: unsigned long long @ bit 64
         ],
     );
 
     let type_len = types.len() as u32;
     let str_len = strings.bytes.len() as u32;
 
-    let mut blob = Vec::with_capacity(BTF_HEADER_LEN as usize + type_len as usize + str_len as usize);
+    let mut blob =
+        Vec::with_capacity(BTF_HEADER_LEN as usize + type_len as usize + str_len as usize);
     blob.extend_from_slice(&BTF_MAGIC.to_le_bytes());
     blob.push(1); // version
     blob.push(0); // flags
@@ -242,8 +252,14 @@ mod tests {
                 le32(reader.types, base + 8),
             )
         };
-        assert_eq!(read_member(0), ("magic", 2, offset_of!(Decision, magic) as u32 * 8));
-        assert_eq!(read_member(1), ("mode", 4, offset_of!(Decision, mode) as u32 * 8));
+        assert_eq!(
+            read_member(0),
+            ("magic", 2, offset_of!(Decision, magic) as u32 * 8)
+        );
+        assert_eq!(
+            read_member(1),
+            ("mode", 4, offset_of!(Decision, mode) as u32 * 8)
+        );
         assert_eq!(
             read_member(2),
             ("reserved", 5, offset_of!(Decision, reserved) as u32 * 8)
@@ -259,8 +275,9 @@ mod tests {
         let blob = flux_decision_btf();
         let reader = Reader::parse(&blob);
         // int(4), unsigned int(4), unsigned long long(8), unsigned char(1).
-        for (i, (expected_size, expected_bits)) in
-            [(4u32, 32u32), (4, 32), (8, 64), (1, 8)].into_iter().enumerate()
+        for (i, (expected_size, expected_bits)) in [(4u32, 32u32), (4, 32), (8, 64), (1, 8)]
+            .into_iter()
+            .enumerate()
         {
             let base = i * 16;
             assert_eq!(le32(reader.types, base + 4) >> 24, BTF_KIND_INT);
