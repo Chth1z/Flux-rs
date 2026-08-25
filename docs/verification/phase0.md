@@ -281,6 +281,15 @@ Q10 的决定性测量**尚未完成**，但这次尝试本身产出了三条事
 
 决定性测量需要一个**编译好的 BPF 对象**（在 pref 2 挂一个只做 `counters[SAW_PACKET]++` 然后返回 `TC_ACT_UNSPEC` 的程序，用 `bpftool map dump` 读计数）。设备上已有 `/system/bin/bpftool`（v5.16.0 / libbpf v1.4），可直接用于 load 与 attach。
 
-**缺的是开发机上的 clang（带 bpf target）**。当前开发机无 clang、无 NDK。这属于 `governance.md` §1.2 的「改所有者的开发机」，需所有者决定。
+**构建路径已确定：在 WSL 里编。** Windows 侧无 clang、无 NDK，但 WSL 内有（所有者确认，2026-08-25）。因此：
 
-在此之前，**§8.5.4 的存活验证机制不能视为已验证**，只能视为已设计。
+1. WSL：`clang -target bpf -O2 -g -mcpu=v3 -c` 编出 `.o`。
+2. `adb push` 到设备。
+3. 设备自带 `/system/bin/bpftool`（v5.16.0 / libbpf v1.4）做 `prog load` + `net attach`。
+4. `bpftool map dump` 读 `counters[FLUX_CNT_SAW_PACKET]`。
+
+这条路径对**整个 Phase 0 证伪半场**都成立，不只是 Q10；`xtask` 的 `FLUX_BUILD_BPF=1` 分支也应当在 WSL 里跑。**Phase 0 已不再被工具链阻塞。**
+
+Q10 还有一个**时机**约束：它只能在厂商 filter 在场的窗口内测（§16.5.2）。`tools/phase0/q10-chain-continuation.sh` 已内置检测并自动切换到真实场景。
+
+在实测完成之前，**§8.5.4 的存活验证机制只能视为已设计，不能视为已验证**。
