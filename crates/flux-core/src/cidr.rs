@@ -1,9 +1,16 @@
 //! CIDR canonicalisation, the fixed bypass set, and LPM key encoding.
 //!
-//! Implements blueprint §7.2 and D7/D16. The fixed bypass set below is not a
-//! convenience default: every entry is load-bearing.
+//! Implements blueprint §7.2, §11.2 and D7/D16/D21. The fixed bypass set below
+//! is not a convenience default: every entry is load-bearing.
 //!
-//! Not implemented yet — Phase 1 (blueprint §17).
+//! Nothing here does I/O; a caller hands in the text. Blueprint §15.2 test 2
+//! lives at the bottom: canonicalisation, fixed bypass injection, LPM key
+//! encoding and the capacity ceiling.
+
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::OnceLock;
+
+use crate::abi::{LpmV4Key, LpmV6Key, LPM_MAX_ENTRIES};
 
 /// Prefixes that are permanently in the bypass set, whatever the user config
 /// says.
@@ -42,12 +49,265 @@ pub const FIXED_BYPASS_V6: &[&str] = &[
 /// Why a user-supplied prefix was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CidrError {
-    /// The text was not `address/prefixlen`.
-    Malformed,
+    /// The text was not `address/prefixlen`, or the address was not itself
+    /// canonical (leading zeros, uncompressed IPv6, and the like).
+    Malformed(String),
     /// `prefixlen` exceeded the family width.
-    PrefixTooLong,
-    /// Host bits were set below `prefixlen`.
-    HostBitsSet,
+    PrefixTooLong(u8),
+    /// Host bits were set below `prefixlen`, so the text was not canonical.
+    HostBitsSet(String),
     /// Adding the prefix would exceed the LPM capacity.
     CapacityExceeded,
+}
+
+/// A canonical IPv4 prefix: the address has no bits set below `prefix_len`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv4Cidr {
+    /// Network address, already masked to `prefix_len`.
+    pub addr: Ipv4Addr,
+    /// Prefix length in bits, `0..=32`.
+    pub prefix_len: u8,
+}
+
+/// A canonical IPv6 prefix: the address has no bits set below `prefix_len`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv6Cidr {
+    /// Network address, already masked to `prefix_len`.
+    pub addr: Ipv6Addr,
+    /// Prefix length in bits, `0..=128`.
+    pub prefix_len: u8,
+}
+
+fn split_prefix(text: &str) -> Result<(&str, u8), CidrError> {
+    let (addr, len) = text
+        .split_once('/')
+        .ok_or_else(|| CidrError::Malformed(text.to_string()))?;
+    let prefix_len: u8 = len
+        .parse()
+        .map_err(|_| CidrError::Malformed(text.to_string()))?;
+    Ok((addr, prefix_len))
+}
+
+impl Ipv4Cidr {
+    /// Parses a canonical `a.b.c.d/n`.
+    ///
+    /// Rejects a missing prefix, a prefix above 32, a non-canonical address
+    /// (Rust's parser already refuses leading zeros), and any host bits set
+    /// below the prefix. It never silently masks: a non-canonical prefix is a
+    /// configuration error, not something to fix up (blueprint §11.2).
+    pub fn parse(text: &str) -> Result<Self, CidrError> {
+        let (addr_str, prefix_len) = split_prefix(text)?;
+        if prefix_len > 32 {
+            return Err(CidrError::PrefixTooLong(prefix_len));
+        }
+        let addr: Ipv4Addr = addr_str
+            .parse()
+            .map_err(|_| CidrError::Malformed(text.to_string()))?;
+        let bits = u32::from(addr);
+        let mask = mask32(prefix_len);
+        if bits & !mask != 0 {
+            return Err(CidrError::HostBitsSet(text.to_string()));
+        }
+        Ok(Self { addr, prefix_len })
+    }
+
+    /// Encodes this prefix as the LPM trie key the data plane expects.
+    ///
+    /// `addr` bytes are network byte order, which is exactly what
+    /// [`Ipv4Addr::octets`] returns, so they can be compared against packet
+    /// bytes directly (blueprint §6, `be` fields).
+    pub fn to_lpm_key(self) -> LpmV4Key {
+        LpmV4Key {
+            prefixlen: u32::from(self.prefix_len),
+            addr: self.addr.octets(),
+        }
+    }
+}
+
+impl std::fmt::Display for Ipv4Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix_len)
+    }
+}
+
+impl Ipv6Cidr {
+    /// Parses a canonical `addr/n`. See [`Ipv4Cidr::parse`] for the rules.
+    pub fn parse(text: &str) -> Result<Self, CidrError> {
+        let (addr_str, prefix_len) = split_prefix(text)?;
+        if prefix_len > 128 {
+            return Err(CidrError::PrefixTooLong(prefix_len));
+        }
+        let addr: Ipv6Addr = addr_str
+            .parse()
+            .map_err(|_| CidrError::Malformed(text.to_string()))?;
+        let bits = u128::from(addr);
+        let mask = mask128(prefix_len);
+        if bits & !mask != 0 {
+            return Err(CidrError::HostBitsSet(text.to_string()));
+        }
+        Ok(Self { addr, prefix_len })
+    }
+
+    /// Encodes this prefix as the LPM trie key the data plane expects.
+    pub fn to_lpm_key(self) -> LpmV6Key {
+        LpmV6Key {
+            prefixlen: u32::from(self.prefix_len),
+            addr: self.addr.octets(),
+        }
+    }
+}
+
+impl std::fmt::Display for Ipv6Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix_len)
+    }
+}
+
+fn mask32(prefix_len: u8) -> u32 {
+    match prefix_len {
+        0 => 0,
+        n if n >= 32 => u32::MAX,
+        n => u32::MAX << (32 - n),
+    }
+}
+
+fn mask128(prefix_len: u8) -> u128 {
+    match prefix_len {
+        0 => 0,
+        n if n >= 128 => u128::MAX,
+        n => u128::MAX << (128 - n),
+    }
+}
+
+/// The fixed IPv4 bypass prefixes, parsed once from [`FIXED_BYPASS_V4`].
+pub fn fixed_bypass_v4() -> &'static [Ipv4Cidr] {
+    static CELL: OnceLock<Vec<Ipv4Cidr>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        FIXED_BYPASS_V4
+            .iter()
+            .map(|s| Ipv4Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"))
+            .collect()
+    })
+}
+
+/// The fixed IPv6 bypass prefixes, parsed once from [`FIXED_BYPASS_V6`].
+pub fn fixed_bypass_v6() -> &'static [Ipv6Cidr] {
+    static CELL: OnceLock<Vec<Ipv6Cidr>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        FIXED_BYPASS_V6
+            .iter()
+            .map(|s| Ipv6Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"))
+            .collect()
+    })
+}
+
+/// Fixed safe bypass and listener prefixes, injected regardless of user config.
+///
+/// Does not include the device's own dynamic addresses: those are a runtime
+/// input from rtnetlink, not a compile-time constant (blueprint §11.2, D7/D20).
+pub fn fixed_bypass() -> (&'static [Ipv4Cidr], &'static [Ipv6Cidr]) {
+    (fixed_bypass_v4(), fixed_bypass_v6())
+}
+
+/// The most IPv4 prefixes the trie can hold, echoing [`LPM_MAX_ENTRIES`].
+pub const MAX_BYPASS_V4: u32 = LPM_MAX_ENTRIES;
+/// The most IPv6 prefixes the trie can hold.
+pub const MAX_BYPASS_V6: u32 = LPM_MAX_ENTRIES;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Blueprint §15.2 test 2: IPv4/IPv6 CIDR canonicalise, fixed bypass
+    // injection, LPM key encoding, capacity ceiling.
+
+    #[test]
+    fn parses_canonical_v4_prefixes() {
+        let c = Ipv4Cidr::parse("192.168.0.0/16").expect("canonical");
+        assert_eq!(c.addr, Ipv4Addr::new(192, 168, 0, 0));
+        assert_eq!(c.prefix_len, 16);
+        assert_eq!(c.to_string(), "192.168.0.0/16");
+
+        assert_eq!(
+            Ipv4Cidr::parse("0.0.0.0/0").expect("default route"),
+            Ipv4Cidr {
+                addr: Ipv4Addr::UNSPECIFIED,
+                prefix_len: 0
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_canonical_v4() {
+        // Host bits set below the prefix.
+        assert!(matches!(
+            Ipv4Cidr::parse("192.168.0.1/16"),
+            Err(CidrError::HostBitsSet(_))
+        ));
+        // Prefix wider than the family.
+        assert_eq!(
+            Ipv4Cidr::parse("10.0.0.0/33"),
+            Err(CidrError::PrefixTooLong(33))
+        );
+        // Missing prefix.
+        assert!(matches!(
+            Ipv4Cidr::parse("10.0.0.0"),
+            Err(CidrError::Malformed(_))
+        ));
+        // Leading zeros are ambiguous (octal) and Rust's parser refuses them.
+        assert!(matches!(
+            Ipv4Cidr::parse("010.0.0.0/8"),
+            Err(CidrError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn parses_and_canonicalises_v6() {
+        let c = Ipv6Cidr::parse("2001:db8:0:1::2/128").expect("canonical");
+        assert_eq!(c.prefix_len, 128);
+        // Display is the canonical compressed form.
+        assert_eq!(c.to_string(), "2001:db8:0:1::2/128");
+
+        assert!(matches!(
+            Ipv6Cidr::parse("2001:db8::1/32"),
+            Err(CidrError::HostBitsSet(_))
+        ));
+        assert_eq!(
+            Ipv6Cidr::parse("::/129"),
+            Err(CidrError::PrefixTooLong(129))
+        );
+    }
+
+    #[test]
+    fn lpm_key_encoding_is_network_order() {
+        let key = Ipv4Cidr::parse("172.16.0.0/12").unwrap().to_lpm_key();
+        assert_eq!(key.prefixlen, 12);
+        assert_eq!(key.addr, [172, 16, 0, 0]);
+
+        let key6 = Ipv6Cidr::parse("fc00::/7").unwrap().to_lpm_key();
+        assert_eq!(key6.prefixlen, 7);
+        assert_eq!(key6.addr[0], 0xfc);
+        assert_eq!(key6.addr[1..], [0u8; 15]);
+    }
+
+    #[test]
+    fn fixed_bypass_is_canonical_and_contains_the_listener() {
+        let (v4, v6) = fixed_bypass();
+        assert_eq!(v4.len(), FIXED_BYPASS_V4.len());
+        assert_eq!(v6.len(), FIXED_BYPASS_V6.len());
+
+        // The listener is bypassed as an exact address, never a wider prefix
+        // (blueprint D21): a /32 and a /128, not the old /15 and /32.
+        assert!(v4.contains(&Ipv4Cidr::parse("198.51.100.1/32").unwrap()));
+        assert!(v6.contains(&Ipv6Cidr::parse("2001:db8:0:1::2/128").unwrap()));
+
+        // The old fakeip-colliding /15 must NOT be present (blueprint §9.0).
+        assert!(!v4.iter().any(|c| c.prefix_len == 15));
+    }
+
+    #[test]
+    fn capacity_ceiling_matches_the_abi() {
+        assert_eq!(MAX_BYPASS_V4, 65_536);
+        assert_eq!(MAX_BYPASS_V6, 65_536);
+    }
 }
