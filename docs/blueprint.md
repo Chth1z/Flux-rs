@@ -282,6 +282,45 @@ dae 把 listener 放在**独立 netns `daens`** 里，所以回程必须再穿�
 
 同一轮还确认了两件已有设计的正确性：`flx_cap_l2`/`flx_cap_l3` 的拆分是**强制**的（§3.3.1，否则蜂窝数据全丢且无计数器），以及 rp_filter / accept_local 的马丁源丢包在本拓扑下是**必然**而非概率事件（§8.4）。
 
+### 0.5.10 TC attach 策略的同类实现对照：我的核心问题没有先例
+
+针对 §8.5.3 发现的 pref 冲突，把语料里**所有真正 attach TC filter 的项目**逐个读了 attach 层。
+
+| 项目 | pref 怎么定 | 冲突怎么处理 | attach 后验证什么 | TCX | 不接管时返回 |
+|---|---|---|---|---|---|
+| **dae** | 硬编码（LAN egress 1 / ingress 2、WAN egress 2 / ingress 1，`control_plane_core.go:474-724`） | 先 `FilterDel` 再 `FilterAdd`，`EEXIST` 当成功 | **不验证** | 无 | **`TC_ACT_OK` 23 处** / `TC_ACT_PIPE` 4 处 |
+| **honk** | 不自己设，交给 aya | 交给 aya | 只记 link id | 无 | `TC_ACT_PIPE` 为主 |
+| **chizi**（Android） | 默认常量 **1**，可配置（`shared_network_tc.go:27`） | 先 `FilterList`，**只**在 handle 相同时报错 | 重新 `FilterList` 确认可见 | **有，TCX 优先 + clsact 回落** | **`TC_ACT_UNSPEC`** |
+| **asteriskd**（Android） | 硬编码 `pref 1 / handle 1`（`asteriskd.h:2567`） | **探测到该槽位被外人占用就拒绝启动**（`asteriskd_tc_plan.c:129-135`，`"foreign TC resource collision"`） | **netlink dump 复核自有 filter 的身份**（object id / tag / name / da 标志） | 无 | `TC_ACT_PIPE`（bpf2socks） |
+| **mihomo**（已移除的历史组件） | 硬编码 0 / 1 | 不检查，`FilterAdd` 失败即启动失败 | 不验证 | 无 | `TC_ACT_OK` 几乎所有分支 |
+| **AOSP** | 跨子系统协调的固定值 1–5 | `NLM_F_EXCL｜NLM_F_CREATE`，且 `tcm_handle = TC_H_UNSPEC`（**让内核分配 handle**） | 不验证执行 | 无 | — |
+
+**四条"无先例"的结论**（宁可知道没人解决过，也不要假定有人解决过）：
+
+1. **动态选 pref：没有任何项目做。** 全部硬编码或交给用户配置。
+2. **验证程序是否真的执行：没有任何项目做。** asteriskd 最接近，但它复核的是**身份**（"我装的那条还在不在、是不是我的"），不是**执行**（"包有没有真的进来"）。这两者在被前面的 filter 遮挡时给出完全相反的答案——身份检查会通过。
+3. **检测"同 pref、不同 handle 的外来 filter 在我们之前跑"：没有先例。** chizi 只比 handle，asteriskd 只比一个精确的 `(pref, handle)` 元组。
+4. **TCX 的相对定位：没有先例。** chizi 是唯一用 TCX 的，但它的 `link.AttachTCX` **不带任何 `BPF_F_BEFORE`/`BPF_F_AFTER`**（`shared_network_tcx.go:91-95` 实测无 anchor 参数）。
+
+**三条可以直接拿来用的：**
+
+**(a) chizi 给了 `TC_ACT_UNSPEC` 一个我没记录过的独立理由。** 我原先的理由只有"`TC_ACT_OK` 会终止 chain，跳过 AOSP CLAT 与 OEM filter"。chizi 的注释补上了 TCX 侧：
+
+```c
+// TCX only continues with later TCX programs and the legacy clsact chain for
+// TC_ACT_UNSPEC. TC_ACT_PIPE stops the TCX program array before being mapped
+// to "next", which can skip tethering programs attached after sing-box.
+#define SB_SHARED_ACT_CONTINUE TC_ACT_UNSPEC
+```
+
+也就是说在 TCX 上 **`TC_ACT_PIPE` 同样会截断**，只有 `TC_ACT_UNSPEC` 会继续走到后续 TCX 程序与 legacy clsact 链。这条让 §7 的"不接管一律 `TC_ACT_UNSPEC`"从"clsact 时代的正确选择"升级为"clsact 与 TCX 两条路径下都唯一正确"，因此 §22.2.1 的 TCX 分支**不需要改任何返回值**。
+
+**(b) dae 在 Android 上会遮挡系统 filter，我们的分歧是对的。** `dae/control/kern/tproxy.c` 里 `return TC_ACT_OK` 出现 **23 次**、`TC_ACT_PIPE` 4 次。在 Linux 路由器上无害；搬到 Android 就会跳过 AOSP CLAT 与全部 OEM 程序。这是 §0.5.8"只引 dae 的 `control/kern/*.c` 当机制参考、不照搬其策略"的又一个具体例证。
+
+**(c) asteriskd 的身份复核值得叠加，但不能替代存活验证。** 它在 attach 之后用 `RTM_GETTFILTER` dump 比对 object id、program tag、bpf name 与 `da` 标志（`asteriskd_tc_netlink.c:119-177`）。这抓的是"我们的 filter 被人替换/删除"，与 §8.5.4 抓的"我们的 filter 在但跑不到"是**两类不同故障**，两者都要有。前者本设计已由 §8.5 的所有权谓词 + `RTM_NEWTFILTER` 监视覆盖。
+
+**(d) 一处刻意与 AOSP 不同**：AOSP 用 `tcm_handle = TC_H_UNSPEC` 让内核分配 handle，代价是**它无法凭 handle 认出自己的 filter**。我们固定 `handle 0x1`（探测用 `0x3`），正是为了让所有权谓词能精确自证（§8.5、§8.9.5）。这个分歧是有意的。
+
 **唯一没能核实的**：`accept_local` / `rp_filter` 在各厂商内核上的实际默认值（AOSP 自己从不设置这四个 sysctl，值完全来自厂商 defconfig 与 `init.rc`），以及模块 SELinux 域能否写 `/proc/sys/net/ipv4/conf/*/accept_local`。两者都已在 Phase 0 有对应条目，处置方式是运行时读取 + 失败即响亮报错。
 
 ---
@@ -1260,6 +1299,10 @@ int flx_verify(struct __sk_buff *skb) {
 **它顺带覆盖的其它失效**：attach 到了错误的 parent、interface 已 down 但 filter 还在、以及 chain 上出现了新的、pref 更低的厂商 filter。三者都表现为"tx 在涨而计数不动"。
 
 **再验证**：稳态下若 reactor 收到 `RTM_NEWTFILTER` 且新 filter 的 pref 低于我们，可以在 **P+1** 挂一次探测——若 P+1 可达则 P 必然可达，于是无需动我们自己的 filter 就能确认仍在工作。这是这套设计相对"控制位"方案的额外好处。
+
+**这套机制没有先例，实现时不要指望能抄。** §0.5.10 逐个读过语料里所有 attach TC filter 的项目：**没有任何一个验证程序是否真的执行**。最接近的是 asteriskd，它在 attach 后用 `RTM_GETTFILTER` dump 比对 object id / program tag / bpf name / `da` 标志——但那验证的是**身份**（"我装的那条还在不在、是不是我的"），不是**执行**。被前面的 filter 遮挡时，身份检查会**通过**。两者是不同故障，都要有：身份侧本设计由 §8.5 的所有权谓词 + `RTM_NEWTFILTER` 监视覆盖，执行侧就是本节。
+
+**同时补一条 asteriskd 教给我们的对照**：它遇到自有槽位被外人占用时**直接拒绝启动**（`"foreign TC resource collision"`）。那是"fail closed"，简单且安全，但结果是在三星设备上完全不可用。本设计选择"换个 pref + 实测能否跑到"，能力更强，代价就是必须自己实现本节这套东西。
 
 ## 8.6 interface admission
 
@@ -2589,6 +2632,12 @@ TCX 是**独立的 attach 点**，不挂在 qdisc 上，所以 `tcQdiscDelDevCls
 - clsact 路径 + §8.5.3 动态选 pref + §8.5.4 存活验证是**必须实现的主路径**，不是兜底。
 - TCX 是**能力探测后的优选路径**，只在 6.6+ 上生效，且**探测方式是尝试 `BPF_LINK_CREATE` 是否成功，不是读 `uname -r`**（§16.3.5）。
 - 两条路径共用同一批程序与 map，差异只在 attach 层与所有权谓词。§8.5.4 的存活验证**两条路径都要跑**——TCX 也可能被别人抢先。
+
+**实现 TCX 分支时必须比唯一的先例做得更好。** chizi 是语料里唯一用了 TCX 的项目，但它的 `link.AttachTCX` 调用**不带任何 `BPF_F_BEFORE` / `BPF_F_AFTER` anchor**（`shared_network_tcx.go:91-95`，实测无 anchor 参数）。不带 anchor 就是"追加到末尾"，那正好放弃了 TCX 唯一比 clsact 强的地方——**相对定位**。我们做 TCX 的**全部理由**就是要排到厂商前面，所以：
+
+- attach 时**必须**带 `BPF_F_BEFORE`，anchor 指向现有条目（legacy clsact 整体算一个条目）。
+- 若内核拒绝该 anchor 组合，**回落到 clsact 路径**，不要退化成"无序追加的 TCX"——那既没有 clsact 路径的 pref 可选性，又没有 TCX 的定位能力，是两头落空。
+- 返回值**一行不用改**：chizi 的注释证明 `TC_ACT_UNSPEC` 在 TCX 上同样是唯一能让链继续的值，`TC_ACT_PIPE` 会截断 TCX 程序数组（§0.5.10(a)）。
 
 ## 22.3 刻意不做，且将来也不做
 
