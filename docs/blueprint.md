@@ -15,7 +15,10 @@
 |---|---|
 | Phase 0 **观测半场** | ✅ 已完成（`verification/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
 | Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
-| Phase 0 **Q1** | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
+| Phase 0 **Q1**（SK_STORAGE first-decision） | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
+| Phase 0 **Q9**（per-app DNS，**D18 的赌注**） | ✅ **已通过**（§16.7）。明文 :53 上出现的是 `com.android.vending`（UID 10265）等 app UID，netd 的 1051 出现**零次** |
+| **产品数据面过验证器** | ✅ **四个程序全部通过**（§16.8.5，基线 5.15.211）。`sk_storage`/`sk_assign` 引用配平、`skb_change_head`、ARRAY_OF_MAPS 内层查找、LPM trie 均被接受 |
+| Phase 0 **Q2–Q8** | ⬜ 待做。已授权，工具链无障碍（WSL 编 BPF → `adb push` → 设备自带 `bpftool`）。其中 Q2/Q3/Q4 需要 sing-box 在位才能测 |
 | 能推翻主路线的技术未知项 | **无** |
 | 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
 

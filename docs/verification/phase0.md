@@ -384,3 +384,118 @@ failed to load: -524
 
 - **socket 关闭后存储释放**：`SK_STORAGE` 没有可枚举的条目，`bpftool` 不便直接观察。语义由内核保证（随 socket 生命周期），且 `ALLOC_FAIL = 0` 说明没有容量压力。列为"依赖内核语义，未独立验证"。
 - **高并发竞争**：`RACE_LOSER = 0`，说明 8 个 `curl` 没有真正撞在一起。要观察竞争需要更激进的并发（`tools/phase0/q1-run.sh` 的 netns 版本用 40–100 个并发 connect 更容易触发），但那是**语义确认**而非风险项——`F_CREATE` 的原子性由内核保证，且败者拿到胜者的值本身就是期望行为。
+---
+
+## 16.7 Q9 已通过：D18 在实机上成立（2026-08-25，SM-S9180 / 5.15.211）
+
+**这是 Phase 0 里最要紧的一次测量**，因为 D18（per-app DNS 零额外机制）整个压在一条断言上：netd 对明文 DNS socket 调用 `fchown()` 把它交给发起请求的 app，`sk->sk_uid` 随之改变，而 `bpf_get_socket_uid()` 读的正是 `sk->sk_uid`（源码链见 §1.3.1）。
+
+工具：`tools/phase0/q9_probe.bpf.c` + `tools/phase0/q9-run-device.sh`。纯观测，每条路径都 `TC_ACT_UNSPEC`，不改变任何包的命运。判别方式故意做得很钝——把 egress 包按 (socket UID, 端口类别) 分桶，看明文 :53 上出现的是 app UID 还是 netd 的 1051。
+
+### 16.7.1 结果
+
+`rmnet_data0`（ARPHRD_RAWIP，蜂窝，当时的主网）egress，45 秒，372 个包（94 v4 / 278 v6），零解析失败：
+
+| 类别 | UID | 归属 |
+|---|---:|---|
+| **UDP:53 明文 DNS** | **10265** | **`com.android.vending`（Play 商店）** |
+| UDP:53 明文 DNS | 1073 | `com.google.android.networkstack.tethering` |
+| TCP:443（对照组） | 多个 10xxx | 各第三方 app，逐一正确归属 |
+| TCP:853 (DoT) | — | **一条都没有** |
+
+**`1051`（netd 自身）出现零次。** 每一个明文 DNS 包都归到了真正的请求方。
+
+**D18 成立。** per-app DNS 不需要任何额外机制——普通的 `uid_policy` 查表已经覆盖它。
+
+### 16.7.2 三个附带结论
+
+1. **`private_dns_mode` 的默认值是 `opportunistic`**，不是 `off`。它的语义是 netd 先试 DoT，上游拒绝才回落明文。所以"能捕获多少 DNS"**取决于运营商/路由器的 DNS 服务器是否支持 DoT**，不取决于我们。本次测试的蜂窝网络上 :853 一条都没有，全程明文，对我们是好消息；但**换一个支持 DoT 的网络，可捕获的 DNS 会显著减少**，这不是缺陷而是边界（§1.3.3 边界①），`status` 应当能让用户看出来。
+2. **对照组同时验证了普通流量的 UID 归属**：:443 上每个 app 各归其位。所以 :53 的结果不是侥幸，整条 `bpf_get_socket_uid()` 路径在这台设备上都是准的。
+3. 未观察到 `enforce_dns_uid`（§1.3.3 边界②）。若某设备开启，:53 会带 `1051`，按"不捕获"处理。
+
+### 16.7.3 隐私说明
+
+原始输出包含设备上已安装 app 的包名。此处只保留 `com.android.vending` 与 `networkstack.tethering`——两者都是 AOSP/GMS 自带、每台设备都有，不泄露使用习惯。第三方 app 只记数量与归属正确性，不记包名。`bugreport` 也必须遵守同一条线（§ux）。
+
+---
+
+## 16.8 段名缺陷与产品数据面基线过关（2026-08-25）
+
+这一节是 Q9 的意外产物：写探针时 `SEC("tc/q9")` 被 libbpf 拒绝，顺手一查发现**产品代码踩了同一个坑**。
+
+### 16.8.1 缺陷
+
+`bpf/flux.bpf.c` 原本用 `SEC("tc/verify")`、`SEC("tc/cap_l2")`、`SEC("tc/cap_l3")`、`SEC("tc/in")`。libbpf 在 `tc/` 下**只认 `tc/ingress` 和 `tc/egress`**，其余一律：
+
+```
+libbpf: failed to guess program type from ELF section 'tc/q9'
+```
+
+**四个产品程序全都加载不了。** Q1/Q10 探针用的是裸 `SEC("tc")`，所以一直没暴露。
+
+### 16.8.2 实测可用集（不猜）
+
+`tools/phase0/secname-probe.sh` + `secname-load.sh` + `secname-attach.sh`，设备 bpftool v5.16 / 内核 5.15.211：
+
+| 段名 | 加载 | 程序类型 | legacy `tc filter` 挂载 |
+|---|---|---|---|
+| `tc` | OK | `sched_cls` | OK |
+| `classifier` | OK | `sched_cls` | OK |
+| `tc/ingress` | OK | `sched_cls` | OK |
+| `tc/egress` | OK | `sched_cls` | OK |
+| `tcx/egress` | OK | `sched_cls` | OK |
+| `action` | OK | **`sched_act`** | **失败：`RTNETLINK answers: Invalid argument`** |
+| `tc/<自定名>` | **失败** | — | — |
+| `classifier/<自定名>` | **失败** | — | — |
+| `action/<自定名>` | **失败** | — | — |
+
+两个陷阱值得单独记：
+
+- **`action` 会骗过"加载成功"这一关**。它选中的是 `BPF_PROG_TYPE_SCHED_ACT`，另一种程序类型，`tc filter ... bpf da` 直接 `EINVAL`。只看加载结果会误判。
+- **`tc/egress` 和 `tcx/egress` 在 5.15 上挂载正常**。原先担心 libbpf 会设 `BPF_TCX_*` 的 `expected_attach_type` 而 TCX 要到 6.6 才存在——实测这个顾虑不成立。
+
+### 16.8.3 一段一程序，还是四个程序挤一段
+
+`bpftool prog loadall` **能**从单个 `SEC("tc")` 里加载 4 个程序，按函数名 pin（`tools/phase0/secname-multi.bpf.c` 实测）。
+
+这一条让决策塌缩了：4 个程序无论怎么分段都**必须**用 `loadall`（`prog load` 单数形式只接受单程序对象），而 `loadall` 认的是**函数名不是段名**。所以"bpftool 可调试性"在两种方案下**完全相同**，唯一剩下的区别是加载器复杂度：
+
+- 一段一程序：重定位偏移天然是程序相对的，无需重定基。
+- 四程序一段：要按符号 `st_value`/`st_size` 切片，再把该段的重定位逐函数重定基——手写加载器出微妙 bug 的经典位置。
+
+**结论：一段一程序。** 映射写进 `flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `PROG_SECTIONS`，让 C 与加载器无法漂移：
+
+| 程序 | 段 | 理由 |
+|---|---|---|
+| `flx_cap_l2` | `tc` | 与 cap_l3 成对，取两个通用别名 |
+| `flx_cap_l3` | `classifier` | 同上 |
+| `flx_in` | `tc/ingress` | 它确实是 ingress |
+| `flx_verify` | `tc/egress` | 它确实挂在 egress（§8.5.4） |
+
+### 16.8.4 顺带修掉的两个编译期缺陷
+
+1. **`AF_INET` / `AF_INET6` 未定义**。`<linux/in.h>` 只给 `IPPROTO_*`；`<linux/socket.h>` 在 `-target bpf` 下与上面的 UAPI 头冲突。已在 `flux.bpf.c` 内显式定义（二者是冻结 ABI，`struct bpf_sock.family` 用的就是这两个值）。
+2. **`control_root` 的内层 map 无法从 BTF 建出**：
+
+```
+libbpf: map 'control_root.inner': can't determine value size for type [95]: -22
+```
+
+`tools/phase0/btf-inspect.sh` 查出根因：`[95] FWD 'flux_control' fwd_kind=struct`——程序只通过指针接触这个结构体，clang 就把完整定义裁成了前向声明，而 FWD 没有大小。改用显式 `__uint(value_size, sizeof(struct flux_control))`：不加匿名全局、不多建一张 map，且 `sizeof` 在布局变化时仍会让构建失败。
+
+### 16.8.5 结果：整个数据面在基线内核上通过验证器
+
+`tools/phase0/loadall-product.sh`，内核 5.15.211：
+
+| 程序 | xlated | jited |
+|---|---:|---:|
+| `flx_cap_l2` | 8408 B | 7432 B |
+| `flx_cap_l3` | 9160 B | 8112 B |
+| `flx_in` | 4336 B | 3736 B |
+| `flx_verify` | 104 B | 152 B |
+
+**这是实现开始前能拿到的最强证据。** §7.2–7.5 里所有难的部分——`bpf_sk_storage_get` 作用于 `bpf_sk_fullsock`、`bpf_sk_lookup_*` / `bpf_sk_assign` / `bpf_sk_release` 的引用配平、`bpf_skb_change_head`、`bpf_skb_change_type`、ARRAY_OF_MAPS 内层查找、LPM trie——**全部被真实基线内核接受**，不再只是论证。
+
+注意边界：bpftool 是**按 BTF 声明**建 map 的，而产品由 `maps.rs` 显式建（§12.2）。所以这次过关证明的是**程序逻辑可验证**，不是 map 参数正确。后者由 `fluxd check` 负责。
+
+**这条应当进 CI**：`bpftool prog loadall` 是最便宜的验证器门。代价是 CI runner 的内核与 arm64 5.15 有差异，所以它是补充而非替代真机验证。

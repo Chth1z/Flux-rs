@@ -353,6 +353,38 @@ enum flux_counter {
 #define FLUX_PROG_IN     "flx_in"     /* ingress on flxrs1                  */
 #define FLUX_PROG_VERIFY "flx_verify" /* liveness probe, section 8.5.4      */
 
+/*
+ * ELF section per program. These are not free-form labels: a section name that
+ * libbpf does not recognise makes the object unloadable by bpftool, which is
+ * how the verifier gets exercised during development and in CI. Measured on
+ * the baseline (bpftool v5.16, kernel 5.15.211, see docs/verification/phase0.md
+ * section 16.7):
+ *
+ *   loads AND attaches via legacy tc : tc, classifier, tc/ingress, tc/egress,
+ *                                      tcx/egress
+ *   will not load at all             : any <prefix>/<custom-name> form, so
+ *                                      "tc/cap_l2" and friends are out
+ *   loads but CANNOT attach          : "action" -- it selects SCHED_ACT, a
+ *                                      different program type, and
+ *                                      `tc filter .. bpf da` rejects it with
+ *                                      EINVAL
+ *
+ * One program per section is deliberate. Four programs can share a single
+ * SEC("tc") and bpftool prog loadall handles it, but then the loader has to
+ * slice functions out of a shared section by symbol offset and rebase that
+ * section's relocations per function -- the classic way a hand-written loader
+ * acquires subtle bugs. With one program per section, relocation offsets are
+ * already program-relative and no rebasing exists to get wrong.
+ *
+ * cap_l2 and cap_l3 take the two generic aliases because they are the same
+ * program differing only in link layer; in and verify take the names that
+ * happen to describe where they actually attach.
+ */
+#define FLUX_SEC_CAP_L2 "tc"          /* generic alias, paired with cap_l3   */
+#define FLUX_SEC_CAP_L3 "classifier"  /* generic alias, paired with cap_l2   */
+#define FLUX_SEC_IN     "tc/ingress"  /* and it is genuinely ingress         */
+#define FLUX_SEC_VERIFY "tc/egress"   /* and it genuinely attaches at egress */
+
 /* Handle used by the liveness probe while it is attached. Distinct from the
  * capture handle so the ownership predicate can never confuse the two, and so
  * a crash mid-verification leaves an object we can still identify and remove.
