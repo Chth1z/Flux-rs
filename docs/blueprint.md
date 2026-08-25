@@ -254,6 +254,24 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 | `FLUX_LPM_MAX_ENTRIES` | 128 | **65536** | §1.5.1。`NO_PREALLOC` 强制，未用不占 |
 | `FLUX_LPM_SELF_ADDR_RESERVE` | 32 | **64** | §1.5.4 的 flag 过滤能压住 churn，但 IPv6 隐私地址仍会轮换 |
 
+### 1.5.3a 一个必须先处理的内核缺陷：LPM trie 在 6.6.0–6.6.46 会崩
+
+把 CIDR bypass 建在 `LPM_TRIE` 上之前，有一个**内核崩溃**风险要处理，来源是 CHIZI 的 sing-box eBPF 分支文档（它在 Android 上长期实测）：
+
+> Linux 6.6.0 至 6.6.46 存在 LPM trie UBSAN 内核崩溃风险。涉及 UID/包名筛选、`bypass_rule_set` 或 shared 来源 CIDR 时，sing-box 会在已知未修复内核上拒绝启动相关策略。请升级到 6.6.47+，或使用包含上游修复的厂商内核。
+
+**这直接命中我们**：`android15-6.6` 是 GKI 分支之一，落在产品支持范围内；而崩溃不是"功能失效"，是**设备重启**。
+
+三条处置：
+
+1. **本机地址集改用精确 HASH，不用 LPM。** 这一条独立于缺陷也成立，而且是更好的设计：本机地址永远是全长前缀（`/32`、`/128`），用 LPM 做精确匹配本就是浪费。HASH 是 O(1)、删除干净（对 §1.5.4 的 IPv6 隐私地址轮换尤其重要）。CHIZI 也正是这么规避的——"使用精确 HASH map 保存本机地址，规避部分 Linux 6.6 LPM trie 崩溃问题"。
+   
+   因此 map 集从 9 张变 10 张：`bypass_v4` / `bypass_v6` 保留 `LPM_TRIE` 供**前缀**用，新增 `self_addr_v4` / `self_addr_v6` 用 `HASH` 存本机地址。`FLUX_LPM_SELF_ADDR_RESERVE` 随之取消——两者不再共用容量。
+
+2. **大 CIDR 集仍需 LPM，因此必须版本门禁。** 内核在 6.6.0–6.6.46 区间且用户配了 `bypass.files` 时，**拒绝加载该策略并明确报告**，而不是照常加载然后等着崩。判定方式仍是运行时探测优先，但这一条**只能靠版本判断**——崩溃无法安全探测。这是全设计里唯一允许按版本 gate 的地方，理由要写在代码注释里。
+
+3. **固定 bypass 集（回环、私网、多播、listener）条目很少且全是短前缀**，风险面小，但为一致起见同样受第 2 条门禁保护。
+
 ### 1.5.4 本机地址 bypass 必须按 address flag 过滤
 
 D7 规定把本机所有单播地址动态注入 bypass。**这个规定不完整**，旧版 Flux 的 `addrsyncd` 暴露了缺口——它的配置里有一项 `ignore_addr_flags`，可选值是 `temporary | optimistic | deprecated | tentative | dadfailed | stable_privacy | managetempaddr`。

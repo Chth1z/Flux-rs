@@ -292,4 +292,43 @@ Q10 的决定性测量**尚未完成**，但这次尝试本身产出了三条事
 
 Q10 还有一个**时机**约束：它只能在厂商 filter 在场的窗口内测（§16.5.2）。`tools/phase0/q10-chain-continuation.sh` 已内置检测并自动切换到真实场景。
 
-在实测完成之前，**§8.5.4 的存活验证机制只能视为已设计，不能视为已验证**。
+### 16.5.4 Q10 已回答：通过（2026-08-25 20:03，SM-S9180）
+
+**厂商 filter 在场时实测，结论是强结论。**
+
+```
+existing filters:
+  pref 1 bpf chain 0 handle 0x1 prog_semUidBPF_schedcls_egress_tsm_ether id 96
+attach at pref 2:
+  pref 2 bpf chain 0 handle 0x1 q10_probe direct-action id 119
+
+tx_packets delta:      15
+probe invocations:     15   （8 个 CPU 的 per-CPU 值求和）
+```
+
+**调用数与接口发包数 1:1 吻合。** 因此：
+
+- 三星在 pref 1 的程序**不终止** classifier chain。
+- 每一个离开接口的包都到达了 pref 2。
+- **clsact + 动态选 pref 的主路线在这台设备上成立。**
+
+机制也顺带弄清了：`tc filter show` 的输出里**我们的 filter 显示 `direct-action`，三星的没有**。所以三星的是**非 direct-action 的 `cls_bpf`**——`cls_bpf_classify` 对非 da 程序把返回 0 解释为"未匹配，继续下一条"，而不是 `TC_ACT_OK`。这同时回答了我此前想做的对照实验：这个 `tc` 确实会打印 `direct-action`，所以三星输出里没有它**是有意义的**。
+
+**残余风险要说清**：这只证明了**这一个厂商程序**不遮挡。别的 OEM 若用 direct-action 且返回 `TC_ACT_OK`，仍会遮挡。所以 §8.5.4 的存活验证**不因本次通过而取消**——它正是为了在陌生机型上自证。
+
+### 16.5.5 顺带确定的四条工具链事实
+
+达成 Q10 的过程里踩出四个坑，每一个都会改变实现方式：
+
+| 事实 | 影响 |
+|---|---|
+| **`clang -target bpf` 需要 `-I/usr/include/<arch>-linux-gnu`** | 否则 `linux/bpf.h` 里的 `asm/types.h` 找不到。`xtask` 的 BPF 构建必须带这个 |
+| **设备的 bpftool（libbpf v1.4）拒绝 legacy `SEC("maps")`**：`legacy map definitions in 'maps' section are not supported by libbpf v1.0+` | 蓝图原先记的"legacy `bpf_map_def` 在 Android 可用"（§0.5.7，源于 bpf2socks）**只对自建加载器成立**。而我们反正要为 `SK_STORAGE` 手写 BTF（D10），所以**全部 map 都用 BTF 定义**，代价为零、还换来 bpftool 可调试性 |
+| **`tc filter add` 必须显式带 `protocol all`** | 省略会得到 `RTNETLINK answers: Invalid argument`（内核收到 protocol 0），错误信息毫无指向性 |
+| **Android 的 `tc` 没有 ELF 支持**：`bpf da obj <file>` 报 `No ELF library support compiled in`，只有 `pinned` 可用 | 这把 §12.8「不 shell out 到 tc」从偏好变成**唯一选项**：就算想用 `tc` 装 BPF filter 也做不到，必须自己 load+pin 再按 netlink 挂载 |
+
+### 16.5.6 §8.5.4 的验证状态
+
+存活验证机制**本身已被这次实验证实可行**——探测程序、per-CPU 计数、attach/detach、读计数，整条链路跑通了，用的正是 §8.5.4 规定的形态（独立探测程序 + `TC_ACT_UNSPEC` + per-CPU 计数器）。
+
+剩下的只是把它从脚本搬进 `fluxd`。
