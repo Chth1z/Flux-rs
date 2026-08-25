@@ -127,9 +127,9 @@ fn string_array(table: &toml::value::Table, key: &str) -> Result<Vec<String>, Co
         Some(toml::Value::Array(items)) => items
             .iter()
             .map(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| ConfigError::WrongType(format!("{key} must be an array of strings")))
+                v.as_str().map(str::to_string).ok_or_else(|| {
+                    ConfigError::WrongType(format!("{key} must be an array of strings"))
+                })
             })
             .collect(),
         Some(_) => Err(ConfigError::WrongType(format!("{key} must be an array"))),

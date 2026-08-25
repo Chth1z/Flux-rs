@@ -16,7 +16,9 @@
 //! is fully testable on any host. Running `sing-box check` is the daemon's job
 //! (blueprint §9.4); this module produces the JSON that check then validates.
 
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{json, Value};
 
 use crate::abi::{LISTEN_V4_STR, LISTEN_V6_STR};
 
@@ -116,11 +118,8 @@ fn first_reserved_tag(value: &Value) -> Option<String> {
 /// A false result means `fluxd check` must WARN, not reject: the user may
 /// deliberately want DNS forwarded verbatim (§9.6).
 pub fn has_dns_hijack_rule(config: &Value) -> bool {
-    route_rules(config).is_some_and(|rules| {
-        rules
-            .iter()
-            .any(|rule| rule_action_is(rule, "hijack-dns"))
-    })
+    route_rules(config)
+        .is_some_and(|rules| rules.iter().any(|rule| rule_action_is(rule, "hijack-dns")))
 }
 
 /// Whether the config has a `sniff` route action, which the shipped default
@@ -194,6 +193,7 @@ pub fn parse_jsonc(text: &str) -> Result<Value, serde_json::Error> {
 }
 
 /// Asserts the injected inbound object carries only the four allowed keys.
+#[cfg(test)]
 fn injected_keys_are_minimal(inbound: &Map<String, Value>) -> bool {
     const ALLOWED: [&str; 4] = ["type", "tag", "listen", "listen_port"];
     inbound.len() == ALLOWED.len() && ALLOWED.iter().all(|k| inbound.contains_key(*k))
@@ -253,7 +253,10 @@ mod tests {
                 "routing_mark",
                 "reuse_addr",
             ] {
-                assert!(!obj.contains_key(forbidden), "{forbidden} must not be injected");
+                assert!(
+                    !obj.contains_key(forbidden),
+                    "{forbidden} must not be injected"
+                );
             }
         }
 
@@ -306,7 +309,10 @@ mod tests {
         assert!(build_effective(&config, &params()).is_ok());
 
         // Both route rules present (blueprint §1.3.4).
-        assert!(has_sniff_rule(&config), "default template lacks a sniff rule");
+        assert!(
+            has_sniff_rule(&config),
+            "default template lacks a sniff rule"
+        );
         assert!(
             has_dns_hijack_rule(&config),
             "default template lacks a hijack-dns rule"

@@ -1,6 +1,7 @@
 //! Build, packaging and release automation.
 //!
-//! Implements blueprint §13.1 and §15.1. Runs on the development host only and
+//! Implements blueprint §13.1/§13.4 and §15.1, plus the doc checks of
+//! `docs/plan/implementation.md` §17.4. Runs on the development host only and
 //! is never shipped.
 //!
 //! Packaging rules that must not be relaxed:
@@ -11,22 +12,67 @@
 //! * Every `LOAD` segment of `fluxd` must have `p_align >= 0x4000` so the
 //!   module works on 16 KiB base-page devices; the pinned official sing-box is
 //!   still `0x1000` and is checked against `engine.lock` rather than rebuilt.
-//!
-//! Not implemented yet — Phase 7 (blueprint §17).
 
-use std::process::ExitCode;
+mod abi_check;
+mod cdefs;
+mod doc_check;
+mod elf;
+mod package;
+mod sha256;
+mod util;
+mod zip;
+
+use std::process::{Command, ExitCode};
 
 fn usage() -> &'static str {
     "\
 cargo xtask <TASK>
 
 TASKS:
-    ci             fmt --check, clippy -D warnings, test, deny
-    abi-check      compare bpf/include/flux_abi.h offsets against flux-core::abi
+    ci             fmt --check, clippy -D warnings, test, deny, doc-check
+    abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
+    doc-check      the four mechanical documentation checks (implementation.md \u{a7}17.4)
     build-bpf      compile bpf/flux.bpf.c with clang
     package        build the module ZIP from the allowlist
-    verify-package re-package and assert byte-identical output
+    verify-package package twice from clean cross-build state, assert equal hashes
 "
+}
+
+fn ci() -> Result<(), String> {
+    let root = util::repo_root();
+    let cargo = util::cargo();
+    let steps: [&[&str]; 3] = [
+        &["fmt", "--all", "--", "--check"],
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        &["test", "--workspace"],
+    ];
+    for step in steps {
+        util::run(
+            Command::new(&cargo).args(step).current_dir(&root),
+            &format!("cargo {}", step[0]),
+        )?;
+    }
+    // cargo-deny is a separate install; CI runs it in its own job, so a
+    // missing binary here is reported but not fatal to the local loop.
+    match Command::new(&cargo)
+        .args(["deny", "check"])
+        .current_dir(&root)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => return Err(format!("cargo deny check exited with {status}")),
+        Err(_) => {
+            println!("ci: cargo-deny not installed, skipping (CI's supply-chain job runs it)")
+        }
+    }
+    doc_check::run()
 }
 
 fn main() -> ExitCode {
@@ -35,19 +81,29 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    match task.as_str() {
+    let result = match task.as_str() {
         "help" | "-h" | "--help" => {
             print!("{}", usage());
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
-        "ci" | "abi-check" | "build-bpf" | "package" | "verify-package" => {
-            eprintln!("xtask: `{task}` is not implemented yet (see docs/blueprint.md §17)");
-            ExitCode::from(69)
-        }
+        "ci" => ci(),
+        "abi-check" => abi_check::run(),
+        "doc-check" => doc_check::run(),
+        "build-bpf" => package::build_bpf(),
+        "package" => package::run(),
+        "verify-package" => package::verify(),
         other => {
             eprintln!("xtask: unknown task `{other}`");
             eprint!("{}", usage());
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("xtask {task}: {message}");
+            ExitCode::FAILURE
         }
     }
 }
