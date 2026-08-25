@@ -7,7 +7,66 @@ is still free. It splits in two:
 | Half | What it does | Tool |
 |---|---|---|
 | **Observation** | Answers "what is this device actually like" | `observe.sh` (read-only) |
-| **Falsification** | Answers "does the mechanism work here" — Q1–Q10 in `docs/blueprint.md` §16.1 | not written yet; needs a loadable BPF object |
+| **Falsification** | Answers "does the mechanism work here" — Q1–Q10 in `docs/verification/phase0.md` §16.1 | the harnesses below |
+
+## These are regression tools, not one-shot scripts
+
+Six of the ten questions are answered (`docs/verification/phase0.md` §16.5 through
+§16.10). The remaining four cannot be answered before the code they test exists,
+and `docs/plan/implementation.md` §17.2 assigns each one to the stage that can
+actually run it.
+
+Every harness here stays useful after its question is closed, because the answer
+is a property of a device and a kernel, not a fact about the universe. Re-run
+them when the thing under them changes:
+
+| Harness | Answers | Re-run when |
+|---|---|---|
+| `q1-run-device.sh` | Q1 — SK_STORAGE first decision | the §7.3 algorithm changes |
+| `q1-run.sh` | Q1 in a netns on a dev host, with real concurrency | you want contention that a phone will not produce |
+| `q2-run-device.sh` | Q2 — 4 listener sockets, sk_lookup fields, **sk_assign succeeds** | **every engine version bump** (§9.2 requires it) |
+| `q6-veth-observe.sh` | Q6 observation, OEM chains, sysctl starting point, veth lifecycle | new device; also stage 3's Q8 |
+| `q9-run-device.sh` | Q9 — per-app DNS attribution (D18) | new device or Android version |
+| `q10-run.sh` | Q10 — whether a vendor filter shadows us | new device |
+| `loadall-product.sh` | the four product programs pass the verifier | **every change to `flux.bpf.c`** (CI does this automatically) |
+| `secname-probe.sh` + `secname-load.sh` + `secname-attach.sh` | which ELF section names load *and* attach | changing a `FLUX_SEC_*` |
+| `btf-inspect.sh` | why libbpf cannot size a map from BTF | libbpf says "can't determine value size" |
+| `wsl-capability.sh` | whether the build host can compile BPF at all | new development machine |
+| `observe.sh` | everything about an unfamiliar device | first thing on any new device |
+
+### How to run one
+
+They all follow the same shape, and all of them clean up after themselves on
+every exit path including SIGINT:
+
+```bash
+# compile the probe on the build host (WSL is fine)
+wsl -u root bash -c "cd /mnt/d/Github/Flux-rs && \
+  clang -target bpf -O2 -g -mcpu=v3 -I bpf/include \
+  -I /usr/include/x86_64-linux-gnu \
+  -c tools/phase0/q1_probe.bpf.c -o /tmp/q1_probe.o"
+
+adb push /tmp/q1_probe.o /data/local/tmp/
+adb push tools/phase0/q1-run-device.sh /data/local/tmp/q1.sh
+adb shell "su -c 'sh /data/local/tmp/q1.sh'"
+```
+
+`-I bpf/include` is only needed by probes that include the real `flux_abi.h`,
+which several deliberately do so that a pass transfers to the product rather
+than to a simplified stand-in.
+
+### Three traps these harnesses were bitten by
+
+Worth knowing before writing the next one:
+
+1. **`bpftool` prints BTF-typed maps as JSON with the struct's field names**, not
+   as hex. A hex parser silently produces nothing. Parse the JSON, keep hex as a
+   fallback.
+2. **Return a negative errno through a map only in a signed type.** A `__u64`
+   slot turns `-94` into a 2^64 two's complement that no shell can compare, and
+   the harness then reports a perfectly good result as a failure.
+3. **`ip netns exec` hides bpffs**, so a pinned program is invisible inside the
+   namespace. Use `nsenter --net=...` instead, which keeps the mount namespace.
 
 ## `observe.sh`
 
@@ -69,6 +128,11 @@ a wrong conclusion:
 ## Results
 
 `results/` holds redacted, analysed snapshots. One file per device and build.
-The analysis that matters is folded back into `docs/blueprint.md` §16.2 — these
-files are the raw evidence behind it, kept so that a future claim can be
+The analysis that matters is folded back into `docs/verification/phase0.md` —
+these files are the raw evidence behind it, kept so that a future claim can be
 checked against what was actually measured rather than what was remembered.
+
+Findings that changed the design are tracked separately in
+`docs/evidence/review-log.md`, including the ten times the design was overturned
+by its own evidence. Three of those came out of these harnesses, and two of the
+three overturned claims the design itself had made.

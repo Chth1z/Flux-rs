@@ -584,3 +584,67 @@ NetdWrapper: NetdWrapper interface add, iface= flxrs0
 
 - **存在一条 `block_all_dns` 链**（v4/v6 各一，当前 `0 references`）。它现在没被引用，但名字说明系统保留了整体阻断 DNS 的能力。若某天被引用，会与 §1.3 的 DNS 捕获直接冲突。列为已知观察，不是当前问题。
 - rmnet 接口的 `operstate` 是 `unknown` 而非 `up`。RAWIP 接口不上报载波状态，所以**接口选择逻辑不能用 `operstate == "up"` 做判据**，否则会漏掉全部蜂窝接口。这是一个很容易写错的地方。
+---
+
+## 16.10 Q2 已通过：入向那一半也测掉了（2026-08-26，SM-S9180 / 5.15.211）
+
+在此之前测过的都是**出向那一半**（捕获、UID 归属、验证器）。入向那一半——`bpf_sk_lookup_*` 能否找到官方 sing-box 的 tproxy listener、`bpf_sk_assign()` 是否真的成功——此前只有源码阅读支撑。现在有实测。
+
+工具：`tools/phase0/q2_probe.bpf.c` + `tools/phase0/q2-run-device.sh`。跑的是 **`engine.lock` 钉住的、未修改的官方二进制**（v1.13.19，archive 与 binary 两个 sha256 在推送前逐一核对通过），inbound 用的是 §9.1 规定的精确形状（只有 `type`/`tag`/`listen`/`listen_port`，两族同端口）。探针的 lookup **逐字复刻 `flux.bpf.c` 的 `listener_lookup()`**，包括合成的 remote tuple，所以结论可以迁移到产品而不是某个简化替身。
+
+不需要 fluxd：`bpf_sk_assign()` 只在 TC ingress 合法，所以探针挂在专用 veth 的 peer 上，它能看到的包只有 harness 自己产生的。探针每条路径都 `TC_ACT_SHOT`。
+
+### 16.10.1 `sing-box check -c` 接受 §9.1 的注入形状
+
+退出码 0。这同时是 §9.4 步骤 1 的真实演练。
+
+### 16.10.2 四个 kernel socket 与 inode 交叉核验
+
+```
+LISTEN  198.51.100.1:61234          <- v4 TCP
+UNCONN  198.51.100.1:61234          <- v4 UDP
+LISTEN  [2001:db8:0:1::2]:61234     <- v6 TCP
+UNCONN  [2001:db8:0:1::2]:61234     <- v6 UDP
+```
+
+四个 inode 逐一落在引擎进程的 **fd 9 / 10 / 11 / 12** 上，`/proc/<pid>/fd` 交叉核验 4/4 通过。
+
+**非本地地址绑定成功**：`198.51.100.1` 与 `2001:db8:0:1::2` 不属于任何接口。这实证了 §9.1 依赖的机制——tproxy inbound 在 bind 前设 `IP_TRANSPARENT`，`inet_can_nonlocal_bind()` 因此放行。
+
+### 16.10.3 `bpf_sk_lookup_*` 4/4 命中，字段逐项吻合
+
+| 组合 | 命中 | `family` | `state` | `src_port` | `src_ip4` |
+|---|---|---:|---:|---:|---|
+| v4 TCP | HIT | 2 | **10** (`BPF_TCP_LISTEN`) | 61234 | **198.51.100.1** |
+| v4 UDP | HIT | 2 | 7 (`BPF_TCP_CLOSE`) | 61234 | 198.51.100.1 |
+| v6 TCP | HIT | 10 | **10** | 61234 | — |
+| v6 UDP | HIT | 10 | 7 | 61234 | — |
+
+两点值得单独记：
+
+- **`src_port` 读出的是主机序**（61234 直接可读，未经字节序转换）。这证实了 `flux.bpf.c` 里 `listener_guard()` 上方那条注释——`bpf_sock::src_port` 是主机序而 `dst_port` 是网络序。这个不对称很容易写错，现在有实测背书。
+- **UDP socket 的 `state` 是 7（`BPF_TCP_CLOSE`）而不是 10**。`listener_guard()` 只对 `IPPROTO_TCP` 检查 `state != BPF_TCP_LISTEN`，这个条件分支是**必需的**：若对 UDP 也检查 LISTEN，四个 socket 里的两个会被自己的守卫拒掉。
+
+### 16.10.4 `bpf_sk_assign()` 返回 **0** —— §9.2 从源码结论升级为实测结论
+
+这是本项的核心。在 5.15 上，`bpf_sk_assign()` 对 `sk->sk_reuseport` 为真的 socket 返回 `-ESOCKTNOSUPPORT`（-94）。**它返回了 0**，所以官方 sing-box v1.13.19 的 tproxy listener 确实没有 `SO_REUSEPORT`。
+
+此前这条只有两份间接证据：全代码树 `rg` 零命中，以及 `redir.TProxy()` 只设 `SO_REUSEADDR`。现在有内核自己的回答。
+
+**版本升级时必须重跑本项**（§9.2 已有此要求）。这个测试现在是现成的，重跑成本约一分钟。
+
+### 16.10.5 附带证据：`PackageManager` 在本设备可用
+
+引擎启动日志：
+
+```
+network: updated packages list: 436 packages, 45 shared users
+```
+
+这是 sing-box 的 `tun.NewPackageManager` 成功枚举了包列表。§1.3.5 的第 6 条实测项（用户 JSON 里的 `package_name` 规则能否命中）的**前置条件因此成立**——该机制在这台设备上没有静默失败。规则命中本身仍需在有真实流量时确认。
+
+### 16.10.6 harness 自己的一个教训
+
+第一版把 `bpf_sk_assign()` 的返回码存进 `__u64` 的 map，于是失败时会是 2⁶⁴ 量级的补码，shell 无法比较，把一个**完全正常的 rc=0** 报成了 `?` 并走进失败分支。
+
+改成 `__s64` 后 BTF 让 bpftool 直接打印 `-94` 这样的负数，问题消失。**记这一条是因为它会重复出现**：任何要在 map 里回传负 errno 的调试路径都该用有符号类型，否则读数的一侧必须做 64 位补码运算。
