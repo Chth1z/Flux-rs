@@ -39,16 +39,38 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The four mechanical documentation checks of implementation.md 17.4:
+      # chapter map, relative links, FLUX_SEC_*/SEC_* identity, overturn
+      # numbering. Each has caught a real defect before it was automated.
+      - name: Doc check
+        run: cargo xtask doc-check
+
+  # flux-core is contractually pure logic (implementation.md 17.4 exit
+  # criterion 1): no I/O, no unsafe, no async, no platform dependencies. A
+  # Windows run is the cheapest way to keep that promise honest.
+  windows:
+    name: flux-core on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Test pure logic
+        run: cargo test -p flux-core
+
   bpf:
     name: bpf object
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang
+      - name: Install clang and BPF headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm
+          sudo apt-get install -y clang llvm libbpf-dev
+          # clang -target bpf does not search the x86_64 multiarch include
+          # directory, so <linux/types.h> cannot find <asm/types.h> without
+          # the conventional compatibility link.
+          sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
       - uses: Swatinem/rust-cache@v2
 
@@ -64,10 +86,6 @@ jobs:
       # two can never drift silently.
       - name: ABI offset cross-check
         run: cargo xtask abi-check
-        # Implement in stage 1 and delete this line then; the stage does not
-        # exit until abi-check is real and green. See
-        # docs/plan/implementation.md section 17.4.
-        continue-on-error: true
 
       - name: Install bpftool
         run: sudo apt-get install -y linux-tools-common linux-tools-generic
@@ -108,9 +126,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Set up NDK
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27c
+
+      # verify-package embeds the BPF object, so this job needs the same BPF
+      # build inputs as the bpf job.
+      - name: Install clang and BPF headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev
+          sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
       - name: Cross build
         env:
@@ -118,6 +145,14 @@ jobs:
         run: |
           echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
           cargo build --workspace --target aarch64-linux-android
+
+      # Blueprint 13.4 / implementation.md 17.4 exit criteria 4 and 5: two
+      # clean packaging runs must produce byte-identical archives, with the
+      # engine pin verified against engine.lock on every run.
+      - name: Reproducible package
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo xtask verify-package
 
   supply-chain:
     name: cargo deny
