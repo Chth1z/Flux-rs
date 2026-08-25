@@ -63,10 +63,29 @@
 #define FLUX_MAP_FAULT_EVENTS "fault_events"  /* RINGBUF     16384 bytes        */
 #define FLUX_MAP_COUNTERS     "counters"      /* PERCPU_ARRAY 32   u32 -> u64   */
 
-#define FLUX_UID_POLICY_MAX_ENTRIES 512u
-#define FLUX_UID_SELECTED_MAX       128u
-#define FLUX_LPM_MAX_ENTRIES        128u
-#define FLUX_LPM_SELF_ADDR_RESERVE   32u
+/* Capacities. Raised from 512/128/128/32 after measuring a real device:
+ * SM-S9180 has 429 packages inside the [10000,19999] application range, so the
+ * old caps made "select every third-party app" structurally impossible. And
+ * uid_policy has to hold selected plus every DRAINING entry accumulated during
+ * a boot, because DRAINING entries are never deleted (see flux_uid_mode).
+ * Details in docs/blueprint.md section 1.5.3.
+ */
+#define FLUX_UID_POLICY_MAX_ENTRIES 4096u
+#define FLUX_UID_SELECTED_MAX       1024u
+
+/* LPM_TRIE is forced to BPF_F_NO_PREALLOC by the kernel, so max_entries is a
+ * ceiling rather than an allocation: an unused 65536 costs nothing. This is
+ * what lets the bypass set hold a country-scale route list -- roughly ten
+ * thousand IPv4 prefixes -- and thereby skip a userspace round trip for
+ * traffic that would have gone direct anyway (section 1.5.1).
+ */
+#define FLUX_LPM_MAX_ENTRIES        65536u
+
+/* Slots held back for the device's own addresses. IPv6 privacy extension
+ * addresses rotate, so the reactor filters by IFA_FLAGS and evicts LRU within
+ * this reserve rather than accumulating (section 1.5.4).
+ */
+#define FLUX_LPM_SELF_ADDR_RESERVE     64u
 #define FLUX_FAULT_LATCH_MAX_ENTRIES 64u
 /* Power of two AND PAGE_SIZE aligned for both 4 KiB and 16 KiB pages. */
 #define FLUX_FAULT_RINGBUF_BYTES     16384u

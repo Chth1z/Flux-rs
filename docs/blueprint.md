@@ -207,6 +207,92 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 ---
 
+## 1.5 eBPF 能力边界：已评估的加速手段与容量
+
+本节回答三个问题：分流够不够精准、eBPF 能不能做加速、能不能承载大规模 CIDR。它们是同一个问题的三面，所以放在一起。
+
+### 1.5.1 大规模 CIDR bypass：能，而且严格优于 ipset
+
+`BPF_MAP_TYPE_LPM_TRIE` 就是为这件事设计的。与旧版 Flux 的 `BYPASS_SET_BACKEND=zone|ipset` 相比：
+
+| | iptables 跳转树 | ipset `hash:net` | **`LPM_TRIE`** |
+|---|---|---|---|
+| 到达匹配的代价 | 遍历链 | 遍历链到 `-m set` | **无**——我们的程序已经在跑，一次 helper 调用 |
+| 查找复杂度 | O(规则数) | O(1) 哈希，但需按前缀长度分桶重试 | O(前缀位数)，实际远小于 |
+| 万级 CIDR | 不可行 | 可行 | **可行** |
+| 内存 | 每条规则一个链项 | 预分配哈希表 | `LPM_TRIE` **内核强制 `BPF_F_NO_PREALLOC`**，按需分配 |
+
+最后一行是关键：**`max_entries` 对 `LPM_TRIE` 只是上限，不是预分配量。** 把它设成 65536 在不用时代价为零。
+
+**因此 `FLUX_LPM_MAX_ENTRIES` 从 128 提到 65536。** 参考量级：`chnroute` 的 IPv4 列表约 1 万条，完全在范围内。批量装载用 `BPF_MAP_UPDATE_BATCH`（5.6+，基线 5.15 具备），一次 syscall 灌入上千条。
+
+### 1.5.2 但这不是"把路由策略搬进 Flux"
+
+§1.4 规定 Flux 只做 UID 粗分流，域名与规则归 sing-box。大 CIDR 集看似越界，**框架要摆正**：
+
+它不是路由策略，而是**避免一次已知无用的用户态往返**。如果某个目的地无论如何都会被 sing-box 判为 direct，那么把它捕获、跨 veth、拷进用户态、再让 sing-box 发一遍，是纯粹的浪费。在 eBPF 里 bypass 掉，这些包**根本不离开原路**。
+
+收益是可量化的：一个在国内使用的用户，若代理浏览器，境内流量往往占多数——这部分省掉的是 veth 跳、用户态拷贝、以及第二条 TCP 连接。
+
+**两条必须写清的语义边界**：
+
+1. **只能按目的 IP，不能按域名。** 它补充而不取代 sing-box 的域名规则。
+2. **bypass 的判定在 sing-box 之前，且是终局的。** 若某域名解析到一个被 bypass 的 IP，即使用户在 sing-box 里希望它走代理，**也不会被捕获**。这个优先级必须在文档和 `explain` 输出里说明，否则会成为"我配了规则为什么不生效"的困惑来源。
+
+### 1.5.3 容量：实测暴露的缺陷
+
+一台真机（SM-S9180）的 `packages.list` 里，`[10000,19999]` 范围内有 **429 个 app**。而原先的 `FLUX_UID_SELECTED_MAX = 128`、`FLUX_UID_POLICY_MAX_ENTRIES = 512`。
+
+这意味着**"选中全部第三方应用"这个最自然的 auto 模式在设计上是做不到的**。更糟的是 `uid_policy` 的 512：按 ABI 规定，`FLUX_UID_DRAINING` 条目在一个 boot 内**永不删除**（删了会让已捕获 socket 的包泄漏到真实目的地），所以用户每改一次选择都会累积 draining 条目。429 选中 + 若干次改动 = 撑爆 512。
+
+修正后的容量：
+
+| 常量 | 原 | 新 | 依据 |
+|---|---:|---:|---|
+| `FLUX_UID_SELECTED_MAX` | 128 | **1024** | 覆盖"装满 app 的设备上全选"，实测 429，留一倍余量 |
+| `FLUX_UID_POLICY_MAX_ENTRIES` | 512 | **4096** | 必须容纳 selected + 一个 boot 内累积的 draining。HASH 预分配 4096 × 约 64 B ≈ 256 KB，可接受 |
+| `FLUX_LPM_MAX_ENTRIES` | 128 | **65536** | §1.5.1。`NO_PREALLOC` 强制，未用不占 |
+| `FLUX_LPM_SELF_ADDR_RESERVE` | 32 | **64** | §1.5.4 的 flag 过滤能压住 churn，但 IPv6 隐私地址仍会轮换 |
+
+### 1.5.4 本机地址 bypass 必须按 address flag 过滤
+
+D7 规定把本机所有单播地址动态注入 bypass。**这个规定不完整**，旧版 Flux 的 `addrsyncd` 暴露了缺口——它的配置里有一项 `ignore_addr_flags`，可选值是 `temporary | optimistic | deprecated | tentative | dadfailed | stable_privacy | managetempaddr`。
+
+那不是过度设计，是必需的：
+
+| flag | 为什么要处理 |
+|---|---|
+| `tentative` | DAD 未完成，地址还不可用。此时注入是错的 |
+| `dadfailed` | 地址冲突，永不可用 |
+| `temporary` / `stable_privacy` | **IPv6 隐私扩展地址会定期轮换**（常见为每天）。不过滤就会持续累积，撑爆 `LPM_SELF_ADDR_RESERVE` |
+| `deprecated` | 仍服务于既有连接，**要保留**——不能因为它被弃用就移除 bypass |
+
+因此 §10.4 的地址观测必须：读 `IFA_FLAGS`；`tentative`/`dadfailed` **不注入**；`deprecated` **保留**；`temporary`/`stable_privacy` 注入但**按 LRU 淘汰**，上限即 `FLUX_LPM_SELF_ADDR_RESERVE`。
+
+### 1.5.5 逐项评估过的加速手段
+
+| 手段 | 结论 |
+|---|---|
+| **旧版的 `PERFORMANCE_MODE`**（`-m socket` + conntrack `--ctdir REPLY -j ACCEPT` 快路径） | **已被结构性超越。** 那是为了让已建立连接跳过规则链遍历；我们的 `tcp_decision`（`SK_STORAGE`）是 per-socket O(1) 查找，根本没有链可遍历（§7.3 的 E2 在 E3 之前）。无需移植 |
+| **旧版的 `MSS_CLAMP_ENABLE`**（钳制 TCP MSS 以修运营商网络） | **在本架构下结构性地不需要。** app 的 TCP 由本机 transparent socket **终结**，只走 app→veth→本地 socket，路径 MTU 是 veth 的 65535；sing-box 到服务器是**另一条** TCP 连接，由内核正常协商 MSS。app 的 TCP 从不穿越运营商路径，所以那个问题不会发生。这是终结型代理相对转发型的固有优势 |
+| **旧版的 `BLOCK_QUIC`** | **不需要，且属于错误的层。** 我们正确捕获 UDP，QUIC 会被交给 sing-box。若用户的出口不支持 UDP relay 而希望强制 TCP 回落，那是**策略**，应当写在 sing-box 的 route rule（`{"network":"udp","port":443,"outbound":"block"}`），不是 Flux 的开关 |
+| **`SOCKMAP` / `sk_msg` 内核内 splice** | **拒绝，两条独立理由。** ① 需要 sing-box 把自己的 socket 放进 sockmap，违反"官方未修改二进制"（§3.8）；② splice 只在不需要变换数据时成立，而代理的意义通常正是加密——唯一可 splice 的是 `direct` 出口，而那种流量我们本来就在 §1.5.1 里 bypass 掉了。零收益 |
+| **XDP** | 不适用。XDP 只有入向、且在协议栈之前，**没有 socket 上下文**，拿不到 UID |
+| **`BPF_PROG_TYPE_SOCK_OPS`**（可用于设 MSS、拥塞控制等） | **禁止**。它是 cgroup attach 类型，§0.1 已全面禁止 cgroup attach |
+| **`bpf_redirect_peer` 省一跳** | 结构上不可用（§19）：要求 TC ingress 且跨 netns |
+| **GSO 超级包穿越 veth** | **这已经是一项加速**，且是免费的。`__is_skb_forwardable()` 对 GSO skb 有显式豁免，所以大包整个穿过 veth，遍历次数按段数下降（§16 Q4 已核实机制） |
+| **per-UID 字节/包计数** | **建议做**，见 §1.5.6 |
+
+### 1.5.6 per-UID 计数：唯一建议新增的数据面功能
+
+现有 counters 只在决策边沿递增（§6），所以能回答"有没有在工作"，但不能回答"哪个应用走了多少"。而后者是用户最常问的问题之一，也是"系统统计会翻倍"这条边界的直接补偿（§2.2.3(4)）。
+
+方案：一张 `PERCPU_HASH`，key 为 `uid`，value 为 `{ tx_packets, tx_bytes }`，**只在已捕获的包上更新**。
+
+成本论证：被捕获的包已经付了一次 redirect（约一次 `dev_queue_xmit`），再加一次 per-CPU hash 更新是边际的；而**未选中的流量一行都不碰**，§14.1 的性能地基不受影响。这是它与"per-packet 存活计数"（§8.5.4 已因此改用独立探测程序）的关键区别。
+
+明确不做的：不记目的地址、不记端口、不记时间序列。只有"这个 UID 经代理走了多少字节"。**不记录任何能重建访问历史的东西。**
+
 # 第 2 部分：数据路径与失败语义
 
 ## 2.1 路径
@@ -1169,6 +1255,38 @@ dump 用 `RTM_GETTFILTER` + `NLM_F_DUMP`，`tcmsg{ tcm_ifindex, tcm_parent }`。
 ---
 
 # 第 9 部分：sing-box 集成
+
+## 9.0 一个会让 fakeip 完全失效的地址段冲突
+
+移植旧版 Flux 的 `conf/template.json` 时发现的，**属于设计缺陷而非配置错误**，因为它源于两边各自都合理的选择。
+
+sing-box 的 `fakeip` 默认地址段是 `198.18.0.0/15`（v4）与 `fc00::/18`（v6）。而 Flux 的固定 bypass 集（§7.2、D16）包含：
+
+- `198.18.0.0/15` —— 因为 listener 绑在 `198.18.0.2`，整段进 bypass 以防自环；
+- `fc00::/7` —— 作为 ULA 私有地址段。
+
+**两边完全重叠。** 后果是致命的：fakeip 的全部意义就是让应用连向那个假地址、然后被代理截获；而被 Flux bypass 意味着**那些包根本不会被捕获**。fakeip 会静默地完全失效——DNS 返回假地址，应用连上去，包直连出去，然后什么都连不上。
+
+### 9.0.1 处置
+
+**第一，把 listener 的 bypass 从整个前缀收窄。** 原本 bypass 整个 `/15` 与 `/32` 是过度的：防自环只需要 bypass **listener 的确切地址**。这一条独立成立，与 fakeip 无关。
+
+**第二，listener 地址移出 fakeip 的惯用段。** fakeip 用 `198.18.0.0/15` 是这个生态的既成惯例，用户有肌肉记忆；Flux 选 `198.18.0.2` 只是"某个不可路由地址"，任意性更高。**该让的是 Flux。** 建议改为：
+
+| | 现在 | 建议 |
+|---|---|---|
+| v4 listener | `198.18.0.2` | `198.51.100.1`（RFC 5737 TEST-NET-2） |
+| v4 bypass | `198.18.0.0/15` | `198.51.100.0/24` |
+| v6 listener | `2001:db8::2` | `2001:db8:0:1::2` |
+| v6 bypass | `2001:db8::/32` | `2001:db8:0:1::/64` |
+
+v6 的 fakeip 段则**必须由模板避开 ULA**（`fc00::/7` 作为私有地址段的 bypass 是正当的，不该为 fakeip 让路），建议 `2001:db8:f::/48`。
+
+**第三——也是最重要的一条：`fluxd check` 必须交叉校验 `fakeip` 段与 bypass 集是否相交，相交即报错。** 前两条只是把默认值调对；用户随时会改这些地址段，而这个冲突的症状是"DNS 正常、应用连得上、但什么都打不开"，几乎不可能靠猜诊断出来。**自动校验才是真正的解法。**
+
+同类的交叉校验还应覆盖：`fakeip` 段与 `tun` 段（若用户自己加了 tun）、`clash_api` 的监听地址是否为回环、以及用户在 `bypass.files` 里加载的大列表是否意外包含了 fakeip 段。
+
+> **状态：模板已按上表调整并加了注释（`module/template.json`），但 `flux_abi.h` 里的 listener 地址常量尚未改动。** 那一改会牵动 §7.2 的固定 bypass 清单、§8.9 的 netlink 规格与 `abi.rs` 的断言，属于需要一次完整改动的事项，不适合仓促进行。列为待办。
 
 ## 9.1 注入的 inbound（每 generation 两个，4 个 kernel socket）
 
