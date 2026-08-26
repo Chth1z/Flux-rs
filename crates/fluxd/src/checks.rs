@@ -34,13 +34,43 @@ impl CheckReport {
     }
 }
 
-/// The full check: everything [`quick_check`] covers plus a real
-/// `sing-box check -c` subprocess run against a throwaway effective config.
-/// CLI-only; the daemon must use [`quick_check`].
+/// The full check: everything [`quick_check`] covers plus an unattached BPF
+/// load and a real `sing-box check -c` subprocess run against a throwaway
+/// effective config. CLI-only; the daemon must use [`quick_check`].
 pub fn full_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
     let mut report = quick_check(layout, spec);
+    check_bpf(&mut report);
     run_engine_check(layout, spec, &mut report);
     report
+}
+
+fn check_bpf(report: &mut CheckReport) {
+    let runtime = match crate::bpf::Runtime::load_embedded(crate::BPF_OBJECT) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            report.errors.push(format!("bpf: {error}"));
+            return;
+        }
+    };
+    let mut ring = match runtime.fault_ring() {
+        Ok(ring) => ring,
+        Err(error) => {
+            report.errors.push(format!("bpf: {error}"));
+            return;
+        }
+    };
+    match ring.drain_faults() {
+        Ok(events) if events.is_empty() => {}
+        Ok(events) => report.errors.push(format!(
+            "bpf_ringbuf_dirty: newly-created fault ring contained {} records",
+            events.len()
+        )),
+        Err(error) => report.errors.push(format!("bpf_ringbuf_read: {error}")),
+    }
+    // No map or program is attached or pinned. Dropping these handles removes
+    // all objects created by this capability check.
+    drop(ring);
+    drop(runtime);
 }
 
 /// The bounded-time check: `flux.toml`, `packages.list` resolution,
