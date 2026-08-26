@@ -64,14 +64,31 @@ pub struct EngineSpec {
     pub listen_v6: Ipv6Addr,
 }
 
+/// Environment overrides for the listener addresses. Test hooks with the same
+/// status as [`crate::layout::RUNTIME_ROOT_ENV`]: they let an integration test
+/// run the full daemon with a fake engine bound to loopback, where binding the
+/// ABI 198.18/16 addresses would need root. Production never sets them.
+pub const LISTEN_V4_ENV: &str = "FLUX_LISTEN_V4";
+/// IPv6 counterpart of [`LISTEN_V4_ENV`].
+pub const LISTEN_V6_ENV: &str = "FLUX_LISTEN_V6";
+
 impl EngineSpec {
-    /// The production spec: module-shipped binary, ABI listener addresses.
+    /// The production spec: module-shipped binary, ABI listener addresses
+    /// (loopback overrides honoured only via the documented test hooks).
     pub fn product(layout: &Layout) -> Self {
+        let listen_v4 = std::env::var(LISTEN_V4_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| LISTEN_V4_STR.parse().expect("abi constant parses"));
+        let listen_v6 = std::env::var(LISTEN_V6_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| LISTEN_V6_STR.parse().expect("abi constant parses"));
         Self {
             binary: layout.engine_binary(),
             workdir: layout.root().to_path_buf(),
-            listen_v4: LISTEN_V4_STR.parse().expect("abi constant parses"),
-            listen_v6: LISTEN_V6_STR.parse().expect("abi constant parses"),
+            listen_v4,
+            listen_v6,
         }
     }
 
@@ -161,14 +178,18 @@ impl EngineError {
     pub fn detail(&self) -> Option<String> {
         match self {
             EngineError::ConfigInvalid(e) => Some(describe_config_error(e)),
-            EngineError::CheckFailed { output_head, .. }
-            | EngineError::Exited { output_head, .. } => {
+            EngineError::CheckFailed { exit, output_head } => Some(if output_head.is_empty() {
+                format!("check exited with {exit}")
+            } else {
+                format!("check exited with {exit}: {output_head}")
+            }),
+            EngineError::Exited { output_head, .. } => {
                 (!output_head.is_empty()).then(|| output_head.clone())
             }
             EngineError::SpawnFailed(detail) => Some(detail.clone()),
-            EngineError::SocketOwnerMismatch { inode } => {
-                Some(format!("socket inode {inode} is not held by the candidate pid"))
-            }
+            EngineError::SocketOwnerMismatch { inode } => Some(format!(
+                "socket inode {inode} is not held by the candidate pid"
+            )),
             EngineError::WriteEffective(e) | EngineError::Io(e) => Some(e.to_string()),
             EngineError::BinaryMissing(_) | EngineError::NotReady { .. } => None,
         }
@@ -228,9 +249,8 @@ pub fn write_effective(
     generation: u64,
 ) -> Result<PathBuf, EngineError> {
     let path = layout.effective_path(generation);
-    let bytes = serde_json::to_vec_pretty(effective).map_err(|e| {
-        EngineError::WriteEffective(io::Error::new(io::ErrorKind::InvalidData, e))
-    })?;
+    let bytes = serde_json::to_vec_pretty(effective)
+        .map_err(|e| EngineError::WriteEffective(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -378,7 +398,11 @@ fn pipe2_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
 /// nobody is left to run a graceful deadline, and the engine owns no kernel
 /// state that needs cleanup — its listeners vanishing immediately is exactly
 /// the fail-open behaviour §2.2.1 wants.
-pub fn spawn(spec: &EngineSpec, effective: &Path, params: EngineParams) -> Result<EngineChild, EngineError> {
+pub fn spawn(
+    spec: &EngineSpec,
+    effective: &Path,
+    params: EngineParams,
+) -> Result<EngineChild, EngineError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -869,7 +893,9 @@ pub fn run_generation_switch(
             // deleted best-effort; a deletion failure is a control-plane
             // error only and never rolls back the committed switch.
             log.push(format!(
-                "generation {generation}: 4/4 sockets verified by pid+inode, promoted"
+                "generation {generation}: 4/4 sockets verified by pid+inode, promoted \
+                 (pid {}, starttime {})",
+                child.pid, child.start_time
             ));
             if let Some((old_params, old_path)) = old {
                 if let Err(e) = fs::remove_file(&old_path) {

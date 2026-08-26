@@ -126,7 +126,10 @@ impl Layout {
                 return Some(format!("runtime_dir_mode:0{mode:o} expected 0700"));
             }
             if meta.uid() != own_uid {
-                return Some(format!("runtime_dir_owner:{} expected {own_uid}", meta.uid()));
+                return Some(format!(
+                    "runtime_dir_owner:{} expected {own_uid}",
+                    meta.uid()
+                ));
             }
         }
         None
@@ -218,7 +221,9 @@ fn is_effective_name(name: &OsStr) -> bool {
     else {
         return false;
     };
-    !middle.is_empty() && middle.bytes().all(|b| b.is_ascii_digit()) && middle.parse::<u64>().is_ok()
+    !middle.is_empty()
+        && middle.bytes().all(|b| b.is_ascii_digit())
+        && middle.parse::<u64>().is_ok()
 }
 
 /// Why the single-instance lock could not be taken.
@@ -235,9 +240,15 @@ impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LockError::Held(Some(pid)) => {
-                write!(f, "another fluxd instance is already running (pid {pid} per run/daemon.lock)")
+                write!(
+                    f,
+                    "another fluxd instance is already running (pid {pid} per run/daemon.lock)"
+                )
             }
-            LockError::Held(None) => write!(f, "another fluxd instance is already running (run/daemon.lock is held)"),
+            LockError::Held(None) => write!(
+                f,
+                "another fluxd instance is already running (run/daemon.lock is held)"
+            ),
             LockError::Io(e) => write!(f, "cannot take run/daemon.lock: {e}"),
         }
     }
@@ -247,7 +258,9 @@ impl std::fmt::Display for LockError {
 /// releases the `flock`; the file itself is never deleted.
 #[derive(Debug)]
 pub struct InstanceLock {
-    file: fs::File,
+    /// Held purely for its open file description: the flock lives and dies
+    /// with it. Nothing ever reads it back.
+    _file: fs::File,
 }
 
 impl InstanceLock {
@@ -288,12 +301,7 @@ impl InstanceLock {
         let _ = writeln!(file, "{pid}");
         let _ = file.flush();
 
-        Ok(Self { file })
-    }
-
-    /// The raw lock fd, kept only so the borrow lives as long as the daemon.
-    pub fn as_raw_fd(&self) -> i32 {
-        self.file.as_raw_fd()
+        Ok(Self { _file: file })
     }
 }
 
@@ -315,7 +323,11 @@ mod tests {
         let layout = tmp_layout("ensure");
         layout.ensure().expect("create");
         assert!(layout.mode_error().is_none());
-        for dir in [layout.root().to_path_buf(), layout.run_dir(), layout.config_dir()] {
+        for dir in [
+            layout.root().to_path_buf(),
+            layout.run_dir(),
+            layout.config_dir(),
+        ] {
             let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{dir:?}");
         }
