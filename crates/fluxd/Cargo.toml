@@ -30,6 +30,10 @@ harness = false
 name = "phase4_device"
 harness = false
 
+[[test]]
+name = "phase5_device"
+harness = false
+
 [dependencies]
 flux-core = { workspace = true }
 serde = { workspace = true }
