@@ -1,34 +1,23 @@
-//! rtnetlink: the only place in the daemon allowed to touch raw netlink bytes.
+//! Typed rtnetlink boundary for Flux-owned network objects.
 //!
-//! Implements blueprint §8.9 and §10.4.1. Callers get typed operations
-//! (`create_veth`, `add_rule`, `add_local_route`, `ensure_clsact`,
-//! `attach_filter`) and never see an `nlmsghdr`, a sequence number or an ACK.
-//!
-//! Everything here is netlink, never a subprocess. Shelling out to `ip` or `tc`
-//! is forbidden: on Android those binaries run in their own SELinux domains and
-//! the call would either be denied or silently do something different
-//! (blueprint §12.8).
-//!
-//! Three hard rules for event handling (blueprint §10.4.1):
-//!
-//! 1. On `ENOBUFS` or `NLMSG_OVERRUN`, discard the batch and re-dump in full.
-//!    Never try to patch up a partial view.
-//! 2. Debounce convergence; Android interface churn arrives in bursts.
-//! 3. Resolve `ifindex` once per convergence and use it consistently; names and
-//!    indices can both be reused.
-//!
-//! What must be written from scratch, because the old tree has **zero**
-//! occurrences of any of it (blueprint §18.3.1):
-//!
-//! * `RTM_NEWQDISC` / `RTM_NEWTFILTER`, `TCA_*`, `clsact` — the whole TC path.
-//! * veth creation: `RTM_NEWLINK` with `IFLA_LINKINFO` / `IFLA_INFO_DATA` /
-//!   `VETH_INFO_PEER`. The old tree only ever decoded `IFLA_INFO_KIND`.
-//!
-//! Port candidates: `netlink.rs` (framing), `netlink/socket.rs`, and the route
-//! and rule **mutation builders** in `netlink/policy_routing.rs`, which are the
-//! only netlink write path that ever existed (blueprint §18.3.2).
-//!
-//! Phase 2 implements only the read-only `sock_diag` half (blueprint §9.5);
-//! rtnetlink and TC arrive with Phase 3 (blueprint §17).
+//! Raw message construction, sequence/ACK handling and TLV parsing stay in
+//! this module. Callers work with typed snapshots and mutations only. See
+//! blueprint §8.5, §8.6, §8.9 and §10.4.
+
+mod route;
+mod wire;
 
 pub mod sock_diag;
+
+#[cfg(test)]
+pub use route::Address;
+pub use route::{
+    EventSocket, Filter, Link, NetworkSnapshot, Qdisc, Route, RouteNetlink, Rule, IFF_LOOPBACK,
+    IFF_UP, TC_CLSACT_HANDLE, TC_H_CLSACT, TC_H_EGRESS,
+};
+// Phase 3 establishes the typed filter mutation seam. Its first runtime
+// consumer is the Phase 4/5 loader/attachment work, so these exports are
+// intentionally dormant in the current binary.
+#[allow(unused_imports)]
+pub use route::{FilterIdentity, TcAttach, ETH_P_ALL, TC_H_INGRESS};
+pub use wire::DrainResult;
