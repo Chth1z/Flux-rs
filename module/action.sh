@@ -21,26 +21,27 @@ set_description() {
 }
 
 if [ ! -x "$FLUXD" ]; then
-	echo "Flux-rs 0.9.0 skeleton: no fluxd binary in this build."
-	echo ""
-	echo "This commit contains the design contract and crate structure only."
-	echo "See docs/blueprint.md section 17 for the phase plan."
-	set_description "[Skeleton] Not functional yet. See docs/blueprint.md."
+	echo "Flux-rs: fluxd binary is missing or not executable."
+	set_description "[Error] fluxd binary missing."
 	exit 0
 fi
 
-STATE=$("$FLUXD" status 2>/dev/null)
+STATE=$("$FLUXD" status --json 2>/dev/null)
 
 case "$STATE" in
-*'"state":"Active"'*)
-	echo "Flux-rs is active. Disabling."
-	"$FLUXD" disable
+*'"state":"Disabled"'*)
+	echo "Flux-rs is disabled. Enabling."
+	"$FLUXD" enable 2>&1
+	set_description "[Enabled] Tap to disable; use fluxd status for details."
+	;;
+*'"state":"Inactive"'* | *'"state":"Active"'*)
+	echo "Flux-rs is enabled. Disabling."
+	"$FLUXD" disable 2>&1
 	set_description "[Disabled] Tap to enable."
 	;;
 *)
-	echo "Flux-rs is not active. Enabling."
-	"$FLUXD" enable
-	"$FLUXD" status
-	set_description "[Enabled] Tap to disable."
+	echo "Flux-rs daemon is not reachable; persisting the enabled switch."
+	"$FLUXD" enable 2>&1
+	set_description "[Enabled] Daemon not reachable; check service.log."
 	;;
 esac

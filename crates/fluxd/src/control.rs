@@ -15,6 +15,7 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::time::Duration;
 
@@ -68,8 +69,21 @@ impl ControlServer {
     /// can only be a leftover of a dead daemon), binds, chmods to 0600 and
     /// listens. Non-blocking: accepts are driven by epoll.
     pub fn bind(path: &Path) -> io::Result<Self> {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                let own_uid = unsafe { libc::geteuid() };
+                if !meta.file_type().is_socket() || meta.uid() != own_uid {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "refusing to unlink non-owned or non-socket control path {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                std::fs::remove_file(path)?;
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
@@ -100,7 +114,7 @@ impl ControlServer {
                 self.fd.as_raw_fd(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
+                libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -112,10 +126,6 @@ impl ControlServer {
         }
         // SAFETY: just returned by accept4, not owned elsewhere.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        // A connected client that never sends must not park the single-threaded
-        // reactor: bound both directions. The peer is root-only, so this guards
-        // against bugs, not attackers.
-        set_socket_timeouts(&fd, Duration::from_secs(2));
         Ok(Some(ControlConn { fd }))
     }
 }
@@ -127,6 +137,10 @@ pub struct ControlConn {
 }
 
 impl ControlConn {
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
     /// The peer's uid via `SO_PEERCRED`.
     pub fn peer_uid(&self) -> io::Result<u32> {
         // SAFETY: ucred is plain-old-data; the kernel fills it.
@@ -169,7 +183,7 @@ impl ControlConn {
         }
         let line = std::str::from_utf8(&buf[..n])
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request is not UTF-8"))?;
-        control_wire::from_line(line)
+        control_wire::request_from_line(line)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
@@ -181,23 +195,27 @@ impl ControlConn {
     }
 }
 
-fn set_socket_timeouts(fd: &OwnedFd, timeout: Duration) {
+fn set_socket_timeouts(fd: &OwnedFd, timeout: Duration) -> io::Result<()> {
     let tv = libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
-        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        tv_sec: timeout.as_secs() as _,
+        tv_usec: timeout.subsec_micros() as _,
     };
     for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
         // SAFETY: valid fd; tv is a valid timeval for the call's duration.
-        unsafe {
+        let rc = unsafe {
             libc::setsockopt(
                 fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 opt,
                 std::ptr::addr_of!(tv).cast(),
                 std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            );
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
         }
     }
+    Ok(())
 }
 
 fn recv_once(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
@@ -246,7 +264,7 @@ fn send_once(fd: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
 /// Client side: one request, one response, bounded by `timeout` end to end.
 pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<Response> {
     let fd = seqpacket_socket(false)?;
-    set_socket_timeouts(&fd, timeout);
+    set_socket_timeouts(&fd, timeout)?;
     let (addr, len) = sockaddr_un(path)?;
     // SAFETY: addr is a valid sockaddr_un of the stated length.
     let rc = unsafe { libc::connect(fd.as_raw_fd(), std::ptr::addr_of!(addr).cast(), len) };
@@ -254,7 +272,7 @@ pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<
         return Err(io::Error::last_os_error());
     }
 
-    let line = control_wire::to_line(request)
+    let line = control_wire::request_to_line(request)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     send_once(&fd, line.as_bytes())?;
 
@@ -268,8 +286,19 @@ pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<
     }
     let line = std::str::from_utf8(&buf[..n])
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response is not UTF-8"))?;
-    control_wire::from_line(line)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    let response: Response = control_wire::from_line(line)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    if response.protocol_version != control_wire::PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported control protocol version {}; expected {}",
+                response.protocol_version,
+                control_wire::PROTOCOL_VERSION
+            ),
+        ));
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -347,6 +376,7 @@ mod tests {
     fn sample_response() -> Response {
         use flux_core::control_wire::{Counters, EngineStatus, PolicyCounts, State};
         Response {
+            protocol_version: control_wire::PROTOCOL_VERSION,
             ok: true,
             version: flux_core::VERSION.to_string(),
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),

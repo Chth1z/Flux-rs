@@ -42,11 +42,19 @@ fn main() {
     }
 
     let clang = env::var("CLANG").unwrap_or_else(|_| "clang".to_string());
-    let status = Command::new(&clang)
+    let prefix_map = format!("{}=.", repo_root.display());
+    let mut command = Command::new(&clang);
+    command
         .args([
             "-target", "bpf", "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-mcpu=v3",
         ])
-        .arg(format!("-I{}", include.display()))
+        .arg(format!("-ffile-prefix-map={prefix_map}"))
+        .arg(format!("-fdebug-prefix-map={prefix_map}"))
+        .arg(format!("-I{}", include.display()));
+    if let Some(system_include) = multiarch_include() {
+        command.arg(format!("-I{}", system_include.display()));
+    }
+    let status = command
         .arg("-c")
         .arg(&source)
         .arg("-o")
@@ -55,4 +63,14 @@ fn main() {
         .unwrap_or_else(|e| panic!("failed to run {clang}: {e}"));
 
     assert!(status.success(), "{clang} failed to compile {source:?}");
+}
+
+fn multiarch_include() -> Option<PathBuf> {
+    let output = Command::new("cc").arg("-print-multiarch").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let triple = std::str::from_utf8(&output.stdout).ok()?.trim();
+    let include = PathBuf::from("/usr/include").join(triple);
+    include.is_dir().then_some(include)
 }

@@ -15,6 +15,11 @@
 //! * `FLUX_FAKE_FAIL_ONCE=<path>` — if `<path>` exists, delete it and exit 9;
 //!   otherwise run normally. One candidate fails, the step-6 recovery respawn
 //!   succeeds.
+//! * `FLUX_FAKE_NOT_READY=1` — remain alive without binding any listener.
+//! * `FLUX_FAKE_READY_DELAY_MS=<n>` — delay listener creation so overlapping
+//!   control requests can exercise queued convergence deterministically.
+
+#![cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 
 use std::net::{TcpListener, UdpSocket};
 
@@ -43,6 +48,9 @@ fn check(config_path: &str) -> ! {
 }
 
 fn run(config_path: &str) -> ! {
+    if let Some(path) = std::env::var_os("FLUX_FAKE_PID_FILE") {
+        let _ = std::fs::write(path, std::process::id().to_string());
+    }
     if std::env::var_os("FLUX_FAKE_CRASH").is_some() {
         eprintln!("fake-engine: crashing on request");
         std::process::exit(7);
@@ -54,6 +62,19 @@ fn run(config_path: &str) -> ! {
             eprintln!("fake-engine: failing once as requested");
             std::process::exit(9);
         }
+    }
+    if std::env::var_os("FLUX_FAKE_NOT_READY").is_some() {
+        eprintln!("fake-engine: staying alive without listeners");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    if let Some(delay) = std::env::var("FLUX_FAKE_READY_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
     }
 
     let text = std::fs::read_to_string(config_path).expect("fake-engine: config readable");

@@ -13,7 +13,7 @@ use std::io;
 use std::path::Path;
 
 use flux_core::config::{ConfigError, FluxConfig, MAX_CONFIG_BYTES};
-use flux_core::engine_config::{self, EngineParams};
+use flux_core::engine_config::{self, EngineParams, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::{PackageIndex, SelectorError};
 
 use crate::engine::{self, EngineSpec};
@@ -92,19 +92,17 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
     check_selectors(&config, report);
 }
 
-/// Resolves the selected apps against `packages.list`. Unknown packages and
-/// shared UIDs are warnings, not errors: the config is valid, the device state
-/// merely does not (yet) match it.
+/// Resolves the selected apps against `packages.list`. An unknown package makes
+/// the candidate invalid (§11.3); shared UIDs remain a warning because the
+/// resulting UID is still deterministic.
 fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
     if config.apps.is_empty() {
         return;
     }
-    let text = match std::fs::read_to_string(crate::packages::PACKAGES_LIST_PATH) {
+    let text = match crate::packages::read() {
         Ok(text) => text,
         Err(e) => {
-            report.warnings.push(format!(
-                "packages.list unreadable ({e}): selector resolution skipped"
-            ));
+            report.errors.push(format!("packages_list_unreadable: {e}"));
             return;
         }
     };
@@ -127,8 +125,8 @@ fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
                 }
             }
             Err(SelectorError::UnknownPackage(package)) => {
-                report.warnings.push(format!(
-                    "{}: package `{package}` is not installed; it will be proxied once it appears",
+                report.errors.push(format!(
+                    "{}: package `{package}` is not installed",
                     selector.canonical()
                 ));
             }
@@ -145,7 +143,7 @@ fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
 
 fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
     let path = layout.sing_box_json();
-    let bytes = match read_capped(&path, 4 * 1024 * 1024) {
+    let bytes = match read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             report.errors.push(format!(
@@ -162,6 +160,13 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
             return;
         }
     };
+    if bytes.len() > MAX_ENGINE_CONFIG_BYTES {
+        report.errors.push(format!(
+            "engine_config_too_large: {} exceeds the 8 MiB limit",
+            path.display()
+        ));
+        return;
+    }
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(_) => {
@@ -251,9 +256,12 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
     if !report.errors.is_empty() || !spec.binary.exists() {
         return;
     }
-    let Ok(bytes) = std::fs::read(layout.sing_box_json()) else {
+    let Ok(bytes) = read_capped(&layout.sing_box_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
         return;
     };
+    if bytes.len() > MAX_ENGINE_CONFIG_BYTES {
+        return;
+    }
     let Ok(text) = String::from_utf8(bytes) else {
         return;
     };
@@ -269,25 +277,15 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
         return;
     };
 
-    // SAFETY: getpid has no preconditions and cannot fail.
-    let pid = unsafe { libc::getpid() };
-    let tmp = std::env::temp_dir().join(format!(
-        "flux-check-{pid}-{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let written = std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&effective).unwrap_or_default(),
-    );
-    if let Err(e) = written {
-        report.warnings.push(format!(
-            "engine check skipped: cannot write temp config: {e}"
-        ));
-        return;
-    }
+    let tmp = match write_check_config(&effective) {
+        Ok(path) => path,
+        Err(e) => {
+            report.warnings.push(format!(
+                "engine check skipped: cannot write temp config: {e}"
+            ));
+            return;
+        }
+    };
     let result = engine::run_check(&spec.binary, &tmp);
     let _ = std::fs::remove_file(&tmp);
     if let Err(e) = result {
@@ -299,9 +297,52 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
     }
 }
 
+/// Writes a root-safe throwaway config in the shared temp directory. The name
+/// is unpredictable and creation is `O_EXCL|O_NOFOLLOW` with mode 0600, so a
+/// symlink or pre-existing path can never be overwritten by `fluxd check`.
+fn write_check_config(effective: &serde_json::Value) -> io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let bytes = serde_json::to_vec_pretty(effective)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    for _ in 0..8 {
+        let mut nonce = [0u8; 8];
+        // SAFETY: nonce is writable for its full length.
+        if unsafe { libc::getrandom(nonce.as_mut_ptr().cast(), nonce.len(), 0) }
+            != nonce.len() as isize
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let name = format!("flux-check-{}.json", u64::from_ne_bytes(nonce));
+        let path = std::env::temp_dir().join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique check config",
+    ))
+}
+
 /// Reads at most `cap` bytes; the caller's parser enforces its own limit, this
 /// only prevents an accidentally huge file from being slurped whole.
-fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();

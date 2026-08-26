@@ -112,7 +112,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
 
     /// One request against the running daemon, or a readable refusal.
     fn ask(layout: &Layout, request: Request) -> Result<Response, String> {
-        control::request(&layout.control_socket(), &request, Duration::from_secs(10)).map_err(|e| {
+        control::request(&layout.control_socket(), &request, Duration::from_secs(30)).map_err(|e| {
             format!(
                 "fluxd daemon is not reachable at {} ({e})",
                 layout.control_socket().display()

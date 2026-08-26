@@ -12,9 +12,10 @@
 //! 3. `fluxd disable` / `enable`: the state flips Disabled ⇄ Inactive, the
 //!    engine stops and restarts with a new generation.
 //! 4. `fluxd reload`: hot switch — generation grows, pid changes.
-//! 5. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
+//! 5. Overlapping reload clients wait until the queued transaction converges.
+//! 6. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
 //!    configs never included (exit criterion 5).
-//! 6. `fluxd stop`: daemon exits cleanly, control socket removed, no
+//! 7. `fluxd stop`: daemon exits cleanly, control socket removed, no
 //!    effective file left behind; `status` then fails with a clear message.
 //!
 //! On kernels without `udp_diag` (some sandboxes) the engine cannot verify
@@ -64,6 +65,7 @@ mod tests {
                 )
                 .env("FLUX_LISTEN_V4", "127.0.0.1")
                 .env("FLUX_LISTEN_V6", "::1")
+                .env("FLUX_FAKE_READY_DELAY_MS", "400")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -127,6 +129,7 @@ mod tests {
             scenario_disable_enable(&env, full);
             if full {
                 scenario_reload_hot_switch(&env);
+                scenario_queued_reload_waits_for_convergence(&env);
             }
             scenario_bugreport(&env);
             scenario_stop(&env, &mut daemon, &root);
@@ -265,6 +268,52 @@ mod tests {
         );
     }
 
+    fn scenario_queued_reload_waits_for_convergence(env: &Env) {
+        let before = env.status();
+        let mut first = env.command(&["reload"]).spawn().expect("first reload");
+
+        // The fake engine delays listener creation. Seeing no promoted engine
+        // proves the first transaction is in its inactive switch window.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !env.status().engine.running {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "first reload never entered its switch window"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let second = env.command(&["reload"]).spawn().expect("queued reload");
+        let second_output = second.wait_with_output().expect("queued reload output");
+        let first_output = first.wait().expect("first reload output");
+        assert!(
+            first_output.success(),
+            "first reload failed: {first_output:?}"
+        );
+        assert!(
+            second_output.status.success(),
+            "queued reload failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        );
+
+        let after = env.status();
+        assert!(after.engine.running, "queued convergence must be terminal");
+        assert!(
+            after.generation >= before.generation + 2,
+            "queued client returned before its generation converged ({} -> {})",
+            before.generation,
+            after.generation
+        );
+        println!(
+            "PASS overlapping reloads converged through generation {}",
+            after.generation
+        );
+    }
+
     fn scenario_bugreport(env: &Env) {
         let out_dir = env.root.join("reports");
         std::fs::create_dir_all(&out_dir).expect("reports dir");
@@ -288,7 +337,13 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes())
         };
-        for name in ["meta.txt", "status.json", "check.txt", "README.txt"] {
+        for name in [
+            "meta.txt",
+            "status.json",
+            "check.txt",
+            "observe.txt",
+            "README.txt",
+        ] {
             assert!(contains(name), "{name} must be in the report");
         }
         assert!(

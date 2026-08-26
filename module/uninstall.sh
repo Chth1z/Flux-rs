@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Flux-rs uninstall.
+# Flux-rs uninstaller.
 #
 # This script is load-bearing, not a formality. Flux keeps state OUTSIDE the
 # module directory — TC filters, an ip rule, a routing table entry, per-device

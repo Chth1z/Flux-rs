@@ -285,10 +285,10 @@ UID             10287（用户 0）
 | `bpftool prog/map show`、`bpftool net show` | 谁占了什么 |
 | per-CPU counters 快照 | §6 的计数器，判断数据面是否在动 |
 | `/data/adb/modules/*/module.prop` 与 `disable` | 模块冲突 |
-| `logcat -b all -d` 的 Flux 相关行 + `dmesg` | 内核侧报错 |
+| `dmesg`；仅显式 `--with-logcat` 时加入 Flux 相关 logcat 行 | 内核侧报错，同时避免默认收集其它 app 日志 |
 | `fluxd` 自己的日志 | |
 
-**必须默认脱敏**，规则与 `tools/phase0/observe.sh` 共用同一套过滤（`governance.md` §2.3）：地址主机部分、MAC、序列号一律掩掉。`--raw` 可关闭，但要在输出里警告。
+**必须默认脱敏**，规则与 `tools/phase0/observe.sh` 共用同一套过滤（`governance.md` §2.3）：IPv4 仅保留首 octet，IPv6 与 MAC 整体掩掉，带引号的 6 位以上 NFLOG cookie 整体掩掉；时间戳和版本号不得误伤。`--raw` 可关闭，但要在输出里警告。
 
 **issue 模板要求附这个包，没有就关闭 issue。** Vector 明确这么做（`bug_report.yml:77`），理由是省下的是双方的时间。
 

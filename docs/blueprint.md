@@ -207,7 +207,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 **待证**：`tun.NewPackageManager` 在目标设备上能否成功读取包数据库（失败时 sing-box 只 warn 并继续，届时 `package_name` 规则静默不匹配）。Phase 0 Q9 顺带验证。
 
-**用户 CIDR bypass 对 :53 同样生效。** 旧 cgroup 实现里有一段 `should_bypass_v4/v6` 在 `dport == 53` 时直接返回 0，即用户 bypass 永远豁免不了 53 端口（`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`）；CHIZI 的 `dns_mode: hijack` 更进一步，连 UID 判定都跳过（§0.5.3）。**0.9.0 都不采用。** 用户把 `192.168.0.0/16` 写进 `bypass_cidrs` 是在明确表达"局域网直连"，此时强行把 app 对路由器 `192.168.1.1:53` 的查询送进代理会打断本地名称解析，而且是用户无法关掉的隐藏行为。让显式配置说话；需要"DNS 永不 bypass"的用户不要把 DNS 服务器写进 bypass 即可。
+**用户 CIDR bypass 对 :53 同样生效。** 旧 cgroup 实现里有一段 `should_bypass_v4/v6` 在 `dport == 53` 时直接返回 0，即用户 bypass 永远豁免不了 53 端口（`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`）；CHIZI 的 `dns_mode: hijack` 更进一步，连 UID 判定都跳过（§0.5.3）。**0.9.0 都不采用。** 用户把 `192.168.0.0/16` 写进 `bypass_v4` 是在明确表达"局域网直连"，此时强行把 app 对路由器 `192.168.1.1:53` 的查询送进代理会打断本地名称解析，而且是用户无法关掉的隐藏行为。让显式配置说话；需要"DNS 永不 bypass"的用户不要把 DNS 服务器写进 bypass 即可。
 
 ## 1.4 选择单位与身份边界
 
@@ -562,6 +562,7 @@ Flux-rs/
 │   │       ├── cidr.rs            # v4/v6 CIDR canonicalize、固定 bypass、LPM key 编码
 │   │       ├── engine_config.rs   # 用户 sing-box.json 校验 + effective JSON 生成
 │   │       ├── abi.rs             # flux_abi.h 的 Rust 镜像 + size/offset 断言
+│   │       ├── btf.rs             # 纯字节逻辑：SK_STORAGE 所需的最小 BTF blob
 │   │       ├── control_wire.rs    # 控制协议请求/响应类型（serde）
 │   │       └── version.rs         # SemVer → versionCode / artifact 名
 │   └── fluxd/                     # Linux/Android 运行时（单一产品二进制）
@@ -1535,7 +1536,7 @@ impl EngineChild {
 
 ```jsonc
 // Request
-{ "op": "status" | "check" | "enable" | "disable" | "reload" | "stop" }
+{ "protocol_version": 1, "op": "status" | "check" | "enable" | "disable" | "reload" | "stop" }
 
 // Response
 {
@@ -1640,10 +1641,8 @@ apps = [
   "10:com.example.chat",
 ]
 
-bypass_cidrs = [
-  "192.168.0.0/16",
-  "fd00::/8",
-]
+bypass_v4 = ["192.168.0.0/16"]
+bypass_v6 = ["fd00::/8"]
 ```
 
 硬限：文件 256 KiB；`apps` ≤ 1024；解析后总 UID entry ≤ 4096；IPv4/IPv6 LPM 各 ≤ 65536（**本机地址不占 LPM**，见 D20）；package 字符串与 CIDR 必须 canonical 且无重复。超限是清晰的配置错误，**不截断、不部分应用**。
@@ -2136,7 +2135,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | 双 Capture 外部接口（`Capture` vs `NativeCaptureConvergence`） | 设计 P1 #5 | 架构性关闭：不为单一实现创建 trait（§5） |
 | Capture Path 选择器骨架、`CapturePathId::ALL`、租约、digest、wire 残留 | 设计 P1 #7–#8、过度设计 P1 #5 | 架构性关闭：只有一条数据路径，代码里没有"路径"这个概念 |
 | ~12k 行 fwmark / TPROXY topology / canary facility / Passed catalog 仍在 `flux-core` 公开 API | 设计 P1 #9–#10 | 架构性关闭：不写 fwmark、不做 topology 规划、无 catalog（§3.1、§8.3） |
-| `forwarded_ingress` / `forwarded_proxy` 等已删配置键仍在类型与 digest 里 | 设计 P1 #11 | 架构性关闭：`flux.toml` 只有 `apps` 与 `bypass_cidrs`（§11.2） |
+| `forwarded_ingress` / `forwarded_proxy` 等已删配置键仍在类型与 digest 里 | 设计 P1 #11 | 架构性关闭：`flux.toml` 只有 `apps`、`bypass_v4` 与 `bypass_v6`（§11.2） |
 | Geek IPv4-only TCP 切片是第二条写入路径 | 设计 P1 #12 | 架构性关闭：一个数据面、两个 entry（按 L2/L3 布局，不按协议族分叉） |
 | god object（coordinator / engine_supervisor / generation_source 各数千行） | 设计 P1 #13、过度设计 P0 #1 | 架构性关闭：§5 的模块划分 + §10.5 的幂等收敛取代事务编排 |
 | `cidr4`/`cidr6` map 创建但未 pin | 设计 P1 #13b | 架构性关闭：不 pin 任何 map（§6.1） |

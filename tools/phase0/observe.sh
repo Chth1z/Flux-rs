@@ -35,10 +35,10 @@ redact() {
 	# IPv4 address leaked into a committed result file once. Always audit the
 	# output before publishing it.
 	sed -E \
-		-e 's/([0-9a-f]{2}:){5}[0-9a-f]{2}/MAC:redacted/g' \
-		-e 's/([0-9a-f]{1,4}:[0-9a-f]{1,4}):[0-9a-f:]{4,}/\1:redacted/g' \
-		-e 's/([0-9]{1,3}\.[0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}/\1.x.x/g' \
-		-e 's/"[0-9]{6,}:/"cookie:redacted:/g'
+		-e 's/([0-9a-f]{2}:){5}[0-9a-f]{2}/[mac-redacted]/g' \
+		-e 's/([0-9a-f]{1,4}:[0-9a-f]{1,4}):[0-9a-f:]{4,}/[v6-redacted]/g' \
+		-e 's/([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/\1.x.x.x/g' \
+		-e 's/"[0-9]{6,}:/"[cookie-redacted]:/g'
 }
 
 main() {
@@ -57,7 +57,14 @@ main() {
 		ro.soc.manufacturer ro.soc.model ro.board.platform ro.product.model; do
 		echo "$p: $(getprop $p)"
 	done
-	echo "root_manager: $([ "$KSU" = true ] && echo kernelsu || { [ "$APATCH" = true ] && echo apatch || echo magisk-or-unknown; })"
+	if [ "$KSU" = true ]; then
+		root_manager=kernelsu
+	elif [ "$APATCH" = true ]; then
+		root_manager=apatch
+	else
+		root_manager=magisk-or-unknown
+	fi
+	echo "root_manager: $root_manager"
 
 	# ------------------------------------------------- blueprint section 4
 	sec "1. kernel config (blueprint section 4)"
@@ -243,8 +250,10 @@ main() {
 		echo "  prog pins: $(find /sys/fs/bpf -name 'prog_*' 2>/dev/null | wc -l)"
 		echo "  map pins:  $(find /sys/fs/bpf -name 'map_*' 2>/dev/null | wc -l)"
 		echo "--- vendor BPF families present (prefix before the first underscore group)"
-		ls /sys/fs/bpf/ 2>/dev/null | grep -E "^(map|prog)_" |
-			sed -E 's/^(map|prog)_([A-Za-z]+).*/  \2/' | sort -u
+		for pin in /sys/fs/bpf/map_* /sys/fs/bpf/prog_*; do
+			[ -e "$pin" ] || continue
+			printf '%s\n' "${pin##*/}"
+		done | sed -E 's/^(map|prog)_([A-Za-z]+).*/  \2/' | sort -u
 	fi
 
 	# ------------------------------------------------- blueprint section 1.3
@@ -280,6 +289,8 @@ main() {
 	done
 
 	sec "14. limits relevant to BPF"
+	# Android's /system/bin/sh exposes the memlock extension as `ulimit -l`.
+	# shellcheck disable=SC3045
 	echo "memlock_rlimit_kb: $(ulimit -l 2>/dev/null)"
 	echo "note: kernel >= 5.11 accounts BPF memory to memcg, so memlock should not bind"
 	echo "nr_open: $(cat /proc/sys/fs/nr_open 2>/dev/null)"

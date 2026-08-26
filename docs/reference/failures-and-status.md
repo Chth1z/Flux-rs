@@ -167,7 +167,7 @@
 | `admit_* > 0` 且 `in_drop_assign > 0` | `"assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"` |
 | `admit_* > 0` 且 `in_drop_no_listener > 0` | `"packets reached the veth but no listener was found; engine may be restarting"` |
 | `egress_listener_miss > 0` 且 `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
-| `direct_tcp > 0` 且 `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"` |
+| `direct_tcp > 0` 且 `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check bypass_v4/bypass_v6 and active"` |
 | 全部 counter 为 0 且 `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
 | `drop_udp_frag > 0` | `"fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
 | `in_pass_established` 远大于 `in_assign_tcp` | 正常（每条连接一次 assign、多次 pass）。**不产生 hint**，此行只为避免误报 |

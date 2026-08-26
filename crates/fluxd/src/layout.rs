@@ -120,7 +120,24 @@ impl Layout {
         // SAFETY: geteuid has no preconditions and cannot fail.
         let own_uid = unsafe { libc::geteuid() };
         for dir in [self.root.clone(), self.run_dir(), self.config_dir()] {
-            let meta = fs::metadata(&dir).ok()?;
+            let meta = match fs::symlink_metadata(&dir) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    return Some(format!(
+                        "runtime_dir_unreadable:{}:{}",
+                        dir.display(),
+                        e.raw_os_error()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| format!("{:?}", e.kind()))
+                    ))
+                }
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Some(format!(
+                    "runtime_dir_type:{} expected directory",
+                    dir.display()
+                ));
+            }
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o700 {
                 return Some(format!("runtime_dir_mode:0{mode:o} expected 0700"));
@@ -146,6 +163,7 @@ impl Layout {
             .write(true)
             .create(true)
             .truncate(false)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .mode(0o600)
             .open(self.disable_file())
         {
@@ -181,8 +199,12 @@ impl Layout {
             if !is_effective_name(&name) {
                 continue;
             }
-            let meta = entry.metadata()?;
-            if !meta.is_file() {
+            let meta = fs::symlink_metadata(entry.path())?;
+            // Production runs as root; host tests run as their own euid. A
+            // symlink or foreign-owned lookalike is never ours to remove.
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let own_uid = unsafe { libc::geteuid() };
+            if meta.file_type().is_symlink() || !meta.is_file() || meta.uid() != own_uid {
                 continue;
             }
             let path = entry.path();
@@ -275,6 +297,7 @@ impl InstanceLock {
             .write(true)
             .create(true)
             .truncate(false)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .mode(0o600)
             .open(layout.lock_path())
             .map_err(LockError::Io)?;

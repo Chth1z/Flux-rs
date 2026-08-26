@@ -18,6 +18,24 @@ SKIPMOUNT=true
 
 ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 
+# The archive is built from an allowlist, but interrupted extraction or a
+# third-party repack can still leave a partial module. Refuse before touching
+# persistent state; booting a half-installed control plane is worse than a
+# loud install failure.
+for payload in \
+	bin/fluxd \
+	bin/sing-box \
+	bin/observe.sh \
+	etc/default-flux.toml \
+	etc/default-sing-box.json \
+	engine.lock \
+	LICENSE \
+	THIRD_PARTY_NOTICES.md; do
+	if [ ! -s "$MODPATH/$payload" ]; then
+		abort "! Incomplete module payload: $payload is missing or empty."
+	fi
+done
+
 # Architecture. The data plane is aarch64-only.
 if [ "$ARCH" != "arm64" ]; then
 	ui_print "! Unsupported architecture: $ARCH"
@@ -50,5 +68,34 @@ fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 [ -d "$MODPATH/bin" ] && set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 
-ui_print "- This is a 0.9.0 skeleton build: no functionality yet."
-ui_print "- See docs/blueprint.md for the design contract."
+RUNTIME_ROOT=/data/adb/flux-rs
+FRESH_INSTALL=0
+[ -d "$RUNTIME_ROOT" ] || FRESH_INSTALL=1
+
+mkdir -p "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
+chown 0:0 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
+chmod 0700 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
+
+# Defaults are bootstrap inputs only. Reinstalling/upgrading must never replace
+# either user authority file.
+if [ ! -e "$RUNTIME_ROOT/config/flux.toml" ]; then
+	cp "$MODPATH/etc/default-flux.toml" "$RUNTIME_ROOT/config/flux.toml"
+	chown 0:0 "$RUNTIME_ROOT/config/flux.toml"
+	chmod 0600 "$RUNTIME_ROOT/config/flux.toml"
+fi
+if [ ! -e "$RUNTIME_ROOT/config/sing-box.json" ]; then
+	cp "$MODPATH/etc/default-sing-box.json" "$RUNTIME_ROOT/config/sing-box.json"
+	chown 0:0 "$RUNTIME_ROOT/config/sing-box.json"
+	chmod 0600 "$RUNTIME_ROOT/config/sing-box.json"
+fi
+
+# Installation itself must never start capturing traffic. Preserve the user's
+# switch on upgrades; create it only for a genuinely fresh state root.
+if [ "$FRESH_INSTALL" = 1 ]; then
+	: >"$RUNTIME_ROOT/disable"
+	chown 0:0 "$RUNTIME_ROOT/disable"
+	chmod 0600 "$RUNTIME_ROOT/disable"
+fi
+
+ui_print "- Runtime files initialized; fresh installs start disabled."
+ui_print "- Edit both configs, run 'fluxd check', then enable Flux-rs."
