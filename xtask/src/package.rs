@@ -528,11 +528,23 @@ pub fn build_bpf() -> Result<(), String> {
     let mut command = Command::new(util::clang());
     command
         .args([
-            "-target", "bpf", "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-mcpu=v3",
+            "-target",
+            "bpf",
+            "-O2",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-mcpu=v3",
+            "-D__TARGET_ARCH_arm64",
         ])
         .arg(format!("-ffile-prefix-map={prefix_map}"))
         .arg(format!("-fdebug-prefix-map={prefix_map}"))
-        .arg(format!("-I{}", root.join("bpf/include").display()));
+        .arg(format!("-I{}", root.join("bpf/include").display()))
+        .arg(format!(
+            "-I{}",
+            root.join("bpf/vendor/libbpf/include").display()
+        ));
     if let Some(system_include) = multiarch_include() {
         command.arg(format!("-I{}", system_include.display()));
     }

@@ -23,9 +23,11 @@ fn main() {
         .expect("crates/fluxd is two levels below the repo root");
     let source = repo_root.join("bpf").join("flux.bpf.c");
     let include = repo_root.join("bpf").join("include");
+    let libbpf_include = repo_root.join("bpf/vendor/libbpf/include");
 
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", libbpf_include.display());
     println!("cargo:rerun-if-env-changed=FLUX_BUILD_BPF");
     println!("cargo:rustc-env=FLUX_BPF_OBJECT={}", object.display());
 
@@ -46,11 +48,20 @@ fn main() {
     let mut command = Command::new(&clang);
     command
         .args([
-            "-target", "bpf", "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-mcpu=v3",
+            "-target",
+            "bpf",
+            "-O2",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-mcpu=v3",
+            "-D__TARGET_ARCH_arm64",
         ])
         .arg(format!("-ffile-prefix-map={prefix_map}"))
         .arg(format!("-fdebug-prefix-map={prefix_map}"))
-        .arg(format!("-I{}", include.display()));
+        .arg(format!("-I{}", include.display()))
+        .arg(format!("-I{}", libbpf_include.display()));
     if let Some(system_include) = multiarch_include() {
         command.arg(format!("-I{}", system_include.display()));
     }
