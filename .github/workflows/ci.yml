@@ -151,7 +151,7 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: r27d
 
       # verify-package embeds the BPF object, so this job needs the same BPF
       # build inputs as the bpf job.
