@@ -587,6 +587,22 @@ impl Reactor {
                 self.last_error = None;
                 self.last_error_detail = None;
                 self.crash_count = 0;
+                if need_start {
+                    match crate::dataplane::DataplaneSnapshot::install_base_objects(
+                        generation as u32,
+                    ) {
+                        Ok((host, peer)) => {
+                            self.logger.log(&format!(
+                                "dataplane: veth installed (host={host} peer={peer})"
+                            ));
+                        }
+                        Err(e) => {
+                            self.logger.log(&format!("dataplane install failed: {e}"));
+                            self.last_error = Some("dataplane_install_failed".to_string());
+                            self.last_error_detail = Some(e.to_string());
+                        }
+                    }
+                }
                 self.register_engine_fds();
             }
             Err(e) => {
@@ -682,6 +698,31 @@ impl Reactor {
         };
 
         let mut warnings = Vec::new();
+        let mut ifaces = Vec::new();
+        if let Ok(snap) = crate::dataplane::DataplaneSnapshot::probe(self.generation as u32 + 1000)
+        {
+            ifaces = snap.interfaces;
+            match snap.rp_filter {
+                crate::dataplane::RpFilterGate::Blocked(v) => {
+                    warnings.push(format!(
+                        "all.rp_filter={v}: activation blocked per §8.4 (not silently changed)"
+                    ));
+                }
+                crate::dataplane::RpFilterGate::Unreadable(e) => {
+                    warnings.push(format!("cannot read all.rp_filter: {e}"));
+                }
+                crate::dataplane::RpFilterGate::Ok => {}
+            }
+            if let Some(host) = snap.veth_host_index {
+                warnings.push(format!("veth host ifindex {host}"));
+            }
+            if let Some(peer) = snap.veth_peer_index {
+                warnings.push(format!("veth peer ifindex {peer}"));
+            }
+            if matches!(snap.peer_clsact, Some(crate::netlink::tc::ClsactState::Foreign)) {
+                warnings.push("flxrs1 clsact is foreign — ingress attach blocked".to_string());
+            }
+        }
         if disabled {
             warnings.push(format!(
                 "disabled: the switch file {} exists; `fluxd enable` removes it",
@@ -689,8 +730,7 @@ impl Reactor {
             ));
         } else {
             warnings.push(
-                "phase-2 build: no data plane, traffic is NOT proxied; \
-                 state stays Inactive by design (engine supervision only)"
+                "no data plane: capture filters not attached (Phase 5); traffic is NOT proxied"
                     .to_string(),
             );
         }
@@ -706,7 +746,7 @@ impl Reactor {
             generation: self.generation,
             engine: engine_status,
             policy: self.policy_counts(),
-            ifaces: Vec::new(),
+            ifaces,
             counters: Counters::default(),
             sysctl: read_sysctl(),
             warnings,
