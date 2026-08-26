@@ -87,8 +87,28 @@ jobs:
       - name: ABI offset cross-check
         run: cargo xtask abi-check
 
+      # linux-tools-generic ships bpftool for Ubuntu's GA kernel, but the
+      # runner boots an azure-flavoured kernel and the /usr/sbin/bpftool shim
+      # from linux-tools-common refuses to run a version-mismatched binary
+      # ("bpftool not found for kernel 6.17.0-1022", exit 2). Install the
+      # package matching the RUNNING kernel; if the archive lags the kernel,
+      # fall back to invoking any installed versioned bpftool directly --
+      # the verifier gate only needs a working loader, not a shim.
       - name: Install bpftool
-        run: sudo apt-get install -y linux-tools-common linux-tools-generic
+        run: |
+          set -eu
+          sudo apt-get install -y "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y linux-tools-azure \
+            || sudo apt-get install -y linux-tools-generic
+          BPFTOOL=/usr/sbin/bpftool
+          if ! sudo "$BPFTOOL" version >/dev/null 2>&1; then
+            BPFTOOL="$(find /usr/lib/linux-tools* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          if [ -z "$BPFTOOL" ] || ! sudo "$BPFTOOL" version; then
+            echo "no working bpftool found; the verifier gate cannot run" >&2
+            exit 1
+          fi
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
 
       # The cheapest gate the project has, and it has already earned its place:
       # the run that first exercised it found that every program carried an ELF
@@ -110,12 +130,12 @@ jobs:
             echo "flux.bpf.o not produced by the build step above"; exit 1
           fi
           echo "object: $obj"
-          sudo bpftool prog loadall "$obj" /sys/fs/bpf/fluxci
+          sudo "$BPFTOOL" prog loadall "$obj" /sys/fs/bpf/fluxci
           echo "--- loaded:"
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_in
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_verify
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_in
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_verify
           sudo rm -rf /sys/fs/bpf/fluxci
 
   android:
@@ -139,11 +159,16 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev
           sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
+      # GITHUB_PATH only takes effect in SUBSEQUENT steps, so appending to it
+      # and invoking cargo in the same step left the NDK linker
+      # (aarch64-linux-android31-clang) unreachable and the build failing with
+      # "linker not found". Export PATH for this shell directly instead.
       - name: Cross build
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          command -v aarch64-linux-android31-clang
           cargo build --workspace --target aarch64-linux-android
 
       # Blueprint 13.4 / implementation.md 17.4 exit criteria 4 and 5: two
