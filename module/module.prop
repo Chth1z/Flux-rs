@@ -1,7 +1,0 @@
-id=flux-rs
-name=Flux-rs
-version=v0.9.0
-versionCode=9000
-author=Chth1z
-description=[Skeleton] Transparent per-app proxying via eBPF and unmodified sing-box. Not functional yet.
-updateJson=https://raw.githubusercontent.com/Chth1z/Flux-rs/main/module/update.json

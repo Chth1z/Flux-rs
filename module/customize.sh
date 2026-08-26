@@ -7,9 +7,13 @@
 # performing the operation, never by parsing version strings
 # (docs/blueprint.md §4, §12.7).
 
+# Read by the manager's installer after it sources this script, not by us.
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
-# No system/ overlay, so skip the mount entirely.
+# No system/ overlay, so skip the mount entirely. Belt and braces with the
+# skip_mount file the ZIP ships (blueprint §13.1).
+# shellcheck disable=SC2034
 SKIPMOUNT=true
 
 ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"

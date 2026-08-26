@@ -45,5 +45,5 @@ chmod 0700 "$RUNTIME_ROOT"
 
 # 0.9.0 skeleton: nothing is implemented, so do not attempt activation.
 # Replace this block with the fluxd launch once Phase 6 lands (§17).
-echo "skeleton build: fluxd not started" >>"$LOG"
+echo "skeleton build: $MODDIR/bin/fluxd not started" >>"$LOG"
 exit 0

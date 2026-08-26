@@ -10,3 +10,6 @@ description = "Build, package and release automation. Runs on the development ho
 
 [dependencies]
 flux-core = { workspace = true }
+# Already in the workspace via flux-core; used to read Cargo.toml, Cargo.lock
+# and engine.lock. Not a new dependency (governance §1.2).
+toml = { workspace = true }

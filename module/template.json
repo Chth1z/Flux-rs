@@ -57,8 +57,10 @@
   "outbounds": [
     { "type": "direct", "tag": "DIRECT" },
 
-    // 订阅更新会把下面空的地区 selector 填上对应节点。
-    // 想增删地区，在这里加一个同名的空 selector 即可。
+    // 订阅更新会把下面地区 selector 的成员替换成对应节点。
+    // 想增删地区，在这里加一个同名 selector 即可。DIRECT 占位不能删：
+    // sing-box 拒绝空 selector（`missing tags`），删掉它 `sing-box check`
+    // 直接失败，模板就违反了 §15.2 测试 4。
     {
       "type": "selector",
       "tag": "PROXY",
@@ -66,11 +68,11 @@
       "interrupt_exist_connections": true
     },
     { "type": "selector", "tag": "GLOBAL", "outbounds": ["PROXY"] },
-    { "type": "selector", "tag": "HK", "outbounds": [] },
-    { "type": "selector", "tag": "TW", "outbounds": [] },
-    { "type": "selector", "tag": "JP", "outbounds": [] },
-    { "type": "selector", "tag": "SG", "outbounds": [] },
-    { "type": "selector", "tag": "US", "outbounds": [] }
+    { "type": "selector", "tag": "HK", "outbounds": ["DIRECT"] },
+    { "type": "selector", "tag": "TW", "outbounds": ["DIRECT"] },
+    { "type": "selector", "tag": "JP", "outbounds": ["DIRECT"] },
+    { "type": "selector", "tag": "SG", "outbounds": ["DIRECT"] },
+    { "type": "selector", "tag": "US", "outbounds": ["DIRECT"] }
   ],
 
   "route": {
