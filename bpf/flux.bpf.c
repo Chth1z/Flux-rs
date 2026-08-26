@@ -4,6 +4,7 @@
 //
 // Build:
 //   clang -target bpf -O2 -g -Wall -Wextra -Werror -mcpu=v3 \
+//         -D__TARGET_ARCH_arm64 \
 //         -Ibpf/include -Ibpf/vendor/libbpf/include \
 //         -c bpf/flux.bpf.c -o $OUT_DIR/flux.bpf.o
 //
@@ -82,6 +83,11 @@
 #endif
 
 char LICENSE[] SEC("license") = "GPL";
+
+// Runtime loader/object ABI handshake. This is ordinary ELF metadata, not a
+// BPF map: it lets the hand-written loader reject an object compiled against a
+// different flux_abi.h before creating any kernel object.
+const __u32 flux_object_abi_magic SEC("flux_abi") = FLUX_ABI_MAGIC;
 
 #ifndef BPF_SK_STORAGE_GET_F_CREATE
 #define BPF_SK_STORAGE_GET_F_CREATE (1ULL << 0)
