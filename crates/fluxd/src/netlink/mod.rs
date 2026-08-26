@@ -28,4 +28,7 @@
 //! and rule **mutation builders** in `netlink/policy_routing.rs`, which are the
 //! only netlink write path that ever existed (blueprint §18.3.2).
 //!
-//! Not implemented yet — Phase 4 (blueprint §17).
+//! Phase 2 implements only the read-only `sock_diag` half (blueprint §9.5);
+//! rtnetlink and TC arrive with Phase 3 (blueprint §17).
+
+pub mod sock_diag;
