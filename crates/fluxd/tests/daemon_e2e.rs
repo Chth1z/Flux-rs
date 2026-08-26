@@ -5,7 +5,7 @@
 //! Scenarios:
 //!
 //! 1. Cold start through `fluxd daemon`: engine spawned, `status --json`
-//!    reports Inactive (with the explicit phase-2 reason), engine running,
+//!    reports Inactive (with the explicit pre-attachment reason), engine running,
 //!    4/4 sockets (§17.5 exit criteria 1 and 4).
 //! 2. A second `fluxd daemon` is rejected by the flock with a readable
 //!    reason naming the holder pid (exit criterion 3).
@@ -66,6 +66,10 @@ mod tests {
                 .env("FLUX_LISTEN_V4", "127.0.0.1")
                 .env("FLUX_LISTEN_V6", "::1")
                 .env("FLUX_FAKE_READY_DELAY_MS", "400")
+                // This E2E covers the reactor/engine transaction. Phase 3
+                // rtnetlink ownership is exercised separately on a root ADB
+                // device; the spawned test binary normally lacks CAP_NET_ADMIN.
+                .env("FLUX_TEST_SKIP_DATAPLANE", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());

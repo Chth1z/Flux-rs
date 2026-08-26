@@ -22,6 +22,10 @@ harness = false
 name = "daemon_e2e"
 harness = false
 
+[[test]]
+name = "phase3_device"
+harness = false
+
 [dependencies]
 flux-core = { workspace = true }
 serde = { workspace = true }
