@@ -1,17 +1,16 @@
 //! Single-threaded epoll reactor: the event loop, the state machine and
 //! convergence.
 //!
-//! Implements the Phase 2 subset of blueprint §10.1, §10.4 and §26: event
+//! Implements the Phase 3 subset of blueprint §10.1, §10.4 and §26: event
 //! sources are signalfd, inotify, the control socket, child pidfds, child
 //! output pipes and one-shot timerfds (config debounce, crash backoff and
 //! engine-transaction deadlines).
-//! rtnetlink and the BPF fault ring buffer join in Phase 3+. **There is no
+//! rtnetlink is included; the BPF fault ring buffer joins in Phase 5. **There is no
 //! periodic polling anywhere** — that is a hard product constraint, not a
 //! preference; both timers here are one-shot and armed only by an event.
 //!
-//! Reachable states in this phase are `Disabled` and `Inactive` (§26): with no
-//! data plane there is no way into `Active`, and `status` says so explicitly
-//! instead of leaving an empty field (§17.5 exit criterion 4).
+//! Reachable states remain `Disabled` and `Inactive`: Phase 3 builds the owned
+//! network seam but Phase 4/5 still have to load and attach the BPF generation.
 //!
 //! Convergence is non-reentrant by construction: the loop is single-threaded,
 //! while each engine transaction advances one fd/timer event at a time. Later
@@ -40,7 +39,7 @@ use crate::layout::{InstanceLock, Layout, LockError};
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
 /// updates produce event bursts; one convergence per burst is enough.
-const DEBOUNCE: Duration = Duration::from_millis(500);
+const DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// Crash-restart delays (§10.1). The last entry repeats.
 const BACKOFF_STEPS: [u64; 5] = [1, 2, 4, 8, 30];
@@ -68,6 +67,7 @@ const TOK_TX_PIDFD: u64 = 10;
 const TOK_TX_OUT: u64 = 11;
 const TOK_CHECK_PIDFD: u64 = 12;
 const TOK_CHECK_OUT: u64 = 13;
+const TOK_RTNETLINK: u64 = 14;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -221,11 +221,13 @@ struct Reactor {
     inotify_fd: OwnedFd,
     root_wd: i32,
     config_wd: i32,
+    packages_wd: Option<i32>,
     debounce_timer: OwnedFd,
     backoff_timer: OwnedFd,
     control_timer: OwnedFd,
     engine_timer: OwnedFd,
     server: ControlServer,
+    dataplane: crate::dataplane::Manager,
     control_conns: BTreeMap<u64, PendingControl>,
     next_control_token: u64,
     engine: Option<EngineChild>,
@@ -243,6 +245,9 @@ struct Reactor {
     crash_count: u32,
     reload_requested: bool,
     config_changed: bool,
+    topology_changed: bool,
+    dataplane_error_active: bool,
+    config_warnings: Vec<String>,
     /// `None` when the page size is the required 4096; otherwise the actual
     /// size. sing-box and the BPF maps both assume 4 KiB pages (§25).
     bad_page_size: Option<i64>,
@@ -256,12 +261,13 @@ impl Reactor {
         let spec = EngineSpec::product(&layout);
         let epoll = epoll_create()?;
         let signal_fd = make_signalfd()?;
-        let (inotify_fd, root_wd, config_wd) = make_inotify(&layout)?;
+        let (inotify_fd, root_wd, config_wd, packages_wd) = make_inotify(&layout)?;
         let debounce_timer = make_timerfd()?;
         let backoff_timer = make_timerfd()?;
         let control_timer = make_timerfd()?;
         let engine_timer = make_timerfd()?;
         let server = ControlServer::bind(&layout.control_socket())?;
+        let dataplane = crate::dataplane::Manager::open()?;
 
         // Cold start: any effective file is a leftover of a previous instance
         // — we hold the lock and have no child yet (§11.1).
@@ -288,6 +294,7 @@ impl Reactor {
         epoll_add(&epoll, backoff_timer.as_raw_fd(), TOK_BACKOFF)?;
         epoll_add(&epoll, control_timer.as_raw_fd(), TOK_CONTROL_TIMEOUT)?;
         epoll_add(&epoll, engine_timer.as_raw_fd(), TOK_ENGINE_TIMER)?;
+        epoll_add(&epoll, dataplane.event_fd(), TOK_RTNETLINK)?;
 
         Ok(Self {
             layout,
@@ -298,11 +305,13 @@ impl Reactor {
             inotify_fd,
             root_wd,
             config_wd,
+            packages_wd,
             debounce_timer,
             backoff_timer,
             control_timer,
             engine_timer,
             server,
+            dataplane,
             control_conns: BTreeMap::new(),
             next_control_token: TOK_CONTROL_CONN_BASE,
             engine: None,
@@ -317,6 +326,9 @@ impl Reactor {
             crash_count: 0,
             reload_requested: false,
             config_changed: false,
+            topology_changed: false,
+            dataplane_error_active: false,
+            config_warnings: Vec::new(),
             bad_page_size,
         })
     }
@@ -361,8 +373,7 @@ impl Reactor {
                     TOK_INOTIFY => self.handle_inotify(),
                     TOK_DEBOUNCE => {
                         drain_timer(&self.debounce_timer);
-                        self.config_changed = true;
-                        self.converge("config change");
+                        self.converge("debounced filesystem/network change");
                     }
                     TOK_BACKOFF => {
                         drain_timer(&self.backoff_timer);
@@ -381,6 +392,7 @@ impl Reactor {
                     TOK_TX_OUT => self.drain_transaction_output(),
                     TOK_CHECK_PIDFD => self.handle_check_exit(),
                     TOK_CHECK_OUT => self.drain_check_output(),
+                    TOK_RTNETLINK => self.handle_rtnetlink(),
                     token if token >= TOK_CONTROL_CONN_BASE => {
                         if self.handle_control_connection(token) {
                             self.request_shutdown("stop request");
@@ -760,9 +772,13 @@ impl Reactor {
                     .next()
                     .map(|s| String::from_utf8_lossy(s).into_owned())
                     .unwrap_or_default();
-                if event.wd == self.root_wd && name == "disable" {
+                if event.mask & libc::IN_Q_OVERFLOW != 0 {
+                    config_changed = true;
+                } else if event.wd == self.root_wd && name == "disable" {
                     switch_changed = true;
-                } else if event.wd == self.config_wd {
+                } else if event.wd == self.config_wd
+                    || (self.packages_wd == Some(event.wd) && name == "packages.list")
+                {
                     config_changed = true;
                 }
                 offset += EVENT_HEAD + name_len;
@@ -773,7 +789,30 @@ impl Reactor {
             self.converge("disable-file change");
         }
         if config_changed {
+            self.config_changed = true;
             arm_timer(&self.debounce_timer, DEBOUNCE);
+        }
+    }
+
+    fn handle_rtnetlink(&mut self) {
+        match self.dataplane.drain_events() {
+            Ok(crate::netlink::DrainResult::Quiet) => {}
+            Ok(crate::netlink::DrainResult::Changed) => {
+                self.topology_changed = true;
+                arm_timer(&self.debounce_timer, DEBOUNCE);
+            }
+            Ok(crate::netlink::DrainResult::Resync) => {
+                self.logger
+                    .log("rtnetlink overrun: scheduling a full topology dump");
+                self.topology_changed = true;
+                arm_timer(&self.debounce_timer, DEBOUNCE);
+            }
+            Err(error) => {
+                self.logger
+                    .log(&format!("rtnetlink event read failed: {error}"));
+                self.topology_changed = true;
+                arm_timer(&self.debounce_timer, DEBOUNCE);
+            }
         }
     }
 
@@ -862,9 +901,7 @@ impl Reactor {
         self.engine_line.clear();
     }
 
-    /// The §26 convergence for the Phase 2 subset: reconcile the disable
-    /// switch and the engine domain. Policy/dataplane domains join in later
-    /// phases.
+    /// Reconciles the disable switch, Phase 3 network seam and engine domain.
     fn converge(&mut self, reason: &str) {
         if self.shutdown_requested {
             self.engine_cancel_requested = true;
@@ -872,18 +909,13 @@ impl Reactor {
             return;
         }
         if self.layout.disabled() {
+            self.dataplane.converge(false);
             self.engine_cancel_requested = true;
             self.cancel_engine_work();
             self.reload_requested = false;
             self.config_changed = false;
+            self.topology_changed = false;
             disarm_timer(&self.backoff_timer);
-            return;
-        }
-
-        if self.engine_transaction.is_some() {
-            self.logger.log(&format!(
-                "{reason}: engine transaction already in progress; queued"
-            ));
             return;
         }
 
@@ -901,32 +933,69 @@ impl Reactor {
             return;
         }
 
-        let need_start = self.engine.is_none();
-        let need_switch = self.engine.is_some() && (self.reload_requested || self.config_changed);
+        let engine_busy = self.engine_transaction.is_some();
+        let need_start = !engine_busy && self.engine.is_none();
+        let need_switch =
+            !engine_busy && self.engine.is_some() && (self.reload_requested || self.config_changed);
+        let candidate_user = if need_start || need_switch {
+            match self.read_user_config() {
+                Ok(user) => Some(user),
+                Err((token, detail)) => {
+                    if self.engine.is_some() {
+                        self.logger.log(&format!(
+                            "config invalid ({token}); keeping the running generation {}",
+                            self.generation
+                        ));
+                    } else {
+                        // Cold invalid input still performs exact stale cleanup,
+                        // but never creates a new network object (§8.7).
+                        self.dataplane.converge(false);
+                        self.logger.log(&format!("cannot start engine: {token}"));
+                    }
+                    self.last_error = Some(token);
+                    self.last_error_detail = detail;
+                    self.reload_requested = false;
+                    self.config_changed = false;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        self.dataplane.converge(true);
+        self.topology_changed = false;
+        if let Some(error) = &self.dataplane.status().error {
+            self.logger
+                .log(&format!("Phase 3 topology blocked: {error}"));
+            self.last_error = Some(error.code.clone());
+            self.last_error_detail = Some(error.detail.clone());
+            self.dataplane_error_active = true;
+            if self.engine.is_some() || self.engine_transaction.is_some() {
+                self.engine_cancel_requested = true;
+                self.cancel_engine_work();
+            }
+            return;
+        }
+        if self.dataplane_error_active {
+            self.last_error = None;
+            self.last_error_detail = None;
+            self.dataplane_error_active = false;
+        }
+
+        if engine_busy {
+            self.logger.log(&format!(
+                "{reason}: engine transaction already in progress; queued"
+            ));
+            return;
+        }
+
         self.reload_requested = false;
         self.config_changed = false;
         if !need_start && !need_switch {
             return;
         }
-
-        let user = match self.read_user_config() {
-            Ok(user) => user,
-            Err((token, detail)) => {
-                if self.engine.is_some() {
-                    // Hot-invalid keeps the current generation running: the
-                    // §9.4 candidate never got past step 1.
-                    self.logger.log(&format!(
-                        "config invalid ({token}); keeping the running generation {}",
-                        self.generation
-                    ));
-                } else {
-                    self.logger.log(&format!("cannot start engine: {token}"));
-                }
-                self.last_error = Some(token);
-                self.last_error_detail = detail;
-                return;
-            }
-        };
+        let user = candidate_user.expect("a start or switch has a parsed candidate");
 
         self.generation_counter += 1;
         let generation = self.generation_counter;
@@ -1650,7 +1719,7 @@ impl Reactor {
 
     /// Reads and parses `config/sing-box.json`. Errors come back as
     /// `(stable token, optional detail)`.
-    fn read_user_config(&self) -> Result<serde_json::Value, (String, Option<String>)> {
+    fn read_user_config(&mut self) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.sing_box_json();
         let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
@@ -1684,13 +1753,44 @@ impl Reactor {
                 Some("sing-box.json is not UTF-8".to_string()),
             )
         })?;
-        engine_config::parse_jsonc(&text)
-            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))
+        let user = engine_config::parse_jsonc(&text)
+            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
+        let flux = match checks::read_capped(
+            &self.layout.flux_toml(),
+            flux_core::config::MAX_CONFIG_BYTES + 1,
+        ) {
+            Ok(bytes) => FluxConfig::parse(&bytes).map_err(|error| {
+                (
+                    "flux_config_invalid".to_string(),
+                    Some(checks::describe_flux_error(&error)),
+                )
+            })?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => FluxConfig::default(),
+            Err(error) => {
+                return Err((
+                    "flux_config_unreadable".to_string(),
+                    Some(error.to_string()),
+                ));
+            }
+        };
+        let mut selector_report = checks::CheckReport::default();
+        checks::check_selectors(&flux, &mut selector_report);
+        if !selector_report.errors.is_empty() {
+            return Err((
+                "selector_invalid".to_string(),
+                Some(selector_report.errors.join("; ")),
+            ));
+        }
+        checks::validate_fakeip_bypass(&flux, &user)
+            .map_err(|error| ("fakeip_bypass_overlap".to_string(), Some(error)))?;
+        self.config_warnings = selector_report.warnings;
+        self.config_warnings
+            .extend(checks::sing_box_warnings(&user));
+        Ok(user)
     }
 
-    /// Builds the §24.1 status response. Phase 2 always reports `Disabled` or
-    /// `Inactive` — with an explicit warning explaining why Inactive, never an
-    /// empty answer (§17.5 exit criterion 4).
+    /// Builds the §24.1 status response. Phase 3 still cannot publish Active:
+    /// that commit point requires the Phase 4 loader and Phase 5 attachment.
     fn build_status(&self, ok: bool) -> Response {
         let disabled = self.layout.disabled();
         let state = if disabled && self.engine.is_none() && self.engine_transaction.is_none() {
@@ -1728,15 +1828,18 @@ impl Reactor {
                 );
             }
         } else {
-            warnings.push(
-                "phase-2 build: no data plane, traffic is NOT proxied; \
-                 state stays Inactive by design (engine supervision only)"
-                    .to_string(),
-            );
+            warnings.extend(self.dataplane.status().warnings.iter().cloned());
+            if self.dataplane.status().topology_ready {
+                warnings.push(
+                    "traffic is NOT proxied yet: Phase 3 owns the network seam, but no BPF generation is attached"
+                        .to_string(),
+                );
+            }
         }
         if let Some(detail) = &self.last_error_detail {
             warnings.push(detail.clone());
         }
+        warnings.extend(self.config_warnings.iter().cloned());
 
         Response {
             ok,
@@ -1746,9 +1849,9 @@ impl Reactor {
             generation: self.generation,
             engine: engine_status,
             policy: self.policy_counts(),
-            ifaces: Vec::new(),
+            ifaces: self.dataplane.status().ifaces.clone(),
             counters: Counters::default(),
-            sysctl: read_sysctl(),
+            sysctl: self.dataplane.status().sysctl.clone(),
             warnings,
             hints: Vec::new(),
             last_error: self.last_error.clone(),
@@ -1773,17 +1876,6 @@ impl Reactor {
             self_addresses: 0,
         }
     }
-}
-
-/// `all.rp_filter`, read-only (§24.1). Best effort: absent on some hosts.
-fn read_sysctl() -> BTreeMap<String, i64> {
-    let mut sysctl = BTreeMap::new();
-    if let Ok(text) = fs::read_to_string("/proc/sys/net/ipv4/conf/all/rp_filter") {
-        if let Ok(value) = text.trim().parse::<i64>() {
-            sysctl.insert("all.rp_filter".to_string(), value);
-        }
-    }
-    sysctl
 }
 
 /// Whether a failed cold start should be retried on the backoff timer.
@@ -1875,8 +1967,8 @@ fn make_signalfd() -> io::Result<OwnedFd> {
     }
 }
 
-/// Inotify on the root (the `disable` switch) and the config directory.
-fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32)> {
+/// Inotify on the switch/config directories and the parent of packages.list.
+fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32, Option<i32>)> {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: plain inotify_init1; the fd is immediately owned.
     let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
@@ -1909,7 +2001,23 @@ fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32)> {
             | libc::IN_MOVED_TO
             | libc::IN_MOVED_FROM,
     )?;
-    Ok((fd, root_wd, config_wd))
+    // Linux development hosts do not have Android's /data/system. On Android,
+    // watching the parent rather than the inode catches atomic replacement.
+    let packages_wd = Path::new(crate::packages::PACKAGES_LIST_PATH)
+        .parent()
+        .filter(|parent| parent.exists())
+        .and_then(|parent| {
+            add(
+                parent,
+                libc::IN_CLOSE_WRITE
+                    | libc::IN_CREATE
+                    | libc::IN_DELETE
+                    | libc::IN_MOVED_TO
+                    | libc::IN_MOVED_FROM,
+            )
+            .ok()
+        });
+    Ok((fd, root_wd, config_wd, packages_wd))
 }
 
 fn make_timerfd() -> io::Result<OwnedFd> {
