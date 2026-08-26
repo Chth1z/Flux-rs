@@ -103,6 +103,7 @@ fn dispatch(command: &str, _rest: &[String]) -> ExitCode {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn dispatch(command: &str, rest: &[String]) -> ExitCode {
+    use std::io::{Read, Write};
     use std::time::Duration;
 
     use flux_core::control_wire::{Request, Response, State};
@@ -158,6 +159,37 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
 
     let layout = Layout::product();
     match command {
+        // Internal plumbing for the read-only Phase 0 probe. Keeping the
+        // redactor here gives bugreport and observe.sh exactly one masking
+        // implementation without adding a packaged helper script.
+        "__redact-stdin" => {
+            const MAX_STDIN: u64 = 16 * 1024 * 1024;
+            let mut input = String::new();
+            match std::io::stdin()
+                .take(MAX_STDIN + 1)
+                .read_to_string(&mut input)
+            {
+                Ok(size) if size as u64 <= MAX_STDIN => {
+                    let output = bugreport::redact(&input);
+                    match std::io::stdout().write_all(output.as_bytes()) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            eprintln!("fluxd: cannot write redacted output: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("fluxd: redactor input exceeds the 16 MiB limit");
+                    ExitCode::FAILURE
+                }
+                Err(error) => {
+                    eprintln!("fluxd: cannot read redactor input: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         // Blueprint §10.6 calls it `daemon`; `start` (implementation plan
         // §17.5) and `run` (service.sh, phase 1) are aliases of the same
         // foreground mode — service.sh owns backgrounding.

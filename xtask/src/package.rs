@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
-const ALLOWLIST: [&str; 16] = [
+const ALLOWLIST: [&str; 15] = [
     "module.prop",
     "skip_mount",
     "customize.sh",
@@ -31,7 +31,6 @@ const ALLOWLIST: [&str; 16] = [
     "uninstall.sh",
     "bin/fluxd",
     "bin/sing-box",
-    "bin/observe.sh",
     "etc/default-flux.toml",
     "etc/default-sing-box.json",
     "engine.lock",
@@ -452,7 +451,6 @@ fn collect_entries(
     push("uninstall.sh", 0o755, text("module/uninstall.sh")?);
     push("bin/fluxd", 0o755, util::read_bytes(fluxd)?);
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
-    push("bin/observe.sh", 0o755, text("tools/phase0/observe.sh")?);
     push("etc/default-flux.toml", 0o644, text("module/flux.toml")?);
     push(
         "etc/default-sing-box.json",

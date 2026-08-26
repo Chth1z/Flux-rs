@@ -25,7 +25,6 @@ ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 for payload in \
 	bin/fluxd \
 	bin/sing-box \
-	bin/observe.sh \
 	etc/default-flux.toml \
 	etc/default-sing-box.json \
 	engine.lock \

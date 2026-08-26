@@ -6,8 +6,8 @@
 # command either reads a file or asks the kernel to describe existing state.
 #
 # Usage:
-#   adb push tools/phase0/observe.sh /data/local/tmp/
-#   adb shell 'su -c "sh /data/local/tmp/observe.sh"' > result.txt
+#   adb push tools/phase0/observe.sh target/.../fluxd /data/local/tmp/
+#   adb shell 'su -c "FLUX_REDACTOR=/data/local/tmp/fluxd sh /data/local/tmp/observe.sh"' > result.txt
 #
 # Output is REDACTED by default: host portions of addresses, MAC addresses and
 # NFLOG cookies are masked, because the analytical value is in whether an
@@ -22,23 +22,20 @@ sec() { echo; echo "########## $1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------------- output
-# Redaction runs as a filter over the whole script's stdout. MAC first, because
-# a MAC also matches the IPv6 shape; both are identifying, so either masking is
-# acceptable, but doing MAC first keeps the output readable.
+# Redaction is owned by fluxd so the manual probe and bugreport cannot drift.
+# The probe refuses to emit default-mode output when that shared implementation
+# is unavailable; FLUX_PROBE_RAW=1 remains the explicit escape hatch.
 redact() {
 	if [ "$FLUX_PROBE_RAW" = "1" ]; then
 		cat
 		return
 	fi
-	# No \b anywhere: toybox sed -E does not implement word boundaries, and it
-	# fails SILENTLY -- the substitution simply never fires. That is how an
-	# IPv4 address leaked into a committed result file once. Always audit the
-	# output before publishing it.
-	sed -E \
-		-e 's/([0-9a-f]{2}:){5}[0-9a-f]{2}/[mac-redacted]/g' \
-		-e 's/([0-9a-f]{1,4}:[0-9a-f]{1,4}):[0-9a-f:]{4,}/[v6-redacted]/g' \
-		-e 's/([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/\1.x.x.x/g' \
-		-e 's/"[0-9]{6,}:/"[cookie-redacted]:/g'
+	redactor=${FLUX_REDACTOR:-/data/local/tmp/fluxd}
+	if [ ! -x "$redactor" ]; then
+		echo "observe.sh: shared fluxd redactor missing at $redactor" >&2
+		return 78
+	fi
+	"$redactor" __redact-stdin
 }
 
 main() {

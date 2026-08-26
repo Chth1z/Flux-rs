@@ -12,6 +12,7 @@
 use std::io;
 use std::path::Path;
 
+use flux_core::cidr::{Ipv4Cidr, Ipv6Cidr};
 use flux_core::config::{ConfigError, FluxConfig, MAX_CONFIG_BYTES};
 use flux_core::engine_config::{self, EngineParams, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::{PackageIndex, SelectorError};
@@ -49,6 +50,7 @@ pub fn quick_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
     let mut report = CheckReport::default();
     check_flux_toml(layout, &mut report);
     check_sing_box_json(layout, &mut report);
+    check_cross_config(layout, &mut report);
     if !spec.binary.exists() {
         report.errors.push(format!(
             "engine_binary_missing: {} does not exist",
@@ -95,7 +97,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
 /// Resolves the selected apps against `packages.list`. An unknown package makes
 /// the candidate invalid (§11.3); shared UIDs remain a warning because the
 /// resulting UID is still deterministic.
-fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
+pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
     if config.apps.is_empty() {
         return;
     }
@@ -207,7 +209,155 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
                 .to_string(),
         );
     }
+    report.warnings.extend(sing_box_warnings(&user));
     check_clash_api(&user, report);
+}
+
+/// Warnings required on both `check` and the normal status surface. These are
+/// consequences the user may intentionally accept, so they never invalidate a
+/// candidate (§9.6).
+pub fn sing_box_warnings(user: &serde_json::Value) -> Vec<String> {
+    let mut found_mark = false;
+    let mut found_bind = false;
+    if let Some(outbounds) = user.get("outbounds") {
+        visit_json(outbounds, &mut |object| {
+            found_mark |= object.contains_key("routing_mark");
+            found_bind |= object.contains_key("bind_interface");
+        });
+    }
+    let mut warnings = Vec::new();
+    if found_mark {
+        warnings.push(
+            "outbound routing_mark is user-controlled: Android may interpret it as a netId/fwmark and reject the route"
+                .to_string(),
+        );
+    }
+    if found_bind {
+        warnings.push(
+            "outbound bind_interface is user-controlled: it may not preserve the selected app's Android network identity"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+/// Cross-file constraint from §9.0. A fakeip address is meaningful only if
+/// Flux captures it; placing its range in any fixed or user bypass silently
+/// turns every fakeip connection into a failed direct connection.
+pub fn validate_fakeip_bypass(flux: &FluxConfig, user: &serde_json::Value) -> Result<(), String> {
+    let mut fake_v4 = Vec::new();
+    let mut fake_v6 = Vec::new();
+    collect_fakeip_ranges(user, &mut fake_v4, &mut fake_v6);
+    let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
+
+    for fake in &fake_v4 {
+        for bypass in fixed_v4.iter().chain(flux.bypass_v4.iter()) {
+            if overlaps_v4(*fake, *bypass) {
+                return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
+            }
+        }
+    }
+    for fake in &fake_v6 {
+        for bypass in fixed_v6.iter().chain(flux.bypass_v6.iter()) {
+            if overlaps_v6(*fake, *bypass) {
+                return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_cross_config(layout: &Layout, report: &mut CheckReport) {
+    let Ok(flux_bytes) = read_capped(&layout.flux_toml(), MAX_CONFIG_BYTES + 1) else {
+        return;
+    };
+    let Ok(flux) = FluxConfig::parse(&flux_bytes) else {
+        return;
+    };
+    let Ok(engine_bytes) = read_capped(&layout.sing_box_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(engine_bytes) else {
+        return;
+    };
+    let Ok(user) = engine_config::parse_jsonc(&text) else {
+        return;
+    };
+    if let Err(error) = validate_fakeip_bypass(&flux, &user) {
+        report.errors.push(error);
+    }
+}
+
+fn collect_fakeip_ranges(
+    value: &serde_json::Value,
+    v4: &mut Vec<Ipv4Cidr>,
+    v6: &mut Vec<Ipv6Cidr>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(|value| value.as_str()) == Some("fakeip") {
+                if let Some(range) = object.get("inet4_range").and_then(|value| value.as_str()) {
+                    if let Ok(range) = Ipv4Cidr::parse(range) {
+                        v4.push(range);
+                    }
+                }
+                if let Some(range) = object.get("inet6_range").and_then(|value| value.as_str()) {
+                    if let Ok(range) = Ipv6Cidr::parse(range) {
+                        v6.push(range);
+                    }
+                }
+            }
+            for child in object.values() {
+                collect_fakeip_ranges(child, v4, v6);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_fakeip_ranges(child, v4, v6);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn visit_json(
+    value: &serde_json::Value,
+    visitor: &mut impl FnMut(&serde_json::Map<String, serde_json::Value>),
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            visitor(object);
+            for child in object.values() {
+                visit_json(child, visitor);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                visit_json(child, visitor);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn overlaps_v4(left: Ipv4Cidr, right: Ipv4Cidr) -> bool {
+    let prefix = left.prefix_len.min(right.prefix_len);
+    let mask = match prefix {
+        0 => 0,
+        32 => u32::MAX,
+        bits => u32::MAX << (32 - bits),
+    };
+    u32::from(left.addr) & mask == u32::from(right.addr) & mask
+}
+
+fn overlaps_v6(left: Ipv6Cidr, right: Ipv6Cidr) -> bool {
+    let prefix = left.prefix_len.min(right.prefix_len);
+    let mask = match prefix {
+        0 => 0,
+        128 => u128::MAX,
+        bits => u128::MAX << (128 - bits),
+    };
+    u128::from(left.addr) & mask == u128::from(right.addr) & mask
 }
 
 /// `docs/ux.md` §3.2: with `experimental.clash_api` present, an empty `secret`
@@ -509,5 +659,50 @@ mod tests {
             .iter()
             .any(|e| e.contains("unknown key `app`") && e.contains("apps")));
         std::fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn fakeip_ranges_may_not_overlap_fixed_or_user_bypass() {
+        let user = serde_json::json!({
+            "dns": { "servers": [{
+                "type": "fakeip",
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "2001:db8:f::/48"
+            }]}
+        });
+        let flux = FluxConfig::parse(b"bypass_cidrs = []").unwrap();
+        assert!(validate_fakeip_bypass(&flux, &user).is_ok());
+
+        let overlapping =
+            FluxConfig::parse(b"bypass_cidrs = [\"198.18.0.0/16\", \"2001:db8:10::/48\"]").unwrap();
+        let error = validate_fakeip_bypass(&overlapping, &user).unwrap_err();
+        assert!(error.starts_with("fakeip_bypass_overlap:198.18.0.0/15"));
+
+        let ula = serde_json::json!({
+            "dns": { "servers": [{
+                "type": "fakeip", "inet6_range": "fc00::/18"
+            }]}
+        });
+        let error = validate_fakeip_bypass(&flux, &ula).unwrap_err();
+        assert!(error.contains("intersects fc00::/7"));
+    }
+
+    #[test]
+    fn outbound_mark_and_bind_are_warnings() {
+        let user = serde_json::json!({
+            "outbounds": [{
+                "type": "direct",
+                "routing_mark": 123,
+                "dialer": { "bind_interface": "rmnet_data0" }
+            }]
+        });
+        let warnings = sing_box_warnings(&user);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("routing_mark")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("bind_interface")));
     }
 }

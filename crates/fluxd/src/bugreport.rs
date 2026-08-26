@@ -4,7 +4,8 @@
 //!
 //! * Default output is REDACTED: IPv4 addresses keep only their first octet;
 //!   IPv6-looking strings, MAC addresses and NFLOG cookies are masked. These
-//!   are the same rules as the packaged `observe.sh`. `--raw` disables them.
+//!   are the same implementation used by the manual `observe.sh` probe.
+//!   `--raw` disables them.
 //! * `logcat` is NEVER captured by default — it contains other apps' output.
 //!   `--with-logcat` opts in, filtered to Flux-related lines only.
 //! * Raw configuration files are never included: `sing-box.json` carries
@@ -15,7 +16,6 @@
 //! directory, no compression): a bug report is small and a zip dependency is
 //! not worth a governance §1.2 exception.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -98,11 +98,9 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
     // No redaction needed — module.prop carries no addresses.
     zip.add("modules.txt", modules_inventory().as_bytes());
 
-    // The exact read-only Phase-0 observation probe is shipped next to fluxd,
-    // so bug reports and manual device surveys share both collection and
-    // redaction semantics rather than slowly drifting apart.
-    let observe =
-        capture_observe(options.raw).unwrap_or_else(|e| format!("(observe.sh failed: {e})\n"));
+    // Read-only network observation is collected in-process. The manual Phase
+    // 0 probe feeds its output through this binary's same redactor.
+    let observe = capture_network_observation();
     zip.add("observe.txt", maybe_redact(&observe, redact_on).as_bytes());
 
     match fs::read("/proc/config.gz") {
@@ -231,34 +229,6 @@ fn modules_inventory() -> String {
 
 /// Runs an external capture command with a hard deadline; output capped.
 fn capture_command(program: &str, args: &[&str], deadline: Duration) -> io::Result<String> {
-    capture_command_env(OsStr::new(program), args, deadline, None)
-}
-
-fn capture_observe(raw: bool) -> io::Result<String> {
-    let script = std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| io::Error::other("fluxd executable has no parent directory"))?
-        .join("observe.sh");
-    if !script.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} is not shipped next to fluxd", script.display()),
-        ));
-    }
-    capture_command_env(
-        script.as_os_str(),
-        &[],
-        Duration::from_secs(30),
-        raw.then_some(("FLUX_PROBE_RAW", "1")),
-    )
-}
-
-fn capture_command_env(
-    program: &OsStr,
-    args: &[&str],
-    deadline: Duration,
-    environment: Option<(&str, &str)>,
-) -> io::Result<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new(program);
     command
@@ -266,9 +236,6 @@ fn capture_command_env(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some((key, value)) = environment {
-        command.env(key, value);
-    }
     let mut child = command.spawn()?;
     let start = std::time::Instant::now();
     let mut stdout = child.stdout.take().expect("stdout piped");
@@ -294,6 +261,38 @@ fn capture_command_env(
         out = buf;
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn capture_network_observation() -> String {
+    let mut output = String::new();
+    for (heading, program, args) in [
+        ("ip-address", "ip", &["-details", "address", "show"][..]),
+        ("ip-rule-v4", "ip", &["-4", "rule", "show"][..]),
+        ("ip-rule-v6", "ip", &["-6", "rule", "show"][..]),
+        (
+            "route-table-v4",
+            "ip",
+            &["-4", "route", "show", "table", "20260"][..],
+        ),
+        (
+            "route-table-v6",
+            "ip",
+            &["-6", "route", "show", "table", "20260"][..],
+        ),
+        ("tc-qdisc", "tc", &["qdisc", "show"][..]),
+        ("tc-filter", "tc", &["filter", "show"][..]),
+        ("bpf-net", "bpftool", &["net", "show"][..]),
+    ] {
+        output.push_str(&format!("########## {heading}\n"));
+        match capture_command(program, args, CAPTURE_DEADLINE) {
+            Ok(text) => output.push_str(&text),
+            Err(error) => output.push_str(&format!("({program} failed: {error})\n")),
+        }
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    output
 }
 
 fn filter_flux_lines(text: &str) -> String {
@@ -330,8 +329,8 @@ fn readme_text(options: &BugreportOptions) -> String {
         "logcat: NOT included (default). Re-run with --with-logcat to opt in.\n"
     });
     text.push_str(
-        "\nNot yet included (phase 2 build has no kernel objects): ip/tc/bpftool\n\
-         dumps. They join the report when the phase 3 data plane lands.\n",
+        "\nobserve.txt includes read-only ip, rule, reserved-table, tc and\n\
+         bpftool diagnostics. Missing device tools are recorded as findings.\n",
     );
     text
 }
