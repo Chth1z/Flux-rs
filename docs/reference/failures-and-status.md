@@ -30,6 +30,9 @@
 | `packages.list` 不可读 | `open` errno | 保持当前策略；冷启动则 `Inactive` | `"packages_list:EACCES"` |
 | 配置里的 package 不存在 | 解析后查表 miss | 整个候选配置失败，**不部分应用** | `"unknown_package:0:com.foo"` |
 | `appId` 越界 | 范围检查 | 同上 | `"app_id_out_of_range:1000"` |
+| engine binary 缺失（module 未装全 / 测试环境） | `stat` engine 路径 | `Inactive`，不进入 §9.4 事务 | `"engine_binary_missing:<path>"` |
+| `config/sing-box.json` 缺失或不可读 | `open` errno | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
+| 用户 sing-box.json 解析/校验失败（自带 inbound、保留 tag、非对象） | `flux-core` 的 `build_effective` | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_invalid"` + 具体原因进 warnings |
 | `sing-box check` 失败 | 子进程退出码 + stderr | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_check_failed"` + stderr 前若干行 |
 | engine 起不来 | pidfd 立即可读 | backoff 重试（1/2/4/8/30 s） | `"engine_exited:code=1"` |
 | 4 个 socket 未在 deadline 内出现 | SOCK_DIAG 退避重查超时 | 停止 candidate，`Inactive` | `"engine_not_ready:2/4 sockets"` |

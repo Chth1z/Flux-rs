@@ -1448,8 +1448,8 @@ pt_load_align   = "0x1000"   # 四段均为 0x1000 → 0.9.0 只支持 4 KiB bas
 
 | 状态 | 含义 |
 |---|---|
-| `Disabled` | `state/enabled == 0`。不启动 engine、不新建或激活数据面。 |
-| `Inactive` | `enabled == 1` 但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
+| `Disabled` | `disable` 文件存在（唯一开关真相源，C9，`docs/ux.md` §1）。不启动 engine、不新建或激活数据面。 |
+| `Inactive` | `disable` 文件不存在，但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
 | `Active` | control `active == 1`。 |
 
 hot candidate 无效时**保持当前 `Active` generation**并附带 candidate error，不创造第四种持久状态。daemon 重启后只从权威文件重新求值。
@@ -1561,7 +1561,7 @@ impl EngineChild {
 | 源 | 触发内容 |
 |---|---|
 | rtnetlink（`RTMGRP_LINK|IPV4_IFADDR|IPV6_IFADDR|IPV4_ROUTE|IPV6_ROUTE|IPV4_RULE|IPV6_RULE` + TC） | interface admission、**捕获侧漂移**（qdisc/filter 被 netd 删，§8.5.1）、**核心漂移**（veth/rule/route/ingress filter）、本机地址 bypass 更新。两类漂移的处置**不同**，见 §26 不变量 4 |
-| inotify | `config/` 目录与两个配置文件的原子替换；`/data/system/packages.list` |
+| inotify | 状态根的 `disable` 开关文件（C9）；`config/` 目录与两个配置文件的原子替换；`/data/system/packages.list` |
 | pidfd | sing-box 退出 |
 | BPF ringbuf | 已去重的 listener/assign fault |
 | signalfd | `SIGTERM`/`SIGINT`（停机）、`SIGHUP`（reload） |
@@ -1605,8 +1605,8 @@ socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**�
 | `fluxd daemon` | `service.sh` 调用；进入 reactor |
 | `fluxd status` | 输出 §10.3 的 Response（人类可读 + `--json`） |
 | `fluxd check` | 只读校验两份配置、package 解析、engine `check`；不改任何状态 |
-| `fluxd enable` | 原子写 `state/enabled=1` 并请求激活 |
-| `fluxd disable` | 写 0、publish `active=0`、停 engine；daemon 继续等待命令 |
+| `fluxd enable` | 删除 `disable` 文件并请求激活。**只是开关文件的前端**（C9），不是第二个真相源 |
+| `fluxd disable` | 创建 `disable` 文件、publish `active=0`、停 engine；daemon 继续等待命令 |
 | `fluxd reload` | 触发 policy 与 engine 候选流程 |
 | `fluxd stop` | service/uninstall 用：publish `active=0`、停 child、daemon 正常退出（exit 0） |
 
@@ -1620,17 +1620,17 @@ socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**�
 
 | 路径 | 权威内容 | 失败行为 |
 |---|---|---|
-| `state/enabled` | 唯一持久 enable 位，内容仅 `0\n` 或 `1\n` | 缺失/非法视为 0 |
+| `disable`（状态根直下） | 唯一持久开关：**存在 = 停用，不存在 = 启用**（C9，`docs/ux.md` §1）。由既有 inotify 源监视，运行时立即生效 | 只看存在性，不读内容 |
 | `config/flux.toml` | package 选择与 CIDR bypass | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `config/sing-box.json` | 唯一用户 engine 配置 | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `run/effective-sing-box.<generation>.json` | 对应 child 的一次性 immutable 生成物；事务中最多 current + candidate 两份 | 非权威源；daemon 重启后精确清理并从用户配置重建 |
 | `run/daemon.lock` / `run/control.sock` | 单实例与 IPC | — |
 
-不使用 last-known-good 持久副本；不在 TOML 里重复 `enabled`；不从 `module.prop` 推断运行状态；**Flux 从不反写用户配置**。fresh install 默认 disabled。
+不使用 last-known-good 持久副本；不在 TOML 里重复 `enabled`；不从 `module.prop` 推断运行状态；**Flux 从不反写用户配置**。fresh install 默认 disabled（由安装脚本创建 `disable` 文件，§13.2 的职责）。
 
 daemon 冷启动确认没有自己的存活 child 后，只枚举并删除 `run/` 中严格匹配 `effective-sing-box.<u64>.json` 格式且属 root 的普通文件。
 
-权限：状态根与子目录 `root:root 0700`；用户 config、`state/enabled`、generation effective 文件 `0600`；控制 socket `0600`。
+权限：状态根与子目录 `root:root 0700`；用户 config、generation effective 文件 `0600`；控制 socket `0600`。
 
 ## 11.2 `flux.toml` 唯一 schema
 
@@ -2209,8 +2209,8 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | 事件 | `Disabled` | `Inactive` | `Active` |
 |---|---|---|---|
 | 启动完成（bootstrap） | 停在 Disabled | 尝试完整激活序列（§8.7） | — |
-| `enable` | 写 `enabled=1` → 尝试激活 | 幂等，无操作 | 幂等，无操作 |
-| `disable` | 幂等 | 写 `enabled=0` → 停 engine → Disabled | publish `active=0` → 停 engine → 写 `enabled=0` → Disabled |
+| `enable`（删除 `disable` 文件） | 尝试激活 | 幂等，无操作 | 幂等，无操作 |
+| `disable`（创建 `disable` 文件） | 幂等 | 停 engine → Disabled | publish `active=0` → 停 engine → Disabled |
 | `reload` | 只重新校验配置，报告结果 | 重新尝试激活 | policy 域：§10.5 的加减法（**不动 `active`**）；engine 域：§9.4 的候选切换 |
 | `stop` | 正常退出(0) | publish `active=0` → 停 engine → 退出(0) | 同 Inactive |
 | `status` / `check` | 只读 | 只读 | 只读 |

@@ -56,9 +56,11 @@
 
 ```
 /data/adb/flux-rs/
-├── disable              开关（存在即停用）
-├── flux.toml            Flux 自己的配置：选哪些 app、bypass 网段
-└── sing-box.json        engine 配置（由 template.json 派生）
+├── disable                  开关（存在即停用）
+├── config/
+│   ├── flux.toml            Flux 自己的配置：选哪些 app、bypass 网段
+│   └── sing-box.json        engine 配置（由 template.json 派生）
+└── run/                     daemon.lock、control.sock、effective 生成物（§11.1）
 ```
 
 **分界线是清晰的**：`flux.toml` 管"抓谁"，`sing-box.json` 管"抓到之后怎么走"。Flux 不解析代理规则，sing-box 不知道 UID 分流（§1.4）。
@@ -219,7 +221,7 @@ Flux **不做**代理控制面。sing-box 自带 `clash_api`，zashboard 是成�
 | `fluxd bugreport` | 收集诊断包，见 §6 |
 | `fluxd subscribe <url>` | 订阅更新（§4） |
 
-**没有 `enable` / `disable` 子命令。** 开关是 `disable` 文件（§1.1），加一对子命令就等于加第二个真相源。`status` 会在被停用时明确写出"由 /data/adb/flux-rs/disable 停用"，并给出删除它的命令。
+**`enable` / `disable` 子命令只是开关文件的前端。** 开关的唯一真相源是 `disable` 文件（§1.1）；这两个子命令按 `blueprint.md` §10.6 存在（`uninstall.sh` 依赖 `fluxd disable`），但它们做的**只是**创建/删除那个文件——与 §1.3 对未来前端的要求一致，不构成第二个真相源。`status` 会在被停用时明确写出"由 /data/adb/flux-rs/disable 停用"，并给出删除它的命令。
 
 ### 5.3 `explain`：本设计最重要的一个命令
 
