@@ -97,18 +97,16 @@ jobs:
       - name: Install bpftool
         run: |
           set -eu
-          sudo apt-get install -y "linux-tools-$(uname -r)" \
-            || sudo apt-get install -y linux-tools-azure \
-            || sudo apt-get install -y linux-tools-generic
-          BPFTOOL=/usr/sbin/bpftool
-          if ! sudo "$BPFTOOL" version >/dev/null 2>&1; then
-            BPFTOOL="$(find /usr/lib/linux-tools* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1)"
-          fi
-          if [ -z "$BPFTOOL" ] || ! sudo "$BPFTOOL" version; then
-            echo "no working bpftool found; the verifier gate cannot run" >&2
-            exit 1
-          fi
-          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          # Ubuntu's /usr/sbin/bpftool shim refuses version-mismatched kernels
+          # ("bpftool not found for kernel 6.17.0-1022"). Build libbpf's bpftool
+          # so the verifier gate always has a loader that matches the runner.
+          sudo apt-get install -y build-essential libelf-dev zlib1g-dev
+          BPFTMP=$(mktemp -d)
+          git clone --depth 1 --branch v7.5.0 https://github.com/libbpf/bpftool.git "$BPFTMP/bpftool"
+          make -C "$BPFTMP/bpftool/src" -j"$(nproc)"
+          sudo install -m 0755 "$BPFTMP/bpftool/src/bpftool" /usr/local/bin/bpftool
+          sudo bpftool version
+          echo "BPFTOOL=/usr/local/bin/bpftool" >> "$GITHUB_ENV"
 
       # The cheapest gate the project has, and it has already earned its place:
       # the run that first exercised it found that every program carried an ELF
