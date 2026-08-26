@@ -183,7 +183,7 @@ impl ControlConn {
         }
         let line = std::str::from_utf8(&buf[..n])
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request is not UTF-8"))?;
-        control_wire::request_from_line(line)
+        control_wire::from_line(line)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
@@ -272,7 +272,7 @@ pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<
         return Err(io::Error::last_os_error());
     }
 
-    let line = control_wire::request_to_line(request)
+    let line = control_wire::to_line(request)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     send_once(&fd, line.as_bytes())?;
 
@@ -286,19 +286,8 @@ pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<
     }
     let line = std::str::from_utf8(&buf[..n])
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response is not UTF-8"))?;
-    let response: Response = control_wire::from_line(line)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    if response.protocol_version != control_wire::PROTOCOL_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "unsupported control protocol version {}; expected {}",
-                response.protocol_version,
-                control_wire::PROTOCOL_VERSION
-            ),
-        ));
-    }
-    Ok(response)
+    control_wire::from_line(line)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
 #[cfg(test)]
@@ -376,7 +365,6 @@ mod tests {
     fn sample_response() -> Response {
         use flux_core::control_wire::{Counters, EngineStatus, PolicyCounts, State};
         Response {
-            protocol_version: control_wire::PROTOCOL_VERSION,
             ok: true,
             version: flux_core::VERSION.to_string(),
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),

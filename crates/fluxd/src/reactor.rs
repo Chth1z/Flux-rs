@@ -1739,7 +1739,6 @@ impl Reactor {
         }
 
         Response {
-            protocol_version: flux_core::control_wire::PROTOCOL_VERSION,
             ok,
             version: flux_core::VERSION.to_string(),
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),

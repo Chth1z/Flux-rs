@@ -4,7 +4,7 @@
 # 位置：/data/adb/flux-rs/config/flux.toml
 # 生效：改完先执行 `fluxd check`，确认无误后执行 `fluxd reload`
 #
-# 严格模式：只接受下面三个顶层键。未知键、重复项、非 canonical CIDR
+# 严格模式：只接受下面两个顶层键。未知键、重复项、非 canonical CIDR
 # 都会使整份候选配置被拒绝；Flux 不会截断或静默修正。
 #
 # 开关不在本文件里。唯一开关是 /data/adb/flux-rs/disable：
@@ -18,8 +18,8 @@
 # 空数组表示尚未选择应用，不会代理任何流量。
 apps = []
 
-# 额外直连的 canonical CIDR。IPv4 与 IPv6 分开填写、分别计数。
+# 额外直连的 canonical CIDR。IPv4 与 IPv6 可以写在同一数组中，
+# Flux 会按地址族分别写入两个 LPM map。
 # 回环、链路本地、私网、多播、广播、listener 地址以及设备自己的地址
 # 由 Flux 固定或动态注入，不需要在这里重复。
-bypass_v4 = []
-bypass_v6 = []
+bypass_cidrs = []

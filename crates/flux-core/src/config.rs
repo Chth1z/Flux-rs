@@ -5,11 +5,11 @@
 //! (`docs/ux.md` §2.2). Over-limit input is a clear configuration error and is
 //! rejected whole — never truncated, never partially applied (§11.2).
 //!
-//! The schema is the hand-editable flat form documented in `docs/ux.md` §2.2
-//! and typed in blueprint §10.2: an `apps` array of `userId:package` selectors
-//! and two `bypass_v4` / `bypass_v6` arrays of canonical CIDRs. Interface,
-//! subscription and logging keys belong to later phases and are not parsed
-//! here (blueprint §17.4 forbids pre-building for them).
+//! The schema is the hand-editable flat form defined by blueprint §11.2: an
+//! `apps` array of `userId:package` selectors and one mixed-family
+//! `bypass_cidrs` array of canonical CIDRs. Interface, subscription and logging
+//! keys belong to later phases and are not parsed here (blueprint §17.4
+//! forbids pre-building for them).
 
 use crate::abi::{LPM_MAX_ENTRIES, UID_SELECTED_MAX};
 use crate::cidr::{fixed_bypass, CidrError, Ipv4Cidr, Ipv6Cidr};
@@ -19,7 +19,7 @@ use crate::selector::{AppSelector, SelectorError};
 pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
 /// The top-level keys the schema defines. Anything else is rejected.
-const KNOWN_KEYS: &[&str] = &["apps", "bypass_v4", "bypass_v6"];
+const KNOWN_KEYS: &[&str] = &["apps", "bypass_cidrs"];
 
 /// Why a configuration was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +105,7 @@ impl FluxConfig {
         }
 
         let apps = parse_apps(&string_array(table, "apps")?)?;
-        let bypass_v4 = parse_bypass_v4(&string_array(table, "bypass_v4")?)?;
-        let bypass_v6 = parse_bypass_v6(&string_array(table, "bypass_v6")?)?;
+        let (bypass_v4, bypass_v6) = parse_bypass_cidrs(&string_array(table, "bypass_cidrs")?)?;
 
         Ok(Self {
             apps,
@@ -153,40 +152,42 @@ fn parse_apps(raw: &[String]) -> Result<Vec<AppSelector>, ConfigError> {
     Ok(apps)
 }
 
-fn parse_bypass_v4(raw: &[String]) -> Result<Vec<Ipv4Cidr>, ConfigError> {
-    let fixed = crate::cidr::fixed_bypass_v4().len();
-    if raw.len() + fixed > LPM_MAX_ENTRIES as usize {
-        return Err(ConfigError::TooManyBypassV4(raw.len()));
-    }
-    let mut out = Vec::with_capacity(raw.len());
+fn parse_bypass_cidrs(raw: &[String]) -> Result<(Vec<Ipv4Cidr>, Vec<Ipv6Cidr>), ConfigError> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for entry in raw {
-        let cidr = Ipv4Cidr::parse(entry)?;
-        let canonical = cidr.to_string();
-        if !seen.insert(canonical.clone()) {
-            return Err(ConfigError::DuplicateBypass(canonical));
+        let address = entry
+            .split_once('/')
+            .map_or(entry.as_str(), |(address, _)| address);
+        match address.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => {
+                let cidr = Ipv4Cidr::parse(entry)?;
+                let canonical = cidr.to_string();
+                if !seen.insert(canonical.clone()) {
+                    return Err(ConfigError::DuplicateBypass(canonical));
+                }
+                v4.push(cidr);
+            }
+            Ok(std::net::IpAddr::V6(_)) => {
+                let cidr = Ipv6Cidr::parse(entry)?;
+                let canonical = cidr.to_string();
+                if !seen.insert(canonical.clone()) {
+                    return Err(ConfigError::DuplicateBypass(canonical));
+                }
+                v6.push(cidr);
+            }
+            Err(_) => return Err(ConfigError::Cidr(CidrError::Malformed(entry.clone()))),
         }
-        out.push(cidr);
     }
-    Ok(out)
-}
 
-fn parse_bypass_v6(raw: &[String]) -> Result<Vec<Ipv6Cidr>, ConfigError> {
-    let fixed = crate::cidr::fixed_bypass_v6().len();
-    if raw.len() + fixed > LPM_MAX_ENTRIES as usize {
-        return Err(ConfigError::TooManyBypassV6(raw.len()));
+    if v4.len() + crate::cidr::fixed_bypass_v4().len() > LPM_MAX_ENTRIES as usize {
+        return Err(ConfigError::TooManyBypassV4(v4.len()));
     }
-    let mut out = Vec::with_capacity(raw.len());
-    let mut seen = std::collections::BTreeSet::new();
-    for entry in raw {
-        let cidr = Ipv6Cidr::parse(entry)?;
-        let canonical = cidr.to_string();
-        if !seen.insert(canonical.clone()) {
-            return Err(ConfigError::DuplicateBypass(canonical));
-        }
-        out.push(cidr);
+    if v6.len() + crate::cidr::fixed_bypass_v6().len() > LPM_MAX_ENTRIES as usize {
+        return Err(ConfigError::TooManyBypassV6(v6.len()));
     }
-    Ok(out)
+    Ok((v4, v6))
 }
 
 /// The legal key nearest to `key` by edit distance, for the typo hint that
@@ -226,8 +227,7 @@ mod tests {
     fn parses_a_typical_config() {
         let toml = br#"
 apps = ["0:com.example.browser", "10:com.example.chat"]
-bypass_v4 = ["192.168.0.0/16"]
-bypass_v6 = ["fd00::/8"]
+bypass_cidrs = ["192.168.0.0/16", "fd00::/8"]
 "#;
         let cfg = FluxConfig::parse(toml).expect("valid");
         assert_eq!(cfg.apps.len(), 2);
@@ -279,7 +279,7 @@ bypass_v6 = ["fd00::/8"]
 
     #[test]
     fn duplicate_bypass_is_rejected() {
-        let toml = br#"bypass_v4 = ["10.0.0.0/8", "10.0.0.0/8"]"#;
+        let toml = br#"bypass_cidrs = ["10.0.0.0/8", "10.0.0.0/8"]"#;
         assert_eq!(
             FluxConfig::parse(toml),
             Err(ConfigError::DuplicateBypass("10.0.0.0/8".to_string()))
@@ -288,7 +288,7 @@ bypass_v6 = ["fd00::/8"]
 
     #[test]
     fn non_canonical_cidr_is_rejected() {
-        let toml = br#"bypass_v4 = ["10.0.0.1/8"]"#;
+        let toml = br#"bypass_cidrs = ["10.0.0.1/8"]"#;
         assert!(matches!(
             FluxConfig::parse(toml),
             Err(ConfigError::Cidr(CidrError::HostBitsSet(_)))
@@ -330,8 +330,20 @@ bypass_v6 = ["fd00::/8"]
         let (v4, v6) = FluxConfig::fixed_bypass();
         assert!(!v4.is_empty() && !v6.is_empty());
         // The parsed config never carries the fixed set implicitly.
-        let cfg = FluxConfig::parse(b"bypass_v4 = []").unwrap();
+        let cfg = FluxConfig::parse(b"bypass_cidrs = []").unwrap();
         assert!(cfg.bypass_v4.is_empty());
+    }
+
+    #[test]
+    fn split_public_bypass_keys_are_rejected() {
+        let err = FluxConfig::parse(b"bypass_v4 = []").unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::UnknownKey {
+                key: "bypass_v4".to_string(),
+                closest: Some("bypass_cidrs".to_string()),
+            }
+        );
     }
 
     #[test]

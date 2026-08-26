@@ -6,16 +6,11 @@
 //! (blueprint §15.2 test 7).
 //!
 //! This protocol is the product's public API, not just the CLI's private wire
-//! (`docs/ux.md` §5.1): adding a field is fine, changing a field's meaning
-//! requires bumping [`PROTOCOL_VERSION`]. The daemon rejects an unknown version
-//! rather than guessing.
+//! (`docs/ux.md` §5.1), so its JSON shape follows blueprint §10.3 exactly.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-/// Wire protocol version. Bumped only on an incompatible change.
-pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Maximum accepted request size. Larger requests close the connection.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -52,37 +47,6 @@ pub enum Request {
     /// Detach and exit zero.
     Stop,
 }
-
-#[derive(Serialize, Deserialize)]
-struct RequestEnvelope {
-    protocol_version: u32,
-    #[serde(flatten)]
-    request: Request,
-}
-
-/// A request frame was syntactically valid JSON but used an incompatible
-/// public protocol version.
-#[derive(Debug)]
-pub enum RequestDecodeError {
-    /// The request was not valid JSON or did not match the request schema.
-    Json(serde_json::Error),
-    /// The request declared a protocol version this binary does not implement.
-    UnsupportedVersion(u32),
-}
-
-impl std::fmt::Display for RequestDecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Json(e) => write!(f, "{e}"),
-            Self::UnsupportedVersion(v) => write!(
-                f,
-                "unsupported control protocol version {v}; expected {PROTOCOL_VERSION}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for RequestDecodeError {}
 
 /// The engine child's status (blueprint §24.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,8 +156,6 @@ pub struct Counters {
 /// The daemon's reply to a [`Request`] (blueprint §24.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Response {
-    /// Public control protocol version used to encode this response.
-    pub protocol_version: u32,
     /// Whether the request succeeded.
     pub ok: bool,
     /// Product version, e.g. `0.9.0`.
@@ -232,26 +194,6 @@ pub fn from_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, serde_js
     serde_json::from_str(line)
 }
 
-/// Encodes one versioned request frame.
-pub fn request_to_line(request: &Request) -> Result<String, serde_json::Error> {
-    to_line(&RequestEnvelope {
-        protocol_version: PROTOCOL_VERSION,
-        request: *request,
-    })
-}
-
-/// Decodes one request and rejects every version other than the one this
-/// binary implements. Compatibility is never guessed.
-pub fn request_from_line(line: &str) -> Result<Request, RequestDecodeError> {
-    let envelope: RequestEnvelope = from_line(line).map_err(RequestDecodeError::Json)?;
-    if envelope.protocol_version != PROTOCOL_VERSION {
-        return Err(RequestDecodeError::UnsupportedVersion(
-            envelope.protocol_version,
-        ));
-    }
-    Ok(envelope.request)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,27 +210,17 @@ mod tests {
             Request::Reload,
             Request::Stop,
         ] {
-            let line = request_to_line(&request).expect("serialise");
-            let back = request_from_line(&line).expect("deserialise");
+            let line = to_line(&request).expect("serialise");
+            let back: Request = from_line(&line).expect("deserialise");
             assert_eq!(request, back);
         }
         // The wire form uses the "op" tag exactly as blueprint §10.3 shows.
-        assert_eq!(
-            request_to_line(&Request::Status).unwrap(),
-            r#"{"protocol_version":1,"op":"status"}"#
-        );
+        assert_eq!(to_line(&Request::Status).unwrap(), r#"{"op":"status"}"#);
     }
 
     #[test]
     fn unknown_request_op_is_rejected() {
-        assert!(request_from_line(r#"{"protocol_version":1,"op":"nuke"}"#).is_err());
-    }
-
-    #[test]
-    fn unknown_protocol_version_is_rejected() {
-        let err = request_from_line(r#"{"protocol_version":999,"op":"status"}"#)
-            .expect_err("must reject an incompatible client");
-        assert!(matches!(err, RequestDecodeError::UnsupportedVersion(999)));
+        assert!(from_line::<Request>(r#"{"op":"nuke"}"#).is_err());
     }
 
     #[test]
@@ -306,7 +238,6 @@ mod tests {
         sysctl.insert("flxrs1.accept_local".to_string(), 1);
 
         let response = Response {
-            protocol_version: PROTOCOL_VERSION,
             ok: true,
             version: "0.9.0".to_string(),
             abi_magic: format!("{:#010X}", crate::abi::FLUX_ABI_MAGIC),
