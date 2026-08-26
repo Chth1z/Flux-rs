@@ -107,14 +107,7 @@ fn send_dump_request(sock: &OwnedFd, exp: &SocketExpectation) -> io::Result<()> 
                                                           // sockid stays zeroed: dump, not exact-lookup.
 
     // SAFETY: the buffer is valid for `len` bytes for the duration of the call.
-    let sent = unsafe {
-        libc::send(
-            sock.as_raw_fd(),
-            msg.as_ptr().cast(),
-            len,
-            0,
-        )
-    };
+    let sent = unsafe { libc::send(sock.as_raw_fd(), msg.as_ptr().cast(), len, 0) };
     if sent != len as isize {
         return Err(io::Error::last_os_error());
     }
@@ -126,14 +119,8 @@ fn read_matching_inode(sock: &OwnedFd, exp: &SocketExpectation) -> io::Result<Op
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         // SAFETY: buf is valid for its length for the duration of the call.
-        let received = unsafe {
-            libc::recv(
-                sock.as_raw_fd(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                0,
-            )
-        };
+        let received =
+            unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
         if received < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -144,8 +131,7 @@ fn read_matching_inode(sock: &OwnedFd, exp: &SocketExpectation) -> io::Result<Op
         let mut offset = 0usize;
         let received = received as usize;
         while offset + NLMSG_HDRLEN <= received {
-            let nl_len =
-                u32::from_ne_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+            let nl_len = u32::from_ne_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
             let nl_type = u16::from_ne_bytes(buf[offset + 4..offset + 6].try_into().unwrap());
             if nl_len < NLMSG_HDRLEN || offset + nl_len > received {
                 return Err(io::Error::new(

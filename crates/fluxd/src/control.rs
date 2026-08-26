@@ -76,13 +76,7 @@ impl ControlServer {
         let fd = seqpacket_socket(true)?;
         let (addr, len) = sockaddr_un(path)?;
         // SAFETY: addr is a valid sockaddr_un of the stated length.
-        let rc = unsafe {
-            libc::bind(
-                fd.as_raw_fd(),
-                std::ptr::addr_of!(addr).cast(),
-                len,
-            )
-        };
+        let rc = unsafe { libc::bind(fd.as_raw_fd(), std::ptr::addr_of!(addr).cast(), len) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -118,6 +112,10 @@ impl ControlServer {
         }
         // SAFETY: just returned by accept4, not owned elsewhere.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // A connected client that never sends must not park the single-threaded
+        // reactor: bound both directions. The peer is root-only, so this guards
+        // against bugs, not attackers.
+        set_socket_timeouts(&fd, Duration::from_secs(2));
         Ok(Some(ControlConn { fd }))
     }
 }
@@ -183,6 +181,25 @@ impl ControlConn {
     }
 }
 
+fn set_socket_timeouts(fd: &OwnedFd, timeout: Duration) {
+    let tv = libc::timeval {
+        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+    };
+    for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+        // SAFETY: valid fd; tv is a valid timeval for the call's duration.
+        unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                opt,
+                std::ptr::addr_of!(tv).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            );
+        }
+    }
+}
+
 fn recv_once(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         // SAFETY: buf is valid for its length for the duration of the call.
@@ -229,22 +246,7 @@ fn send_once(fd: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
 /// Client side: one request, one response, bounded by `timeout` end to end.
 pub fn request(path: &Path, request: &Request, timeout: Duration) -> io::Result<Response> {
     let fd = seqpacket_socket(false)?;
-    let tv = libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
-        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-    };
-    for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
-        // SAFETY: valid fd; tv is a valid timeval for the call's duration.
-        unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                opt,
-                std::ptr::addr_of!(tv).cast(),
-                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            );
-        }
-    }
+    set_socket_timeouts(&fd, timeout);
     let (addr, len) = sockaddr_un(path)?;
     // SAFETY: addr is a valid sockaddr_un of the stated length.
     let rc = unsafe { libc::connect(fd.as_raw_fd(), std::ptr::addr_of!(addr).cast(), len) };
