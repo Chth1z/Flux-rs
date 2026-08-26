@@ -24,37 +24,37 @@
 // without the libtest harness while their imports remain.
 #![allow(dead_code, unused_imports)]
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[path = "../src/layout.rs"]
 mod layout;
 
 // The path attribute on the inline module re-anchors its children's base
 // directory at the real src/netlink, so the child file resolves.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[path = "../src/netlink"]
 mod netlink {
     pub mod sock_diag;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[path = "../src/engine.rs"]
 mod engine;
 
 #[path = "common/fake_engine.rs"]
 mod fake_engine;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn main() {
-    println!("engine_lifecycle: skipped (Linux-only)");
+    println!("engine_lifecycle: skipped (Linux/Android-only)");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn main() {
     fake_engine::maybe_run();
     tests::run_all();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
