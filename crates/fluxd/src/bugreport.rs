@@ -2,9 +2,9 @@
 //!
 //! Rules from `docs/ux.md` §6:
 //!
-//! * Default output is REDACTED: IPv4 addresses keep only their first octet,
-//!   IPv6-looking strings and MAC addresses are masked. `--raw` disables
-//!   redaction for local debugging.
+//! * Default output is REDACTED: IPv4 addresses keep only their first octet;
+//!   IPv6-looking strings, MAC addresses and NFLOG cookies are masked. These
+//!   are the same rules as the packaged `observe.sh`. `--raw` disables them.
 //! * `logcat` is NEVER captured by default — it contains other apps' output.
 //!   `--with-logcat` opts in, filtered to Flux-related lines only.
 //! * Raw configuration files are never included: `sing-box.json` carries
@@ -15,6 +15,7 @@
 //! directory, no compression): a bug report is small and a zip dependency is
 //! not worth a governance §1.2 exception.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -97,6 +98,21 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
     // No redaction needed — module.prop carries no addresses.
     zip.add("modules.txt", modules_inventory().as_bytes());
 
+    // The exact read-only Phase-0 observation probe is shipped next to fluxd,
+    // so bug reports and manual device surveys share both collection and
+    // redaction semantics rather than slowly drifting apart.
+    let observe =
+        capture_observe(options.raw).unwrap_or_else(|e| format!("(observe.sh failed: {e})\n"));
+    zip.add("observe.txt", maybe_redact(&observe, redact_on).as_bytes());
+
+    match fs::read("/proc/config.gz") {
+        Ok(config) => zip.add("proc-config.gz", &config),
+        Err(e) => zip.add(
+            "proc-config.txt",
+            format!("(/proc/config.gz unreadable: {e})\n").as_bytes(),
+        ),
+    }
+
     // dmesg needs root on Android; a failure is recorded, not fatal.
     let dmesg = capture_command("dmesg", &[], CAPTURE_DEADLINE)
         .unwrap_or_else(|e| format!("(dmesg failed: {e})\n"));
@@ -156,7 +172,7 @@ fn read_uname() -> String {
             let bytes: Vec<u8> = a
                 .iter()
                 .take_while(|c| **c != 0)
-                .map(|c| *c as u8)
+                .map(|c| c.to_ne_bytes()[0])
                 .collect();
             String::from_utf8_lossy(&bytes).into_owned()
         };
@@ -215,13 +231,45 @@ fn modules_inventory() -> String {
 
 /// Runs an external capture command with a hard deadline; output capped.
 fn capture_command(program: &str, args: &[&str], deadline: Duration) -> io::Result<String> {
+    capture_command_env(OsStr::new(program), args, deadline, None)
+}
+
+fn capture_observe(raw: bool) -> io::Result<String> {
+    let script = std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::other("fluxd executable has no parent directory"))?
+        .join("observe.sh");
+    if !script.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is not shipped next to fluxd", script.display()),
+        ));
+    }
+    capture_command_env(
+        script.as_os_str(),
+        &[],
+        Duration::from_secs(30),
+        raw.then_some(("FLUX_PROBE_RAW", "1")),
+    )
+}
+
+fn capture_command_env(
+    program: &OsStr,
+    args: &[&str],
+    deadline: Duration,
+    environment: Option<(&str, &str)>,
+) -> io::Result<String> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    if let Some((key, value)) = environment {
+        command.env(key, value);
+    }
+    let mut child = command.spawn()?;
     let start = std::time::Instant::now();
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut out = Vec::new();
@@ -273,8 +321,8 @@ fn readme_text(options: &BugreportOptions) -> String {
     text.push_str(if options.raw {
         "Redaction: OFF (--raw). This report may contain IP and MAC addresses.\n"
     } else {
-        "Redaction: ON. IPv4 keeps its first octet; IPv6-like and MAC-like\n\
-         strings are masked.\n"
+        "Redaction: ON. IPv4 keeps its first octet; IPv6-like, MAC-like and\n\
+         NFLOG-cookie values are masked.\n"
     });
     text.push_str(if options.with_logcat {
         "logcat: included on explicit request, filtered to flux-related lines.\n"
@@ -313,7 +361,8 @@ fn maybe_redact(text: &str, on: bool) -> String {
 
 // ------------------------------------------------------------------ redaction
 
-/// Masks IPv4 (keeping the first octet), MAC-like and IPv6-like tokens.
+/// Masks IPv4 (keeping the first octet), MAC-like, IPv6-like and quoted
+/// decimal NFLOG-cookie tokens.
 /// Hand-rolled scanning: a regex crate is not worth a dependency exception.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -328,6 +377,21 @@ fn redact_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
     while i < bytes.len() {
+        if bytes[i] == b'"' {
+            out.push('"');
+            i += 1;
+            let digits = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - digits >= 6 && bytes.get(i) == Some(&b':') {
+                out.push_str("[cookie-redacted]:");
+                i += 1;
+                continue;
+            }
+            i = digits;
+            continue;
+        }
         // Token = maximal run of [0-9a-fA-F.:]. Everything else passes through.
         if !is_addr_byte(bytes[i]) {
             // Advance one UTF-8 scalar, not one byte.
@@ -372,7 +436,7 @@ fn classify_and_mask(token: &str) -> String {
     token.to_string()
 }
 
-/// `a.b.c.d` (optionally `:port`) with valid octets → `a.*.*.*[:port]`.
+/// `a.b.c.d` (optionally `:port`) with valid octets → `a.x.x.x[:port]`.
 fn mask_ipv4(token: &str) -> Option<String> {
     let (addr, port) = match token.split_once(':') {
         Some((addr, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
@@ -393,7 +457,7 @@ fn mask_ipv4(token: &str) -> Option<String> {
             return None;
         }
     }
-    let mut masked = format!("{}.*.*.*", octets[0]);
+    let mut masked = format!("{}.x.x.x", octets[0]);
     if let Some(port) = port {
         masked.push_str(&format!(":{port}"));
     }
@@ -538,20 +602,22 @@ mod tests {
 
     #[test]
     fn redaction_masks_addresses_but_not_timestamps() {
-        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 at 12:34:56\n\
+        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 cookie \"123456789: at 12:34:56\n\
                      plain 10.0.0.1 and version 1.2.3 and 300.1.2.3 stay sane\n";
         let out = redact(input);
-        assert!(out.contains("192.*.*.*:8443"), "{out}");
+        assert!(out.contains("192.x.x.x:8443"), "{out}");
         assert!(out.contains("[v6-redacted]"), "{out}");
         assert!(out.contains("[mac-redacted]"), "{out}");
+        assert!(out.contains("\"[cookie-redacted]:"), "{out}");
         assert!(out.contains("12:34:56"), "timestamps must survive: {out}");
-        assert!(out.contains("10.*.*.*"), "{out}");
+        assert!(out.contains("10.x.x.x"), "{out}");
         assert!(
             out.contains("1.2.3"),
             "a three-part version is not an IP: {out}"
         );
         assert!(out.contains("300.1.2.3"), "octet >255 is not an IP: {out}");
         assert!(!out.contains("192.168.1.5"), "{out}");
+        assert!(!out.contains("123456789"), "{out}");
     }
 
     #[test]

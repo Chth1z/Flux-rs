@@ -36,3 +36,13 @@ license_path_in_archive = "sing-box-1.13.19-android-arm64/LICENSE"
 # p_align >= 0x4000 and the gap is documented in docs/blueprint.md §3.8 and
 # §22.2. Re-measure on every version bump.
 max_load_p_align = "0x1000"
+
+# Host-only validation asset. This binary is never shipped; CI executes it to
+# prove the exact default template plus Flux's injected inbounds passes the
+# same official sing-box release's real `check -c` implementation.
+check_archive_url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-linux-amd64.tar.gz"
+check_archive_sha256 = "ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1"
+check_archive_size = 23928553
+check_binary_path_in_archive = "sing-box-1.13.19-linux-amd64/sing-box"
+check_binary_sha256 = "7e9dcd7239c49478a576d79f272751e5ed1c2aba7cc08ab1b2bd69c00c904ba1"
+check_binary_size = 58110208

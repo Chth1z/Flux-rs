@@ -333,4 +333,11 @@ bypass_v6 = ["fd00::/8"]
         let cfg = FluxConfig::parse(b"bypass_v4 = []").unwrap();
         assert!(cfg.bypass_v4.is_empty());
     }
+
+    #[test]
+    fn shipped_default_flux_toml_uses_the_live_schema() {
+        let template = include_bytes!("../../../module/flux.toml");
+        let config = FluxConfig::parse(template).expect("shipped default must parse");
+        assert_eq!(config, FluxConfig::default());
+    }
 }

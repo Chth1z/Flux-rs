@@ -45,6 +45,9 @@ jobs:
       - name: Doc check
         run: cargo xtask doc-check
 
+      - name: Official sing-box template check
+        run: cargo xtask template-check
+
   # flux-core is contractually pure logic (implementation.md 17.4 exit
   # criterion 1): no I/O, no unsafe, no async, no platform dependencies. A
   # Windows run is the cheapest way to keep that promise honest.
@@ -87,28 +90,27 @@ jobs:
       - name: ABI offset cross-check
         run: cargo xtask abi-check
 
-      # linux-tools-generic ships bpftool for Ubuntu's GA kernel, but the
-      # runner boots an azure-flavoured kernel and the /usr/sbin/bpftool shim
-      # from linux-tools-common refuses to run a version-mismatched binary
-      # ("bpftool not found for kernel 6.17.0-1022", exit 2). Install the
-      # package matching the RUNNING kernel; if the archive lags the kernel,
-      # fall back to invoking any installed versioned bpftool directly --
-      # the verifier gate only needs a working loader, not a shim.
+      # The SK_STORAGE value BTF is hand-written for kernel-5.15 stability.
+      # Compare its normalized struct layout against clang's actual .BTF
+      # section so a C ABI edit cannot leave the loader blob stale.
+      - name: BTF layout cross-check
+        run: cargo xtask btf-check
+
+      # Ubuntu's /usr/sbin/bpftool shim refuses to run when the hosted runner's
+      # Azure kernel is newer than the linux-tools archive. Build one pinned
+      # release instead. The shallow clone must include libbpf's submodule;
+      # omitting it was the reason the earlier phase-3 CI repair still failed.
       - name: Install bpftool
         run: |
           set -eu
-          sudo apt-get install -y "linux-tools-$(uname -r)" \
-            || sudo apt-get install -y linux-tools-azure \
-            || sudo apt-get install -y linux-tools-generic
-          BPFTOOL=/usr/sbin/bpftool
-          if ! sudo "$BPFTOOL" version >/dev/null 2>&1; then
-            BPFTOOL="$(find /usr/lib/linux-tools* -name bpftool -type f 2>/dev/null | sort -V | tail -n 1)"
-          fi
-          if [ -z "$BPFTOOL" ] || ! sudo "$BPFTOOL" version; then
-            echo "no working bpftool found; the verifier gate cannot run" >&2
-            exit 1
-          fi
-          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          sudo apt-get install -y build-essential libelf-dev zlib1g-dev libcap-dev
+          BPFTMP=$(mktemp -d)
+          git clone --depth 1 --branch v7.5.0 --recurse-submodules --shallow-submodules \
+            https://github.com/libbpf/bpftool.git "$BPFTMP/bpftool"
+          make -C "$BPFTMP/bpftool/src" -j"$(nproc)"
+          sudo install -m 0755 "$BPFTMP/bpftool/src/bpftool" /usr/local/bin/bpftool
+          sudo bpftool version
+          echo "BPFTOOL=/usr/local/bin/bpftool" >> "$GITHUB_ENV"
 
       # The cheapest gate the project has, and it has already earned its place:
       # the run that first exercised it found that every program carried an ELF

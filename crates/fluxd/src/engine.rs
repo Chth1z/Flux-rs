@@ -12,24 +12,25 @@
 //! * In later phases, `active = 0` is published **before** the old child is
 //!   terminated: kernels below 6.5 lack the unhashed-socket rejection in
 //!   `bpf_sk_assign()`, so ingress must stop assigning before the listener can
-//!   go away (§9.2, §9.4). Phase 2 has no data plane, so the publish points in
-//!   [`run_generation_switch`] are documented no-ops — the sequence is already
-//!   in its final order.
+//!   go away (§9.2, §9.4). Phase 2 has no data plane, so those reactor
+//!   transaction publish points are documented no-ops; their order is final.
 //!
 //! Liveness is pidfd only. There is no heartbeat, no polling of any kind; the
-//! bounded backoff inside [`wait_ready`] exists only during candidate startup
-//! and dies with the transaction (§9.5).
+//! bounded readiness backoff exists only during candidate startup and dies
+//! with the reactor transaction (§9.5).
 
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::{self, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use flux_core::abi::{LISTEN_PORT_MAX, LISTEN_PORT_MIN, LISTEN_V4_STR, LISTEN_V6_STR};
-use flux_core::engine_config::{build_effective, EngineConfigError, EngineParams};
+#[cfg(test)]
+use flux_core::engine_config::build_effective;
+use flux_core::engine_config::{EngineConfigError, EngineParams};
 
 use crate::layout::Layout;
 use crate::netlink::sock_diag::{find_inode, pid_owns_inode, SocketExpectation};
@@ -46,6 +47,104 @@ pub const CHECK_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Bytes of engine output retained for diagnostics (per run).
 const OUTPUT_CAP: usize = 64 * 1024;
+
+/// One asynchronously supervised `sing-box check -c` process.
+///
+/// The daemon registers [`pidfd`](Self::pidfd) and
+/// [`output_fd`](Self::output_fd) in epoll. Tests and the standalone `check`
+/// command may instead drive [`finish`](Self::finish) in a bounded loop.
+#[derive(Debug)]
+pub struct EngineCheck {
+    child: std::process::Child,
+    pidfd: OwnedFd,
+    output: OwnedFd,
+    captured: Vec<u8>,
+}
+
+impl EngineCheck {
+    /// The pidfd whose readability means the check process exited.
+    pub fn pidfd(&self) -> RawFd {
+        self.pidfd.as_raw_fd()
+    }
+
+    /// The non-blocking merged stdout/stderr pipe.
+    pub fn output_fd(&self) -> RawFd {
+        self.output.as_raw_fd()
+    }
+
+    /// Drains currently available output without waiting.
+    pub fn drain_output(&mut self) {
+        let mut chunk = [0u8; 4096];
+        loop {
+            // SAFETY: `output` is a valid non-blocking fd and `chunk` is a
+            // valid writable buffer for the duration of the call.
+            let n = unsafe {
+                libc::read(
+                    self.output.as_raw_fd(),
+                    chunk.as_mut_ptr().cast(),
+                    chunk.len(),
+                )
+            };
+            if n > 0 {
+                if self.captured.len() < OUTPUT_CAP {
+                    let n = n as usize;
+                    let keep = n.min(OUTPUT_CAP - self.captured.len());
+                    self.captured.extend_from_slice(&chunk[..keep]);
+                }
+                continue;
+            }
+            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+    }
+
+    /// Returns `None` while the process is live, otherwise reaps it and
+    /// returns the completed check result. This method never waits for exit.
+    pub fn finish(&mut self) -> Result<Option<Result<(), EngineError>>, EngineError> {
+        self.drain_output();
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) => return Ok(None),
+            // Another wait path cannot exist in the single-threaded daemon,
+            // but ECHILD still means there is nothing left to reap and must
+            // not strand the transaction forever.
+            Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                return Ok(Some(Err(EngineError::Io(e))))
+            }
+            Err(e) => return Err(EngineError::Io(e)),
+        };
+        self.drain_output();
+        if status.success() {
+            Ok(Some(Ok(())))
+        } else {
+            Ok(Some(Err(EngineError::CheckFailed {
+                exit: describe_exit(status),
+                output_head: head_lines(&self.captured, 8),
+            })))
+        }
+    }
+
+    /// Sends SIGKILL to a still-running check. Reaping remains event-driven
+    /// through [`finish`](Self::finish).
+    pub fn kill(&mut self) -> io::Result<()> {
+        match self.child.kill() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Builds the stable timeout result from output captured so far.
+    pub fn timeout_error(&mut self) -> EngineError {
+        self.drain_output();
+        EngineError::CheckFailed {
+            exit: "timeout".to_string(),
+            output_head: head_lines(&self.captured, 8),
+        }
+    }
+}
 
 /// How the engine is launched and which sockets prove it ready.
 ///
@@ -128,6 +227,10 @@ pub struct EngineChild {
     /// `starttime` from `/proc/<pid>/stat` field 22, the second half of the
     /// `(pid, starttime)` composite identity (§13.3).
     pub start_time: u64,
+    /// Becomes true only after `/proc/<pid>/exe` resolves to the configured
+    /// engine binary. Spawn returns before exec completes, so readiness owns
+    /// this final identity check.
+    pub identity_verified: bool,
     pub params: EngineParams,
     /// The immutable generation file this child was started from.
     pub effective: PathBuf,
@@ -212,14 +315,58 @@ pub fn describe_config_error(e: &EngineConfigError) -> String {
 
 /// Two distinct random listener ports from the §9.1 range, above Android's
 /// ephemeral range. Ports are collision avoidance, never identity.
+///
+/// Keep a TCP and UDP wildcard reservation for each family while choosing the
+/// pair. The sockets are dropped before sing-box starts, so this cannot remove
+/// the final bind race, but it avoids selecting a port already occupied by
+/// either protocol (the previous random-only draw made that a flaky startup).
 pub fn draw_ports() -> io::Result<(u16, u16)> {
-    let first = draw_port()?;
-    loop {
-        let second = draw_port()?;
-        if second != first {
-            return Ok((first, second));
+    let v4 = reserve_random_port(IpAddr::V4(Ipv4Addr::UNSPECIFIED), None)?;
+    let v6 = reserve_random_port(IpAddr::V6(Ipv6Addr::UNSPECIFIED), Some(v4.port))?;
+    Ok((v4.port, v6.port))
+}
+
+const PORT_DRAW_ATTEMPTS: usize = 128;
+
+struct PortReservation {
+    port: u16,
+    _tcp: TcpListener,
+    _udp: UdpSocket,
+}
+
+impl PortReservation {
+    fn bind(address: IpAddr, port: u16) -> io::Result<Self> {
+        let tcp = TcpListener::bind((address, port))?;
+        let udp = UdpSocket::bind((address, port))?;
+        Ok(Self {
+            port,
+            _tcp: tcp,
+            _udp: udp,
+        })
+    }
+}
+
+fn reserve_random_port(address: IpAddr, excluded: Option<u16>) -> io::Result<PortReservation> {
+    let mut last_collision = None;
+    for _ in 0..PORT_DRAW_ATTEMPTS {
+        let port = draw_port()?;
+        if excluded == Some(port) {
+            continue;
+        }
+        match PortReservation::bind(address, port) {
+            Ok(reservation) => return Ok(reservation),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                last_collision = Some(error);
+            }
+            Err(error) => return Err(error),
         }
     }
+    Err(last_collision.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "could not reserve a distinct listener port",
+        )
+    }))
 }
 
 fn draw_port() -> io::Result<u16> {
@@ -273,78 +420,60 @@ pub fn write_effective(
     Ok(path)
 }
 
-/// §9.4 step 1, second half: `sing-box check -c <exact path>` as a subprocess
-/// with piped output and a hard deadline. Never a blocking `wait()` without a
-/// bound (blueprint §10.4).
-pub fn run_check(binary: &Path, config: &Path) -> Result<(), EngineError> {
+/// Starts §9.4 step 1's `sing-box check -c <exact path>` subprocess with a
+/// pidfd and one non-blocking merged output pipe.
+pub fn spawn_check(binary: &Path, config: &Path) -> Result<EngineCheck, EngineError> {
     if !binary.exists() {
         return Err(EngineError::BinaryMissing(binary.to_path_buf()));
     }
+    let (output, writer) = pipe2_cloexec().map_err(EngineError::Io)?;
+    let stdout = fs::File::from(writer);
+    let stderr = stdout.try_clone().map_err(EngineError::Io)?;
     let mut child = std::process::Command::new(binary)
         .arg("check")
         .arg("-c")
         .arg(config)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr))
         .spawn()
         .map_err(|e| EngineError::SpawnFailed(format!("{}: {e}", binary.display())))?;
 
-    let deadline = Instant::now() + CHECK_DEADLINE;
-    let mut output = Vec::new();
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-    set_nonblocking(stdout.as_raw_fd());
-    set_nonblocking(stderr.as_raw_fd());
-    let mut pipes: Vec<Box<dyn Read>> = vec![Box::new(stdout), Box::new(stderr)];
-    let mut open = [true, true];
+    let pid = i32::try_from(child.id()).map_err(|_| {
+        let _ = child.kill();
+        let _ = child.wait();
+        EngineError::SpawnFailed("check pid does not fit i32".to_string())
+    })?;
+    let pidfd = pidfd_open(pid).map_err(|e| {
+        let _ = child.kill();
+        let _ = child.wait();
+        EngineError::Io(e)
+    })?;
+    set_nonblocking(output.as_raw_fd());
+    Ok(EngineCheck {
+        child,
+        pidfd,
+        output,
+        captured: Vec::new(),
+    })
+}
 
+/// Runs a check to completion for CLI/tests. The daemon uses
+/// [`spawn_check`] directly so its reactor never sleeps or waits.
+pub fn run_check(binary: &Path, config: &Path) -> Result<(), EngineError> {
+    let mut check = spawn_check(binary, config)?;
+    let deadline = Instant::now() + CHECK_DEADLINE;
     loop {
-        for (idx, pipe) in pipes.iter_mut().enumerate() {
-            if !open[idx] {
-                continue;
-            }
-            let mut chunk = [0u8; 4096];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => {
-                        open[idx] = false;
-                        break;
-                    }
-                    Ok(n) => {
-                        if output.len() < OUTPUT_CAP {
-                            output.extend_from_slice(&chunk[..n.min(OUTPUT_CAP - output.len())]);
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => {
-                        open[idx] = false;
-                        break;
-                    }
-                }
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) if !open[0] && !open[1] => {
-                if status.success() {
-                    return Ok(());
-                }
-                return Err(EngineError::CheckFailed {
-                    exit: describe_exit(status),
-                    output_head: head_lines(&output, 8),
-                });
-            }
-            Ok(_) => {}
-            Err(e) => return Err(EngineError::Io(e)),
+        if let Some(result) = check.finish()? {
+            return result;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(EngineError::CheckFailed {
-                exit: "timeout".to_string(),
-                output_head: head_lines(&output, 8),
-            });
+            let timeout = check.timeout_error();
+            check.kill().map_err(EngineError::Io)?;
+            while check.finish()?.is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            return Err(timeout);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -428,9 +557,6 @@ pub fn spawn(
     ];
 
     let (out_read, out_write) = pipe2_cloexec().map_err(EngineError::Io)?;
-    // exec-status pipe: CLOEXEC, so a successful exec closes it and the parent
-    // reads EOF; an exec failure writes errno through it first.
-    let (status_read, status_write) = pipe2_cloexec().map_err(EngineError::Io)?;
     let devnull = fs::OpenOptions::new()
         .read(true)
         .open("/dev/null")
@@ -463,11 +589,15 @@ pub fn spawn(
             libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
 
             // 2. Own session and process group, so the group can be signalled.
-            libc::setsid();
+            if libc::setsid() < 0 {
+                report_exec_failure(out_write.as_raw_fd());
+            }
 
             // 3. Clear supplementary groups. EPERM (not root, e.g. host
             //    tests) is tolerable: there is nothing to drop then.
-            let _ = libc::setgroups(0, std::ptr::null());
+            if libc::setgroups(0, std::ptr::null()) != 0 && libc::geteuid() == 0 {
+                report_exec_failure(out_write.as_raw_fd());
+            }
 
             // 4. Die with the parent, immediately.
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
@@ -482,49 +612,25 @@ pub fn spawn(
 
             // 6. Prepare fds: stdin /dev/null, stdout+stderr into the pipe.
             if libc::chdir(workdir.as_ptr()) != 0 {
-                report_exec_failure(status_write.as_raw_fd());
+                report_exec_failure(out_write.as_raw_fd());
             }
             if libc::dup2(devnull.as_raw_fd(), 0) < 0
                 || libc::dup2(out_write.as_raw_fd(), 1) < 0
                 || libc::dup2(out_write.as_raw_fd(), 2) < 0
             {
-                report_exec_failure(status_write.as_raw_fd());
+                report_exec_failure(out_write.as_raw_fd());
             }
 
             // 7. execve. All our other fds are CLOEXEC.
             libc::execv(binary.as_ptr(), argv.as_ptr());
-            report_exec_failure(status_write.as_raw_fd());
+            report_exec_failure(out_write.as_raw_fd());
         }
         // `report_exec_failure` never returns; this is unreachable.
     }
 
     // === parent ===
     drop(out_write);
-    drop(status_write);
     drop(devnull);
-
-    // A successful exec closes the CLOEXEC status pipe (EOF); a failure sends
-    // the errno. Bounded read: the child reaches exec or _exit promptly.
-    let mut errno_bytes = [0u8; 4];
-    let exec_errno = {
-        let mut status_file = fs::File::from(status_read);
-        match read_exact_with_deadline(&mut status_file, &mut errno_bytes, Duration::from_secs(5)) {
-            Ok(true) => Some(i32::from_ne_bytes(errno_bytes)),
-            Ok(false) => None, // EOF: exec succeeded
-            Err(e) => {
-                reap_and_ignore(pid);
-                return Err(EngineError::Io(e));
-            }
-        }
-    };
-    if let Some(errno) = exec_errno {
-        reap_and_ignore(pid);
-        return Err(EngineError::SpawnFailed(format!(
-            "exec {}: {}",
-            spec.binary.display(),
-            io::Error::from_raw_os_error(errno)
-        )));
-    }
 
     let pidfd = pidfd_open(pid).map_err(|e| {
         // Exec already succeeded but we cannot supervise without a pidfd.
@@ -535,13 +641,23 @@ pub fn spawn(
         reap_and_ignore(pid);
         EngineError::Io(e)
     })?;
-    let start_time = proc_start_time(pid).unwrap_or(0);
+    let start_time = match proc_start_time(pid).filter(|time| *time != 0) {
+        Some(start_time) => start_time,
+        None => {
+            let _ = pidfd_kill(&pidfd, libc::SIGKILL);
+            reap_and_ignore(pid);
+            return Err(EngineError::SpawnFailed(
+                "child has no usable /proc starttime".to_string(),
+            ));
+        }
+    };
     set_nonblocking(out_read.as_raw_fd());
 
     Ok(EngineChild {
         pid,
         pidfd,
         start_time,
+        identity_verified: false,
         params,
         effective: effective.to_path_buf(),
         output: out_read,
@@ -550,13 +666,13 @@ pub fn spawn(
     })
 }
 
-/// Writes errno into the status pipe and `_exit(126)`. Child-side only.
-unsafe fn report_exec_failure(status_fd: RawFd) -> ! {
-    let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    let bytes = errno.to_ne_bytes();
+/// Writes a fixed diagnostic and `_exit(126)`. Child-side only; formatting or
+/// allocation after fork would not be async-signal-safe.
+unsafe fn report_exec_failure(output_fd: RawFd) -> ! {
+    const MESSAGE: &[u8] = b"fluxd: child setup or exec failed\n";
     // SAFETY: write(2) is async-signal-safe; the fd is the held pipe end.
     unsafe {
-        libc::write(status_fd, bytes.as_ptr().cast(), bytes.len());
+        libc::write(output_fd, MESSAGE.as_ptr().cast(), MESSAGE.len());
         libc::_exit(126);
     }
 }
@@ -573,31 +689,6 @@ fn reap_and_ignore(pid: i32) {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-}
-
-fn read_exact_with_deadline(
-    file: &mut fs::File,
-    buf: &mut [u8],
-    timeout: Duration,
-) -> io::Result<bool> {
-    set_nonblocking(file.as_raw_fd());
-    let deadline = Instant::now() + timeout;
-    let mut filled = 0;
-    while filled < buf.len() {
-        match file.read(&mut buf[filled..]) {
-            Ok(0) => return Ok(false), // EOF
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "status pipe"));
-                }
-                poll_readable(file.as_raw_fd(), Duration::from_millis(50));
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(true)
 }
 
 /// pidfd_open(2). Available since 5.3; the kernel floor is 5.15 (§1.1).
@@ -635,6 +726,11 @@ fn pidfd_kill(pidfd: &OwnedFd, signal: i32) -> io::Result<()> {
     Ok(())
 }
 
+/// Sends a signal to the exact child identity through its pidfd.
+pub fn signal(child: &EngineChild, signal: i32) -> io::Result<()> {
+    pidfd_kill(&child.pidfd, signal)
+}
+
 /// Whether the pidfd reports the process as exited (readable).
 pub fn has_exited(pidfd: &OwnedFd) -> bool {
     poll_readable(pidfd.as_raw_fd(), Duration::ZERO)
@@ -666,45 +762,92 @@ pub fn proc_start_time(pid: i32) -> Option<u64> {
     fields.nth(18)?.parse().ok()
 }
 
+pub fn verify_process_identity(child: &mut EngineChild, spec: &EngineSpec) -> io::Result<bool> {
+    if child.identity_verified {
+        return Ok(true);
+    }
+    let current_start = proc_start_time(child.pid).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("/proc/{}/stat is unavailable", child.pid),
+        )
+    })?;
+    if current_start == 0 || current_start != child.start_time {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "child identity changed: starttime {} != {}",
+                current_start, child.start_time
+            ),
+        ));
+    }
+    let actual = fs::read_link(format!("/proc/{}/exe", child.pid))?;
+    let expected = fs::canonicalize(&spec.binary)?;
+    if actual != expected {
+        // `spawn` intentionally returns before the child reaches execve. The
+        // first readiness tick may still see fluxd as /proc/<pid>/exe; keep
+        // waiting, but never count a socket until the exact binary matches.
+        return Ok(false);
+    }
+    child.identity_verified = true;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    Pending { verified: u8 },
+    Ready,
+}
+
+/// One non-blocking readiness pass. The reactor drives repeated passes from a
+/// timerfd; no sleep or poll occurs here.
+pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readiness, EngineError> {
+    if has_exited(&child.pidfd) {
+        let exit = reap(child);
+        return Err(EngineError::Exited {
+            exit,
+            output_head: drain_output_head(child),
+        });
+    }
+    if !verify_process_identity(child, spec).map_err(EngineError::Io)? {
+        return Ok(Readiness::Pending { verified: 0 });
+    }
+
+    let expectations = spec.expectations(&child.params);
+    let mut verified = 0u8;
+    let mut all_present = true;
+    for exp in &expectations {
+        match find_inode(exp).map_err(EngineError::Io)? {
+            Some(inode) => match pid_owns_inode(child.pid, inode) {
+                Ok(true) => verified += 1,
+                Ok(false) => return Err(EngineError::SocketOwnerMismatch { inode }),
+                Err(e) => return Err(EngineError::Io(e)),
+            },
+            None => all_present = false,
+        }
+    }
+    child.sockets_verified = verified;
+    if all_present && verified == 4 {
+        Ok(Readiness::Ready)
+    } else {
+        Ok(Readiness::Pending { verified })
+    }
+}
+
 /// §9.5: waits for the four exact sockets with a 10/20/40… ms backoff capped
 /// at 250 ms and a hard total deadline. Every found inode is cross-checked
 /// against `/proc/<pid>/fd`. This is not steady-state polling — it exists only
 /// between spawn and ready/failed, then stops forever.
+#[cfg(test)]
+#[allow(dead_code)] // Used by the path-included Linux integration harness.
 pub fn wait_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), EngineError> {
     let deadline = Instant::now() + READY_DEADLINE;
-    let expectations = spec.expectations(&child.params);
     let mut backoff = Duration::from_millis(10);
     loop {
-        if has_exited(&child.pidfd) {
-            let exit = reap(child);
-            return Err(EngineError::Exited {
-                exit,
-                output_head: drain_output_head(child),
-            });
-        }
-
-        let mut verified = 0u8;
-        let mut all_present = true;
-        for exp in &expectations {
-            match find_inode(exp).map_err(EngineError::Io)? {
-                Some(inode) => {
-                    match pid_owns_inode(child.pid, inode) {
-                        Ok(true) => verified += 1,
-                        Ok(false) => {
-                            // The socket exists but the candidate does not hold
-                            // it: a stranger owns our address/port. Terminal.
-                            return Err(EngineError::SocketOwnerMismatch { inode });
-                        }
-                        Err(e) => return Err(EngineError::Io(e)),
-                    }
-                }
-                None => all_present = false,
-            }
-        }
-        child.sockets_verified = verified;
-        if all_present && verified == 4 {
-            return Ok(());
-        }
+        let verified = match probe_ready(child, spec)? {
+            Readiness::Ready => return Ok(()),
+            Readiness::Pending { verified } => verified,
+        };
         if Instant::now() + backoff > deadline {
             return Err(EngineError::NotReady { verified });
         }
@@ -714,7 +857,7 @@ pub fn wait_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), Engi
 }
 
 /// Drains whatever the child has written so far, for error context.
-fn drain_output_head(child: &mut EngineChild) -> String {
+pub fn drain_output_head(child: &mut EngineChild) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -754,7 +897,7 @@ fn reap(child: &EngineChild) -> String {
 
 /// Normal termination: `SIGTERM` → grace deadline → `SIGKILL`, exit confirmed
 /// via pidfd, child reaped (§9.4 step 3). Returns the exit description.
-pub fn terminate(child: EngineChild, grace: Duration) -> io::Result<String> {
+pub fn terminate(child: &EngineChild, grace: Duration) -> io::Result<String> {
     if !has_exited(&child.pidfd) {
         pidfd_kill(&child.pidfd, libc::SIGTERM)?;
         if !poll_readable(child.pidfd.as_raw_fd(), grace) {
@@ -767,10 +910,12 @@ pub fn terminate(child: EngineChild, grace: Duration) -> io::Result<String> {
             }
         }
     }
-    Ok(reap(&child))
+    Ok(reap(child))
 }
 
 /// The outcome of one §9.4 transaction.
+#[cfg(test)]
+#[allow(dead_code)] // Used by the path-included Linux integration harness.
 pub struct GenerationOutcome {
     /// The running engine after the transaction: the promoted candidate, the
     /// recovered old generation, or `None`.
@@ -788,6 +933,8 @@ pub struct GenerationOutcome {
 ///
 /// Publish points (steps 2, 4-latch, 5) are no-ops until the data plane exists
 /// (Phase 4+); their positions in the sequence are already final.
+#[cfg(test)]
+#[allow(dead_code)] // Used by the path-included Linux integration harness.
 pub fn run_generation_switch(
     layout: &Layout,
     spec: &EngineSpec,
@@ -857,33 +1004,68 @@ pub fn run_generation_switch(
 
     // ---- step 3: terminate the old child. Its generation file is never
     // renamed or overwritten, so step 6 can restart from it byte-identically.
-    let old = current.map(|old_child| {
-        let old_params = old_child.params;
-        let old_path = old_child.effective.clone();
-        match terminate(old_child, TERMINATE_GRACE) {
-            Ok(exit) => log.push(format!(
-                "generation {}: old engine stopped ({exit})",
-                old_params.generation
-            )),
-            Err(e) => log.push(format!(
-                "generation {}: old engine termination error: {e}",
-                old_params.generation
-            )),
+    let old = match current {
+        None => None,
+        Some(old_child) => {
+            let old_params = old_child.params;
+            let old_path = old_child.effective.clone();
+            match terminate(&old_child, TERMINATE_GRACE) {
+                Ok(exit) => {
+                    log.push(format!(
+                        "generation {}: old engine stopped ({exit})",
+                        old_params.generation
+                    ));
+                    Some((old_params, old_path))
+                }
+                Err(e) => {
+                    log.push(format!(
+                        "generation {}: old engine termination error: {e}; candidate not started",
+                        old_params.generation
+                    ));
+                    let _ = fs::remove_file(&candidate_path);
+                    return GenerationOutcome {
+                        // Keep ownership even when termination is uncertain.
+                        // Starting a candidate here would violate the one-engine invariant.
+                        engine: Some(old_child),
+                        result: Err(EngineError::Io(e)),
+                        recovery: None,
+                        log,
+                    };
+                }
+            }
         }
-        (old_params, old_path)
-    });
+    };
 
     // ---- step 4: clear fault_latch while inactive (no-op, Phase 4+); start
     // the candidate; verify the four sockets by PID + inode.
-    let candidate_result = spawn(spec, &candidate_path, params).and_then(|mut child| {
-        wait_ready(&mut child, spec).map(|()| child).map_err(|e| {
-            // The candidate failed readiness: stop it before recovery.
-            if let EngineError::Exited { .. } = e {
-                // already exited and reaped by wait_ready
-            }
-            e
-        })
-    });
+    let candidate_result = match spawn(spec, &candidate_path, params) {
+        Err(e) => Err(e),
+        Ok(mut child) => match wait_ready(&mut child, spec) {
+            Ok(()) => Ok(child),
+            Err(e @ EngineError::Exited { .. }) => Err(e),
+            Err(e) => match terminate(&child, TERMINATE_GRACE) {
+                Ok(exit) => {
+                    log.push(format!(
+                        "generation {generation}: unready candidate stopped ({exit})"
+                    ));
+                    Err(e)
+                }
+                Err(stop_error) => {
+                    log.push(format!(
+                        "generation {generation}: unready candidate could not be stopped: \
+                         {stop_error}; recovery suppressed"
+                    ));
+                    let _ = fs::remove_file(&candidate_path);
+                    return GenerationOutcome {
+                        engine: Some(child),
+                        result: Err(e),
+                        recovery: Some(Err(EngineError::Io(stop_error))),
+                        log,
+                    };
+                }
+            },
+        },
+    };
 
     match candidate_result {
         Ok(child) => {
@@ -925,8 +1107,35 @@ pub fn run_generation_switch(
             let (engine, recovery) = match old {
                 None => (None, None),
                 Some((old_params, old_path)) => {
-                    let recovered = spawn(spec, &old_path, old_params)
-                        .and_then(|mut child| wait_ready(&mut child, spec).map(|()| child));
+                    let recovered = match spawn(spec, &old_path, old_params) {
+                        Err(e) => Err(e),
+                        Ok(mut child) => match wait_ready(&mut child, spec) {
+                            Ok(()) => Ok(child),
+                            Err(e @ EngineError::Exited { .. }) => Err(e),
+                            Err(e) => match terminate(&child, TERMINATE_GRACE) {
+                                Ok(exit) => {
+                                    log.push(format!(
+                                        "generation {}: unready recovery stopped ({exit})",
+                                        old_params.generation
+                                    ));
+                                    Err(e)
+                                }
+                                Err(stop_error) => {
+                                    log.push(format!(
+                                        "generation {}: unready recovery could not be stopped: \
+                                         {stop_error}",
+                                        old_params.generation
+                                    ));
+                                    return GenerationOutcome {
+                                        engine: Some(child),
+                                        result: Err(candidate_err),
+                                        recovery: Some(Err(EngineError::Io(stop_error))),
+                                        log,
+                                    };
+                                }
+                            },
+                        },
+                    };
                     match recovered {
                         Ok(child) => {
                             log.push(format!(
@@ -959,7 +1168,9 @@ pub fn run_generation_switch(
 /// Graceful stop outside a switch: publish `active=0` first (no-op until the
 /// data plane exists), then terminate, then delete the generation file — it is
 /// a generated artifact and cold start regenerates it.
-pub fn stop_engine(child: EngineChild) -> io::Result<String> {
+#[cfg(test)]
+#[allow(dead_code)] // Used by the path-included Linux integration harness.
+pub fn stop_engine(child: &EngineChild) -> io::Result<String> {
     let effective = child.effective.clone();
     let exit = terminate(child, TERMINATE_GRACE)?;
     match fs::remove_file(&effective) {
@@ -981,6 +1192,23 @@ mod tests {
             assert!(a >= LISTEN_PORT_MIN && b >= LISTEN_PORT_MIN);
             assert_ne!(a, b);
         }
+    }
+
+    #[test]
+    fn port_reservation_checks_both_transports() {
+        let held_udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("hold UDP port");
+        let udp_port = held_udp.local_addr().expect("UDP address").port();
+        let udp_error = PortReservation::bind(IpAddr::V4(Ipv4Addr::UNSPECIFIED), udp_port)
+            .err()
+            .expect("occupied UDP port must be rejected");
+        assert_eq!(udp_error.kind(), io::ErrorKind::AddrInUse);
+
+        let held_tcp = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("hold TCP port");
+        let tcp_port = held_tcp.local_addr().expect("TCP address").port();
+        let tcp_error = PortReservation::bind(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tcp_port)
+            .err()
+            .expect("occupied TCP port must be rejected");
+        assert_eq!(tcp_error.kind(), io::ErrorKind::AddrInUse);
     }
 
     #[test]

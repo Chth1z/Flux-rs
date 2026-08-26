@@ -13,6 +13,7 @@
 //!    untouched file; the candidate error is preserved.
 //! 5. Graceful stop — SIGTERM path, effective file removed.
 //! 6. Cold-start failure — a crashing engine yields `engine_exited`, no child.
+//! 7. A live but never-ready candidate is terminated and cannot become orphaned.
 //!
 //! Requires a kernel with `udp_diag` (CI runners and devices have it; some
 //! sandboxes do not — the run degrades to a skip with a loud note).
@@ -88,6 +89,7 @@ mod tests {
         let child = failed_candidate_recovers_old_generation(&layout, &spec, &user, child);
         graceful_stop(&layout, child);
         cold_start_failure_reports_exit(&layout, &spec, &user);
+        never_ready_candidate_is_reaped(&layout, &spec, &user);
 
         std::fs::remove_dir_all(layout.root()).expect("cleanup");
         println!("engine_lifecycle: all scenarios passed");
@@ -260,7 +262,7 @@ mod tests {
     fn graceful_stop(layout: &Layout, child: EngineChild) {
         let pid = child.pid;
         let effective = child.effective.clone();
-        let exit = engine::stop_engine(child).expect("graceful stop");
+        let exit = engine::stop_engine(&child).expect("graceful stop");
         assert_eq!(exit, "signal=15", "clean SIGTERM termination");
         assert!(!effective.exists(), "generation file removed on stop");
         assert!(engine::proc_start_time(pid).is_none(), "pid {pid} gone");
@@ -289,5 +291,34 @@ mod tests {
             "failed candidate's file removed"
         );
         println!("PASS cold-start failure reported as engine_exited:code=7");
+    }
+
+    fn never_ready_candidate_is_reaped(
+        layout: &Layout,
+        spec: &EngineSpec,
+        user: &serde_json::Value,
+    ) {
+        let pid_file = layout.root().join("never-ready.pid");
+        std::env::set_var("FLUX_FAKE_NOT_READY", "1");
+        std::env::set_var("FLUX_FAKE_PID_FILE", &pid_file);
+        let outcome = engine::run_generation_switch(layout, spec, user, None, 5);
+        std::env::remove_var("FLUX_FAKE_NOT_READY");
+        std::env::remove_var("FLUX_FAKE_PID_FILE");
+
+        assert!(matches!(outcome.result, Err(EngineError::NotReady { .. })));
+        assert!(
+            outcome.engine.is_none(),
+            "unready child must not remain owned"
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("fake engine wrote its pid")
+            .parse()
+            .expect("pid");
+        assert!(
+            engine::proc_start_time(pid).is_none(),
+            "never-ready candidate pid {pid} must be terminated and reaped"
+        );
+        let _ = std::fs::remove_file(pid_file);
+        println!("PASS never-ready candidate terminated (pid {pid})");
     }
 }

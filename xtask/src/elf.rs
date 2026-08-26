@@ -10,6 +10,14 @@ fn u16le(b: &[u8], off: usize) -> u64 {
     u64::from(u16::from_le_bytes([b[off], b[off + 1]]))
 }
 
+fn u32le(b: &[u8], off: usize) -> u64 {
+    u64::from(u32::from_le_bytes(
+        b[off..off + 4]
+            .try_into()
+            .expect("bounds checked by caller"),
+    ))
+}
+
 fn u64le(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(
         b[off..off + 8]
@@ -55,6 +63,59 @@ pub fn load_aligns(elf: &[u8]) -> Result<Vec<u64>, String> {
         return Err("no PT_LOAD segments".into());
     }
     Ok(aligns)
+}
+
+/// Returns one named ELF64 section without interpreting its payload.
+pub fn section<'a>(elf: &'a [u8], wanted: &str) -> Result<&'a [u8], String> {
+    if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return Err("not a little-endian ELF64 file".into());
+    }
+    let shoff = u64le(elf, 0x28) as usize;
+    let shentsize = u16le(elf, 0x3a) as usize;
+    let shnum = u16le(elf, 0x3c) as usize;
+    let shstrndx = u16le(elf, 0x3e) as usize;
+    if shentsize < 64 || shstrndx >= shnum {
+        return Err("invalid ELF section-header table".into());
+    }
+    let header = |index: usize| -> Result<&[u8], String> {
+        let start = shoff
+            .checked_add(
+                index
+                    .checked_mul(shentsize)
+                    .ok_or("section offset overflow")?,
+            )
+            .ok_or("section offset overflow")?;
+        elf.get(start..start + shentsize)
+            .ok_or_else(|| format!("section header {index} is out of bounds"))
+    };
+    let strings_header = header(shstrndx)?;
+    let strings_offset = u64le(strings_header, 0x18) as usize;
+    let strings_size = u64le(strings_header, 0x20) as usize;
+    let strings = elf
+        .get(strings_offset..strings_offset + strings_size)
+        .ok_or("section-name string table is out of bounds")?;
+
+    for index in 0..shnum {
+        let sh = header(index)?;
+        let name_offset = u32le(sh, 0) as usize;
+        let Some(tail) = strings.get(name_offset..) else {
+            return Err(format!("section {index} has an invalid name offset"));
+        };
+        let end = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(tail.len());
+        let name = std::str::from_utf8(&tail[..end])
+            .map_err(|_| format!("section {index} name is not UTF-8"))?;
+        if name == wanted {
+            let offset = u64le(sh, 0x18) as usize;
+            let size = u64le(sh, 0x20) as usize;
+            return elf
+                .get(offset..offset + size)
+                .ok_or_else(|| format!("section `{wanted}` is out of bounds"));
+        }
+    }
+    Err(format!("ELF section `{wanted}` is missing"))
 }
 
 #[cfg(test)]
