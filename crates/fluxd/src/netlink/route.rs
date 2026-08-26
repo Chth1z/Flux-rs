@@ -4,6 +4,8 @@ use std::io;
 use std::mem::size_of;
 use std::os::fd::RawFd;
 
+#[cfg(test)]
+use super::wire::NdMsg;
 use super::wire::{
     as_bytes, attr_cstr, attr_u32, attrs, read_struct, DrainResult, FibRuleHdr, IfAddrMsg,
     IfInfoMsg, MessageBuilder, NonblockingSocket, RequestSocket, RtMsg, TcMsg, NLM_F_ACK,
@@ -15,6 +17,8 @@ const RTM_DELLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_GETADDR: u16 = 22;
+#[cfg(test)]
+const RTM_NEWNEIGH: u16 = 28;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
 const RTM_GETROUTE: u16 = 26;
@@ -41,6 +45,11 @@ const VETH_INFO_PEER: u16 = 1;
 
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+
+#[cfg(test)]
+const NDA_DST: u16 = 1;
+#[cfg(test)]
+const NDA_LLADDR: u16 = 2;
 
 const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
@@ -82,6 +91,12 @@ pub const ETH_P_ALL: u16 = 0x0003;
 const RT_TABLE_UNSPEC: u8 = 0;
 const RT_SCOPE_HOST: u8 = 254;
 const RTN_LOCAL: u8 = 2;
+#[cfg(test)]
+const NUD_PERMANENT: u16 = 0x80;
+#[cfg(test)]
+const RT_SCOPE_UNIVERSE: u8 = 0;
+#[cfg(test)]
+const RTN_UNICAST: u8 = 1;
 const FR_ACT_TO_TBL: u8 = 1;
 
 const EVENT_GROUPS: u32 = 1 // RTNLGRP_LINK
@@ -175,6 +190,7 @@ pub struct Filter {
     pub protocol: u16,
     pub kind: Option<String>,
     pub direct_action: bool,
+    pub bpf_flags: Option<u32>,
     pub prog_id: Option<u32>,
     pub prog_tag: Option<[u8; 8]>,
     pub prog_name: Option<String>,
@@ -195,6 +211,7 @@ pub struct FilterIdentity {
     pub prog_id: u32,
     pub prog_tag: [u8; 8],
     pub prog_name: String,
+    pub flags_gen: u32,
 }
 
 #[allow(dead_code)] // Phase 5 supplies program/map identity after BPF load.
@@ -210,6 +227,8 @@ impl FilterIdentity {
             && filter.protocol == self.protocol
             && filter.kind.as_deref() == Some("bpf")
             && filter.direct_action
+            && filter.bpf_flags == Some(TCA_BPF_FLAG_ACT_DIRECT)
+            && filter.flags_gen == Some(self.flags_gen)
             && filter.prog_id == Some(self.prog_id)
             && filter.prog_tag == Some(self.prog_tag)
             && filter.prog_name.as_deref() == Some(self.prog_name.as_str())
@@ -338,6 +357,48 @@ impl RouteNetlink {
             .filter(|message| message.kind == RTM_NEWTFILTER)
             .map(|message| parse_filter(&message.payload))
             .collect()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn add_ipv4_address(
+        &mut self,
+        ifindex: u32,
+        address: [u8; 4],
+        prefix_len: u8,
+    ) -> io::Result<()> {
+        let body = IfAddrMsg {
+            family: libc::AF_INET as u8,
+            prefix_len,
+            scope: RT_SCOPE_UNIVERSE,
+            index: ifindex,
+            ..IfAddrMsg::default()
+        };
+        self.mutate_flags_with_attrs(RTM_NEWADDR, true, as_bytes(&body), |request| {
+            request.attr(IFA_LOCAL, &address);
+            request.attr(IFA_ADDRESS, &address);
+        })
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn add_ipv4_neighbor(
+        &mut self,
+        ifindex: u32,
+        address: [u8; 4],
+        lladdr: &[u8],
+    ) -> io::Result<()> {
+        let body = NdMsg {
+            family: libc::AF_INET as u8,
+            ifindex: ifindex as i32,
+            state: NUD_PERMANENT,
+            kind: RTN_UNICAST,
+            ..NdMsg::default()
+        };
+        self.mutate_flags_with_attrs(RTM_NEWNEIGH, true, as_bytes(&body), |request| {
+            request.attr(NDA_DST, &address);
+            request.attr(NDA_LLADDR, lladdr);
+        })
     }
 
     pub fn create_veth(&mut self, host: &str, peer: &str, mtu: u32) -> io::Result<()> {
@@ -815,6 +876,7 @@ fn parse_filter(payload: &[u8]) -> io::Result<Filter> {
     let mut kind = None;
     let mut chain = 0;
     let mut direct_action = false;
+    let mut bpf_flags = None;
     let mut prog_id = None;
     let mut prog_tag = None;
     let mut prog_name = None;
@@ -837,7 +899,9 @@ fn parse_filter(payload: &[u8]) -> io::Result<Filter> {
                     }
                     match option.kind {
                         TCA_BPF_FLAGS => {
-                            direct_action = attr_u32(option)? & TCA_BPF_FLAG_ACT_DIRECT != 0
+                            let flags = attr_u32(option)?;
+                            direct_action = flags & TCA_BPF_FLAG_ACT_DIRECT != 0;
+                            bpf_flags = Some(flags);
                         }
                         TCA_BPF_FLAGS_GEN => flags_gen = Some(attr_u32(option)?),
                         TCA_BPF_TAG => {
@@ -870,6 +934,7 @@ fn parse_filter(payload: &[u8]) -> io::Result<Filter> {
         protocol: u16::from_be(header.info as u16),
         kind,
         direct_action,
+        bpf_flags,
         prog_id,
         prog_tag,
         prog_name,
@@ -908,6 +973,7 @@ mod tests {
             protocol: ETH_P_ALL,
             kind: Some("bpf".to_string()),
             direct_action: true,
+            bpf_flags: Some(TCA_BPF_FLAG_ACT_DIRECT),
             prog_id: Some(42),
             prog_tag: Some([1; 8]),
             prog_name: Some("flx_cap_l2".to_string()),
@@ -925,10 +991,14 @@ mod tests {
             prog_id: 42,
             prog_tag: [1; 8],
             prog_name: "flx_cap_l2".to_string(),
+            flags_gen: 0,
         };
         assert!(identity.matches(&filter));
         let mut foreign = filter.clone();
         foreign.chain = 7;
+        assert!(!identity.matches(&foreign));
+        let mut foreign = filter.clone();
+        foreign.flags_gen = Some(8);
         assert!(!identity.matches(&foreign));
         let mut foreign = filter;
         foreign.unknown_attrs = true;

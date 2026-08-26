@@ -16,6 +16,7 @@ pub const BPF_F_NO_PREALLOC: u32 = 1;
 pub const BPF_F_MARK_MANGLED_0: u64 = 1 << 6;
 
 const BPF_MAP_CREATE: u32 = 0;
+const BPF_MAP_LOOKUP_ELEM: u32 = 1;
 const BPF_MAP_UPDATE_ELEM: u32 = 2;
 const BPF_PROG_LOAD: u32 = 5;
 const BPF_PROG_GET_FD_BY_ID: u32 = 13;
@@ -172,6 +173,20 @@ pub fn update_map(map_fd: RawFd, key: &[u8], value: &[u8], flags: u64) -> io::Re
     bpf_zero(BPF_MAP_UPDATE_ELEM, &mut attr)
 }
 
+pub fn lookup_map(map_fd: RawFd, key: &[u8], value: &mut [u8]) -> io::Result<()> {
+    if key.is_empty() || value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "BPF map lookup needs non-empty key and value buffers",
+        ));
+    }
+    let mut attr = [0u8; 32];
+    put_u32(&mut attr, 0, fd_u32(map_fd)?);
+    put_u64(&mut attr, 8, ptr_u64(key.as_ptr()));
+    put_u64(&mut attr, 16, ptr_u64(value.as_mut_ptr()));
+    bpf_zero(BPF_MAP_LOOKUP_ELEM, &mut attr)
+}
+
 #[allow(dead_code)] // Phase 5 freezes each immutable control leaf.
 pub fn freeze_map(map_fd: RawFd) -> io::Result<()> {
     let mut attr = [0u8; 4];
@@ -280,6 +295,37 @@ pub fn program_info(fd: RawFd) -> io::Result<ProgramInfo> {
         xlated_prog_len: raw.xlated_prog_len,
         name: parse_name(&raw.name),
     })
+}
+
+pub fn program_map_ids(fd: RawFd) -> io::Result<Vec<u32>> {
+    let mut raw = RawProgramInfo::default();
+    object_info(fd, &mut raw)?;
+    let program_id = raw.id;
+    let capacity = raw.nr_map_ids as usize;
+    if capacity == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut ids = vec![0u32; capacity];
+    // The first info query also reports translated/JITed instruction lengths.
+    // Reusing those non-zero lengths with their still-null pointers makes the
+    // kernel attempt a copy_to_user(NULL, len) and return EFAULT. The second
+    // pass requests only map IDs, so all unrelated output-buffer lengths must
+    // be reset to zero before submitting the struct again.
+    raw.jited_prog_len = 0;
+    raw.xlated_prog_len = 0;
+    raw.nr_map_ids = capacity as u32;
+    raw.map_ids = ptr_u64(ids.as_mut_ptr());
+    object_info(fd, &mut raw)?;
+    if raw.id != program_id {
+        return Err(io::Error::from_raw_os_error(libc::ESTALE));
+    }
+    let reported = raw.nr_map_ids as usize;
+    if reported > capacity {
+        return Err(io::Error::from_raw_os_error(libc::E2BIG));
+    }
+    ids.truncate(reported);
+    Ok(ids)
 }
 
 pub fn program_fd_by_id_verified(id: u32) -> io::Result<OwnedFd> {

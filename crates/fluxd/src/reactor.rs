@@ -1,16 +1,17 @@
 //! Single-threaded epoll reactor: the event loop, the state machine and
 //! convergence.
 //!
-//! Implements the Phase 3 subset of blueprint §10.1, §10.4 and §26: event
+//! Implements blueprint §10.1, §10.4 and §26: event
 //! sources are signalfd, inotify, the control socket, child pidfds, child
-//! output pipes and one-shot timerfds (config debounce, crash backoff and
-//! engine-transaction deadlines).
-//! rtnetlink is included; the BPF fault ring buffer joins in Phase 5. **There is no
+//! output pipes and one-shot timerfds (config debounce, crash backoff,
+//! engine-transaction deadlines and TC liveness). rtnetlink and the BPF fault
+//! ring buffer are included. **There is no
 //! periodic polling anywhere** — that is a hard product constraint, not a
 //! preference; both timers here are one-shot and armed only by an event.
 //!
-//! Reachable states remain `Disabled` and `Inactive`: Phase 3 builds the owned
-//! network seam but Phase 4/5 still have to load and attach the BPF generation.
+//! Reachable states remain `Disabled` and `Inactive`: Phase 5 attaches the BPF
+//! generation under a frozen `active=0` control leaf; Phase 6 is the first
+//! phase allowed to publish `active=1`.
 //!
 //! Convergence is non-reentrant by construction: the loop is single-threaded,
 //! while each engine transaction advances one fd/timer event at a time. Later
@@ -68,6 +69,8 @@ const TOK_TX_OUT: u64 = 11;
 const TOK_CHECK_PIDFD: u64 = 12;
 const TOK_CHECK_OUT: u64 = 13;
 const TOK_RTNETLINK: u64 = 14;
+const TOK_TC_VERIFY: u64 = 15;
+const TOK_BPF_RING: u64 = 16;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -226,8 +229,10 @@ struct Reactor {
     backoff_timer: OwnedFd,
     control_timer: OwnedFd,
     engine_timer: OwnedFd,
+    tc_verify_timer: OwnedFd,
     server: ControlServer,
     dataplane: crate::dataplane::Manager,
+    bpf_ring_registered: bool,
     control_conns: BTreeMap<u64, PendingControl>,
     next_control_token: u64,
     engine: Option<EngineChild>,
@@ -266,6 +271,7 @@ impl Reactor {
         let backoff_timer = make_timerfd()?;
         let control_timer = make_timerfd()?;
         let engine_timer = make_timerfd()?;
+        let tc_verify_timer = make_timerfd()?;
         let server = ControlServer::bind(&layout.control_socket())?;
         let dataplane = crate::dataplane::Manager::open()?;
 
@@ -294,6 +300,7 @@ impl Reactor {
         epoll_add(&epoll, backoff_timer.as_raw_fd(), TOK_BACKOFF)?;
         epoll_add(&epoll, control_timer.as_raw_fd(), TOK_CONTROL_TIMEOUT)?;
         epoll_add(&epoll, engine_timer.as_raw_fd(), TOK_ENGINE_TIMER)?;
+        epoll_add(&epoll, tc_verify_timer.as_raw_fd(), TOK_TC_VERIFY)?;
         epoll_add(&epoll, dataplane.event_fd(), TOK_RTNETLINK)?;
 
         Ok(Self {
@@ -310,8 +317,10 @@ impl Reactor {
             backoff_timer,
             control_timer,
             engine_timer,
+            tc_verify_timer,
             server,
             dataplane,
+            bpf_ring_registered: false,
             control_conns: BTreeMap::new(),
             next_control_token: TOK_CONTROL_CONN_BASE,
             engine: None,
@@ -393,6 +402,8 @@ impl Reactor {
                     TOK_CHECK_PIDFD => self.handle_check_exit(),
                     TOK_CHECK_OUT => self.drain_check_output(),
                     TOK_RTNETLINK => self.handle_rtnetlink(),
+                    TOK_TC_VERIFY => self.handle_tc_verify(),
+                    TOK_BPF_RING => self.handle_bpf_faults(),
                     token if token >= TOK_CONTROL_CONN_BASE => {
                         if self.handle_control_connection(token) {
                             self.request_shutdown("stop request");
@@ -417,6 +428,11 @@ impl Reactor {
         }
         self.logger.log(&format!("shutting down ({why})"));
         self.shutdown_requested = true;
+        disarm_timer(&self.tc_verify_timer);
+        if let Err(error) = self.dataplane.cancel_attachment() {
+            self.logger
+                .log(&format!("cannot cancel TC verification: {error}"));
+        }
         self.engine_cancel_requested = true;
         self.cancel_engine_work();
     }
@@ -816,7 +832,44 @@ impl Reactor {
         }
     }
 
+    fn handle_tc_verify(&mut self) {
+        drain_timer(&self.tc_verify_timer);
+        match self.dataplane.advance_attachment() {
+            Ok(crate::dataplane::AttachmentProgress::Wait(delay)) => {
+                arm_timer(&self.tc_verify_timer, delay);
+            }
+            Ok(crate::dataplane::AttachmentProgress::Complete) => {
+                self.logger
+                    .log("Phase 5 TC attachment and liveness verification complete");
+            }
+            Err(error) => self.record_dataplane_error("TC liveness verification", error),
+        }
+    }
+
+    fn handle_bpf_faults(&mut self) {
+        match self.dataplane.drain_faults() {
+            Ok(events) => {
+                for event in events {
+                    self.logger.log(&format!(
+                        "BPF fault while inactive: generation={} family={} protocol={} reason={} seq={}",
+                        event.generation,
+                        event.family,
+                        event.protocol,
+                        event.reason,
+                        event.seq
+                    ));
+                }
+            }
+            Err(error) => self.record_dataplane_error("BPF fault ring", error),
+        }
+    }
+
     fn handle_engine_exit(&mut self) {
+        disarm_timer(&self.tc_verify_timer);
+        if let Err(error) = self.dataplane.cancel_attachment() {
+            self.logger
+                .log(&format!("cannot cancel TC verification: {error}"));
+        }
         let Some(mut child) = self.engine.take() else {
             return;
         };
@@ -901,7 +954,53 @@ impl Reactor {
         self.engine_line.clear();
     }
 
-    /// Reconciles the disable switch, Phase 3 network seam and engine domain.
+    fn register_bpf_ring(&mut self) -> io::Result<()> {
+        if self.bpf_ring_registered {
+            return Ok(());
+        }
+        let Some(fd) = self.dataplane.fault_fd() else {
+            return Ok(());
+        };
+        epoll_add(&self.epoll, fd, TOK_BPF_RING)?;
+        self.bpf_ring_registered = true;
+        Ok(())
+    }
+
+    fn start_phase5_attachment(&mut self, params: engine_config::EngineParams) {
+        if let Err(error) =
+            self.dataplane
+                .prepare_generation(params.generation, params.port_v4, params.port_v6)
+        {
+            self.record_dataplane_error("inactive control publication", error);
+            return;
+        }
+        match self.dataplane.begin_attachment() {
+            Ok(crate::dataplane::AttachmentProgress::Wait(delay)) => {
+                arm_timer(&self.tc_verify_timer, delay);
+            }
+            Ok(crate::dataplane::AttachmentProgress::Complete) => {
+                disarm_timer(&self.tc_verify_timer);
+                self.logger
+                    .log("Phase 5 TC attachment is complete under active=0");
+            }
+            Err(error) => self.record_dataplane_error("TC attachment", error),
+        }
+    }
+
+    fn record_dataplane_error(&mut self, operation: &str, error: crate::dataplane::DataplaneError) {
+        disarm_timer(&self.tc_verify_timer);
+        if let Err(cancel_error) = self.dataplane.cancel_attachment() {
+            self.logger.log(&format!(
+                "cannot cancel TC verification after {operation} failure: {cancel_error}"
+            ));
+        }
+        self.logger.log(&format!("{operation} failed: {error}"));
+        self.last_error = Some(error.code);
+        self.last_error_detail = Some(error.detail);
+        self.dataplane_error_active = true;
+    }
+
+    /// Reconciles the disable switch, network/BPF seam and engine domain.
     fn converge(&mut self, reason: &str) {
         if self.shutdown_requested {
             self.engine_cancel_requested = true;
@@ -909,6 +1008,11 @@ impl Reactor {
             return;
         }
         if self.layout.disabled() {
+            disarm_timer(&self.tc_verify_timer);
+            if let Err(error) = self.dataplane.cancel_attachment() {
+                self.logger
+                    .log(&format!("cannot cancel TC verification: {error}"));
+            }
             self.dataplane.converge(false);
             self.engine_cancel_requested = true;
             self.cancel_engine_work();
@@ -963,11 +1067,21 @@ impl Reactor {
             None
         };
 
-        self.dataplane.converge(true);
+        disarm_timer(&self.tc_verify_timer);
+        if let Err(error) = self.dataplane.cancel_attachment() {
+            self.record_dataplane_error("TC verification cancellation", error);
+            return;
+        }
+        self.dataplane.converge_with_bpf(true, crate::BPF_OBJECT);
         self.topology_changed = false;
-        if let Some(error) = &self.dataplane.status().error {
+        if let Some(error) = self.dataplane.status().error.clone() {
+            disarm_timer(&self.tc_verify_timer);
+            if let Err(cancel_error) = self.dataplane.cancel_attachment() {
+                self.logger
+                    .log(&format!("cannot cancel TC verification: {cancel_error}"));
+            }
             self.logger
-                .log(&format!("Phase 3 topology blocked: {error}"));
+                .log(&format!("data-plane convergence blocked: {error}"));
             self.last_error = Some(error.code.clone());
             self.last_error_detail = Some(error.detail.clone());
             self.dataplane_error_active = true;
@@ -975,6 +1089,13 @@ impl Reactor {
                 self.engine_cancel_requested = true;
                 self.cancel_engine_work();
             }
+            return;
+        }
+        if let Err(error) = self.register_bpf_ring() {
+            self.last_error = Some("ringbuf_epoll_register_failed".to_string());
+            self.last_error_detail = Some(error.to_string());
+            self.logger
+                .log(&format!("cannot register BPF fault ring: {error}"));
             return;
         }
         if self.dataplane_error_active {
@@ -993,6 +1114,9 @@ impl Reactor {
         self.reload_requested = false;
         self.config_changed = false;
         if !need_start && !need_switch {
+            if let Some(params) = self.engine.as_ref().map(|child| child.params) {
+                self.start_phase5_attachment(params);
+            }
             return;
         }
         let user = candidate_user.expect("a start or switch has a parsed candidate");
@@ -1410,7 +1534,8 @@ impl Reactor {
             return;
         }
         disarm_timer(&self.engine_timer);
-        self.generation = child.params.generation;
+        let params = child.params;
+        self.generation = params.generation;
         match role {
             WaitRole::Candidate(plan) => {
                 if let Some(old) = plan.old {
@@ -1436,6 +1561,7 @@ impl Reactor {
                 self.engine_cancel_requested = false;
             }
         }
+        self.start_phase5_attachment(params);
         self.run_queued_convergence();
         if self.engine_transaction.is_none() {
             self.complete_convergence_controls();
@@ -1789,8 +1915,8 @@ impl Reactor {
         Ok(user)
     }
 
-    /// Builds the §24.1 status response. Phase 3 still cannot publish Active:
-    /// that commit point requires the Phase 4 loader and Phase 5 attachment.
+    /// Builds the §24.1 status response. Phase 5 intentionally remains
+    /// Inactive: Phase 6 owns the first `active=1` publication.
     fn build_status(&self, ok: bool) -> Response {
         let disabled = self.layout.disabled();
         let state = if disabled && self.engine.is_none() && self.engine_transaction.is_none() {
@@ -1829,9 +1955,19 @@ impl Reactor {
             }
         } else {
             warnings.extend(self.dataplane.status().warnings.iter().cloned());
-            if self.dataplane.status().topology_ready {
+            if self.dataplane.status().attachment_ready {
                 warnings.push(
-                    "traffic is NOT proxied yet: Phase 3 owns the network seam, but no BPF generation is attached"
+                    "traffic is NOT proxied yet: Phase 5 TC programs are attached under a frozen active=0 control snapshot; Phase 6 policy activation is pending"
+                        .to_string(),
+                );
+            } else if self.dataplane.status().bpf_ready {
+                warnings.push(
+                    "traffic is NOT proxied yet: the inactive BPF runtime is ready and TC liveness verification is pending"
+                        .to_string(),
+                );
+            } else if self.dataplane.status().topology_ready {
+                warnings.push(
+                    "traffic is NOT proxied yet: the network seam is ready but no BPF runtime is loaded"
                         .to_string(),
                 );
             }

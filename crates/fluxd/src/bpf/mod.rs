@@ -24,7 +24,7 @@ use std::fmt;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use flux_core::abi::{FLUX_ABI_MAGIC, PROG_SECTIONS};
+use flux_core::abi::{Control, Counter, FLUX_ABI_MAGIC, PROG_SECTIONS};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[allow(unused_imports)] // MapSpec is part of the Phase 4 device-test API.
@@ -118,6 +118,8 @@ pub struct ProgramIdentity {
     pub tag: [u8; 8],
     pub xlated_prog_len: u32,
     pub input_insn_count: u32,
+    pub map_ids: Vec<u32>,
+    pub map_names: Vec<String>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -181,6 +183,14 @@ impl Runtime {
             let duplicate = sys::program_fd_by_id_verified(info.id)
                 .map_err(|error| LoadError::syscall("prog_id_recheck", Some(name), error))?;
             drop(duplicate);
+            let (map_ids, map_names) = program_maps(fd.as_raw_fd())
+                .map_err(|error| LoadError::syscall("prog_map_info", Some(name), error))?;
+            if map_names.as_slice() != expected_program_maps(name) {
+                return Err(LoadError::verify(
+                    "prog_map_set_mismatch",
+                    format!("{name}: kernel returned map set {map_names:?}"),
+                ));
+            }
             programs.push(ProgramHandle {
                 fd,
                 identity: ProgramIdentity {
@@ -189,6 +199,8 @@ impl Runtime {
                     tag: info.tag,
                     xlated_prog_len: info.xlated_prog_len,
                     input_insn_count: image.insn_count,
+                    map_ids,
+                    map_names,
                 },
             });
         }
@@ -231,6 +243,118 @@ impl Runtime {
             .find(|program| program.identity.name == name)
             .map(|program| program.fd.as_raw_fd())
     }
+
+    pub fn program_identity(&self, name: &str) -> Option<ProgramIdentity> {
+        self.programs
+            .iter()
+            .find(|program| program.identity.name == name)
+            .map(|program| program.identity.clone())
+    }
+
+    pub fn publish_control(&mut self, control: &Control) -> Result<(), LoadError> {
+        self.maps
+            .publish_control(control)
+            .map_err(|error| LoadError::syscall("control_publish", None, error))
+    }
+
+    pub fn counter_sum(&self, counter: Counter) -> Result<u64, LoadError> {
+        self.maps
+            .counter_sum(counter)
+            .map_err(|error| LoadError::syscall("counter_read", None, error))
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn update_uid_mode(&self, uid: u32, mode: u8) -> Result<(), LoadError> {
+        self.maps
+            .update_uid_mode(uid, mode)
+            .map_err(|error| LoadError::syscall("uid_policy_update", None, error))
+    }
+}
+
+/// Re-opens an attached program and proves that the netlink-reported identity
+/// and the complete map-name set still describe one of this build's entries.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn attached_program_owned(id: u32, name: &str, tag: [u8; 8]) -> Result<bool, LoadError> {
+    if !PROG_SECTIONS.iter().any(|(expected, _)| *expected == name) {
+        return Ok(false);
+    }
+    let fd = match sys::program_fd_by_id_verified(id) {
+        Ok(fd) => fd,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(false),
+        Err(error) => return Err(LoadError::syscall("prog_id_recheck", Some(name), error)),
+    };
+    let info = sys::program_info(fd.as_raw_fd())
+        .map_err(|error| LoadError::syscall("prog_info", Some(name), error))?;
+    if info.program_type != sys::BPF_PROG_TYPE_SCHED_CLS
+        || info.id != id
+        || info.name != name
+        || info.tag != tag
+    {
+        return Ok(false);
+    }
+    let (_, map_names) = program_maps(fd.as_raw_fd())
+        .map_err(|error| LoadError::syscall("prog_map_info", Some(name), error))?;
+    Ok(map_names.as_slice() == expected_program_maps(name))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn program_maps(fd: i32) -> std::io::Result<(Vec<u32>, Vec<String>)> {
+    let mut ids = sys::program_map_ids(fd)?;
+    ids.sort_unstable();
+    ids.dedup();
+    let mut names = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let map_fd = sys::map_fd_by_id_verified(*id)?;
+        names.push(sys::map_info(map_fd.as_raw_fd())?.name);
+    }
+    names.sort();
+    Ok((ids, names))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn expected_program_maps(name: &str) -> &'static [String] {
+    use std::sync::OnceLock;
+
+    static CAPTURE: OnceLock<Vec<String>> = OnceLock::new();
+    static INGRESS: OnceLock<Vec<String>> = OnceLock::new();
+    static VERIFY: OnceLock<Vec<String>> = OnceLock::new();
+    match name {
+        flux_core::abi::PROG_CAP_L2 | flux_core::abi::PROG_CAP_L3 => CAPTURE.get_or_init(|| {
+            sorted_names(&[
+                flux_core::abi::MAP_UID_POLICY,
+                flux_core::abi::MAP_BYPASS_V4,
+                flux_core::abi::MAP_BYPASS_V6,
+                flux_core::abi::MAP_TCP_DECISION,
+                flux_core::abi::MAP_CONTROL_ROOT,
+                flux_core::abi::MAP_FAULT_LATCH,
+                flux_core::abi::MAP_FAULT_EVENTS,
+                flux_core::abi::MAP_COUNTERS,
+            ])
+        }),
+        flux_core::abi::PROG_IN => INGRESS.get_or_init(|| {
+            sorted_names(&[
+                flux_core::abi::MAP_CONTROL_ROOT,
+                flux_core::abi::MAP_FAULT_LATCH,
+                flux_core::abi::MAP_FAULT_EVENTS,
+                flux_core::abi::MAP_COUNTERS,
+            ])
+        }),
+        flux_core::abi::PROG_VERIFY => {
+            VERIFY.get_or_init(|| sorted_names(&[flux_core::abi::MAP_COUNTERS]))
+        }
+        _ => &[],
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sorted_names(names: &[&str]) -> Vec<String> {
+    let mut names = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 /// Confirms that a just-dropped Phase 4 runtime left no unpinned kernel

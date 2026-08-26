@@ -671,8 +671,9 @@ int flx_verify(struct __sk_buff *skb)
 // Ethernet-like egress (Wi-Fi and friends). Attached at chain 0, direct-action,
 // protocol all, handle 0x1, at a preference chosen by dumping the parent first
 // (FLUX_TC_PREF_PREFERRED and friends -- pref 1 is NOT ours to assume; Samsung
-// holds it on wlan0 on the measured device). It MUST be the first applicable
-// classifier so that TC_ACT_UNSPEC still reaches AOSP/OEM filters.
+// holds it on wlan0 on the measured device). Positive liveness verification
+// proves that lower-preference classifiers do not terminate before this one;
+// TC_ACT_UNSPEC then continues to every later AOSP/OEM filter.
 SEC(FLUX_SEC_CAP_L2)
 int flx_cap_l2(struct __sk_buff *skb)
 {

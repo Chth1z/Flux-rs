@@ -52,6 +52,19 @@ pub(crate) struct IfAddrMsg {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+#[cfg(test)]
+pub(crate) struct NdMsg {
+    pub family: u8,
+    pub pad1: u8,
+    pub pad2: u16,
+    pub ifindex: i32,
+    pub state: u16,
+    pub flags: u8,
+    pub kind: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct RtMsg {
     pub family: u8,
     pub dst_len: u8,

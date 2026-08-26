@@ -1,8 +1,8 @@
-//! Phase 3 network-object ownership and interface admission.
+//! Network-object ownership, interface admission and Phase 5 TC attachment.
 //!
 //! This module coordinates typed rtnetlink operations. It does not construct
-//! raw messages and it does not load BPF programs; loading is Phase 4 and
-//! attaching a live generation is Phase 5. See blueprint §8 and §17.6.
+//! raw messages; the platform manager owns the BPF runtime and attachment
+//! lifecycle. See blueprint §8 and implementation plan §17.6-§17.8.
 
 #![cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 
@@ -10,5 +10,8 @@
 #[path = "dataplane/platform.rs"]
 mod platform;
 
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+#[allow(unused_imports)]
+pub use platform::TestFilterSpec;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub use platform::Manager;
+pub use platform::{AttachmentProgress, DataplaneError, Manager};

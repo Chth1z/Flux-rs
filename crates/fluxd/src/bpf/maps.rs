@@ -5,7 +5,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use flux_core::abi::{self, Control, FaultKey, LpmV4Key, LpmV6Key, UidStats, MAP_NAMES};
+use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key, UidStats, MAP_NAMES};
 
 use super::sys::{self, MapCreate, BPF_F_NO_PREALLOC};
 
@@ -169,6 +169,7 @@ struct MapHandle {
 
 pub struct MapSet {
     maps: Vec<MapHandle>,
+    control_published: bool,
 }
 
 pub struct MapCreateFailure {
@@ -226,7 +227,10 @@ impl MapSet {
                 error: io::Error::new(io::ErrorKind::InvalidData, "unexpected map remained"),
             });
         }
-        Ok(Self { maps })
+        Ok(Self {
+            maps,
+            control_published: false,
+        })
     }
 
     pub fn fd(&self, name: &str) -> Option<RawFd> {
@@ -236,9 +240,128 @@ impl MapSet {
             .map(|map| map.fd.as_raw_fd())
     }
 
+    pub fn publish_control(&mut self, control: &Control) -> io::Result<()> {
+        let leaf_index = self
+            .maps
+            .iter()
+            .position(|map| map.identity.spec.name == abi::MAP_CONTROL_LEAF)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "control_leaf map missing"))?;
+        let root_fd = self
+            .fd(abi::MAP_CONTROL_ROOT)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "control_root map missing"))?;
+
+        let replacement = if self.control_published {
+            Some(
+                create_one(spec(abi::MAP_CONTROL_LEAF), -1, None).map_err(|failure| {
+                    io::Error::new(
+                        failure.error.kind(),
+                        format!("{}: {}", failure.name, failure.error),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        let leaf_fd = replacement
+            .as_ref()
+            .map_or(self.maps[leaf_index].fd.as_raw_fd(), AsRawFd::as_raw_fd);
+        let replacement_info = replacement
+            .as_ref()
+            .map(|fd| sys::map_info(fd.as_raw_fd()))
+            .transpose()?;
+        if let Some(info) = &replacement_info {
+            verify_info(spec(abi::MAP_CONTROL_LEAF), info)?;
+        }
+        let zero = 0u32.to_ne_bytes();
+        sys::update_map(leaf_fd, &zero, as_bytes(control), 0)?;
+        sys::freeze_map(leaf_fd)?;
+        sys::update_map(root_fd, &zero, &(leaf_fd as u32).to_ne_bytes(), 0)?;
+
+        if let (Some(fd), Some(info)) = (replacement, replacement_info) {
+            let map_spec = spec(abi::MAP_CONTROL_LEAF);
+            self.maps[leaf_index] = MapHandle {
+                fd,
+                identity: MapIdentity {
+                    spec: map_spec,
+                    id: info.id,
+                    btf_id: info.btf_id,
+                    btf_key_type_id: info.btf_key_type_id,
+                    btf_value_type_id: info.btf_value_type_id,
+                },
+            };
+        }
+        self.control_published = true;
+        Ok(())
+    }
+
+    pub fn counter_sum(&self, counter: Counter) -> io::Result<u64> {
+        let fd = self
+            .fd(abi::MAP_COUNTERS)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "counters map missing"))?;
+        let cpus = possible_cpu_count()?;
+        let mut values = vec![0u8; cpus * size_of::<u64>()];
+        sys::lookup_map(fd, &(counter as u32).to_ne_bytes(), &mut values)?;
+        Ok(values
+            .chunks_exact(size_of::<u64>())
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("u64 chunk")))
+            .sum())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn update_uid_mode(&self, uid: u32, mode: u8) -> io::Result<()> {
+        let fd = self
+            .fd(abi::MAP_UID_POLICY)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uid_policy map missing"))?;
+        sys::update_map(fd, &uid.to_ne_bytes(), &[mode], 0)
+    }
+
     #[allow(dead_code)] // Read through Runtime by the Phase 4 device test.
     pub fn identities(&self) -> Vec<MapIdentity> {
         self.maps.iter().map(|map| map.identity.clone()).collect()
+    }
+}
+
+fn as_bytes<T>(value: &T) -> &[u8] {
+    // SAFETY: `value` remains alive for the returned slice and the byte view
+    // has exactly the size of T. Kernel ABI structs are copied, never retained.
+    unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+}
+
+fn possible_cpu_count() -> io::Result<usize> {
+    let text = std::fs::read_to_string("/sys/devices/system/cpu/possible")?;
+    let mut count = 0usize;
+    for item in text.trim().split(',') {
+        let mut bounds = item.split('-');
+        let start = bounds
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid cpu possible set")
+            })?;
+        let end = bounds
+            .next()
+            .map_or(Some(start), |value| value.parse::<usize>().ok())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid cpu possible range")
+            })?;
+        if bounds.next().is_some() || end < start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid cpu possible range",
+            ));
+        }
+        count = count
+            .checked_add(end - start + 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu count overflow"))?;
+    }
+    if count == 0 {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty cpu possible set",
+        ))
+    } else {
+        Ok(count)
     }
 }
 

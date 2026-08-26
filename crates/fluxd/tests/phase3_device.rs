@@ -11,6 +11,8 @@
 // intentionally unused in this test crate.
 #![allow(dead_code, unused_imports)]
 
+#[path = "../src/bpf/mod.rs"]
+mod bpf;
 #[path = "../src/dataplane.rs"]
 mod dataplane;
 #[path = "../src/netlink/mod.rs"]
