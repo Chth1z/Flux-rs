@@ -11,12 +11,25 @@ description = "The Flux-rs runtime: eBPF loader, network objects, reactor and en
 name = "fluxd"
 path = "src/main.rs"
 
+# harness = false: each test binary doubles as the fake engine when spawned
+# with sing-box argv (`run -c …`), which a libtest harness would misparse as
+# filter options. Their own main() runs the scenarios sequentially.
+[[test]]
+name = "engine_lifecycle"
+harness = false
+
+[[test]]
+name = "daemon_e2e"
+harness = false
+
 [dependencies]
 flux-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# target_os on Android is "android", NOT "linux" — the daemon must build for
+# both (the product ships on Android; Linux hosts run the tests).
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = { workspace = true }
 
 [lints.clippy]

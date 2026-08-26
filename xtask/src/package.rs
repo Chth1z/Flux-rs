@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
-const ALLOWLIST: [&str; 15] = [
+const ALLOWLIST: [&str; 16] = [
     "module.prop",
     "skip_mount",
     "customize.sh",
@@ -31,6 +31,7 @@ const ALLOWLIST: [&str; 15] = [
     "uninstall.sh",
     "bin/fluxd",
     "bin/sing-box",
+    "bin/observe.sh",
     "etc/default-flux.toml",
     "etc/default-sing-box.json",
     "engine.lock",
@@ -451,6 +452,7 @@ fn collect_entries(
     push("uninstall.sh", 0o755, text("module/uninstall.sh")?);
     push("bin/fluxd", 0o755, util::read_bytes(fluxd)?);
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
+    push("bin/observe.sh", 0o755, text("tools/phase0/observe.sh")?);
     push("etc/default-flux.toml", 0o644, text("module/flux.toml")?);
     push(
         "etc/default-sing-box.json",
@@ -521,21 +523,136 @@ fn dependencies_md(root: &Path) -> Result<String, String> {
 pub fn build_bpf() -> Result<(), String> {
     let root = util::repo_root();
     let out = root.join("target/xtask/flux.bpf.o");
+    let prefix_map = format!("{}=.", root.display());
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    util::run(
-        Command::new(util::clang())
-            .args([
-                "-target", "bpf", "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-mcpu=v3",
-            ])
-            .arg(format!("-I{}", root.join("bpf/include").display()))
-            .arg("-c")
-            .arg(root.join("bpf/flux.bpf.c"))
-            .arg("-o")
-            .arg(&out),
-        "bpf compile",
-    )?;
+    let mut command = Command::new(util::clang());
+    command
+        .args([
+            "-target", "bpf", "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-mcpu=v3",
+        ])
+        .arg(format!("-ffile-prefix-map={prefix_map}"))
+        .arg(format!("-fdebug-prefix-map={prefix_map}"))
+        .arg(format!("-I{}", root.join("bpf/include").display()));
+    if let Some(system_include) = multiarch_include() {
+        command.arg(format!("-I{}", system_include.display()));
+    }
+    command
+        .arg("-c")
+        .arg(root.join("bpf/flux.bpf.c"))
+        .arg("-o")
+        .arg(&out);
+    util::run(&mut command, "bpf compile")?;
     println!("build-bpf: OK — {}", out.display());
     Ok(())
+}
+
+/// Runs the pinned official host binary's real `check -c` against the exact
+/// shipped template after applying Flux's two generated inbounds.
+pub fn template_check() -> Result<(), String> {
+    let root = util::repo_root();
+    let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
+        .parse()
+        .map_err(|e| format!("parse engine.lock: {e}"))?;
+    let version = lock_str(&lock, "version")?;
+    let url = lock_str(&lock, "check_archive_url")?;
+    let binary_in_archive = lock_str(&lock, "check_binary_path_in_archive")?;
+    if !url.contains(version) || !binary_in_archive.contains(version) {
+        return Err("engine.lock host-check asset does not match engine version".into());
+    }
+
+    let cache = root.join("target/xtask/engine-check");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("create {}: {e}", cache.display()))?;
+    let archive = cache.join(
+        url.rsplit('/')
+            .next()
+            .expect("URL has at least one path component"),
+    );
+    if !archive.is_file() {
+        let partial = cache.join("download.partial");
+        util::run(
+            Command::new("curl")
+                .arg("-fsSL")
+                .arg("--retry")
+                .arg("3")
+                .arg("-o")
+                .arg(&partial)
+                .arg(url),
+            "template-check engine download",
+        )?;
+        std::fs::rename(&partial, &archive).map_err(|e| format!("rename download: {e}"))?;
+    }
+    let archive_bytes = util::read_bytes(&archive)?;
+    check_pin(&lock, "check_archive", &archive_bytes)?;
+
+    let extract = cache.join("extract");
+    let binary = extract.join(binary_in_archive);
+    if !binary.is_file() {
+        std::fs::create_dir_all(&extract)
+            .map_err(|e| format!("create {}: {e}", extract.display()))?;
+        util::run(
+            Command::new("tar")
+                .arg("-xzf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&extract)
+                .arg(binary_in_archive),
+            "template-check engine extraction",
+        )?;
+    }
+    check_pin(&lock, "check_binary", &util::read_bytes(&binary)?)?;
+
+    let template = util::read_text(&root.join("module/template.json"))?;
+    let user = flux_core::engine_config::parse_jsonc(&template)
+        .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
+    if !flux_core::engine_config::has_dns_hijack_rule(&user) {
+        return Err("module/template.json has no hijack-dns route rule".into());
+    }
+    let has_sniff = user
+        .get("route")
+        .and_then(|route| route.get("rules"))
+        .and_then(|rules| rules.as_array())
+        .is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|rule| rule.get("action").and_then(|v| v.as_str()) == Some("sniff"))
+        });
+    if !has_sniff {
+        return Err("module/template.json has no sniff route rule".into());
+    }
+    let params = flux_core::engine_config::EngineParams {
+        generation: 1,
+        port_v4: flux_core::abi::LISTEN_PORT_MIN,
+        port_v6: flux_core::abi::LISTEN_PORT_MIN + 1,
+    };
+    let effective = flux_core::engine_config::build_effective(&user, &params)
+        .map_err(|e| format!("build default effective config: {e:?}"))?;
+    let config = cache.join("effective-default.json");
+    util::write_bytes(&config, effective.to_string().as_bytes())?;
+    let output = Command::new(&binary)
+        .arg("check")
+        .arg("-c")
+        .arg(&config)
+        .output()
+        .map_err(|e| format!("run {}: {e}", binary.display()))?;
+    let _ = std::fs::remove_file(&config);
+    if !output.status.success() {
+        return Err(format!(
+            "official sing-box {version} rejected module/template.json: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    println!("template-check: OK — official sing-box {version} accepted the shipped template");
+    Ok(())
+}
+
+fn multiarch_include() -> Option<PathBuf> {
+    let output = Command::new("cc").arg("-print-multiarch").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let triple = std::str::from_utf8(&output.stdout).ok()?.trim();
+    let include = PathBuf::from("/usr/include").join(triple);
+    include.is_dir().then_some(include)
 }

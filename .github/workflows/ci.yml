@@ -45,6 +45,9 @@ jobs:
       - name: Doc check
         run: cargo xtask doc-check
 
+      - name: Official sing-box template check
+        run: cargo xtask template-check
+
   # flux-core is contractually pure logic (implementation.md 17.4 exit
   # criterion 1): no I/O, no unsafe, no async, no platform dependencies. A
   # Windows run is the cheapest way to keep that promise honest.
@@ -87,8 +90,27 @@ jobs:
       - name: ABI offset cross-check
         run: cargo xtask abi-check
 
+      # The SK_STORAGE value BTF is hand-written for kernel-5.15 stability.
+      # Compare its normalized struct layout against clang's actual .BTF
+      # section so a C ABI edit cannot leave the loader blob stale.
+      - name: BTF layout cross-check
+        run: cargo xtask btf-check
+
+      # Ubuntu's /usr/sbin/bpftool shim refuses to run when the hosted runner's
+      # Azure kernel is newer than the linux-tools archive. Build one pinned
+      # release instead. The shallow clone must include libbpf's submodule;
+      # omitting it was the reason the earlier phase-3 CI repair still failed.
       - name: Install bpftool
-        run: sudo apt-get install -y linux-tools-common linux-tools-generic
+        run: |
+          set -eu
+          sudo apt-get install -y build-essential libelf-dev zlib1g-dev libcap-dev
+          BPFTMP=$(mktemp -d)
+          git clone --depth 1 --branch v7.5.0 --recurse-submodules --shallow-submodules \
+            https://github.com/libbpf/bpftool.git "$BPFTMP/bpftool"
+          make -C "$BPFTMP/bpftool/src" -j"$(nproc)"
+          sudo install -m 0755 "$BPFTMP/bpftool/src/bpftool" /usr/local/bin/bpftool
+          sudo bpftool version
+          echo "BPFTOOL=/usr/local/bin/bpftool" >> "$GITHUB_ENV"
 
       # The cheapest gate the project has, and it has already earned its place:
       # the run that first exercised it found that every program carried an ELF
@@ -110,12 +132,12 @@ jobs:
             echo "flux.bpf.o not produced by the build step above"; exit 1
           fi
           echo "object: $obj"
-          sudo bpftool prog loadall "$obj" /sys/fs/bpf/fluxci
+          sudo "$BPFTOOL" prog loadall "$obj" /sys/fs/bpf/fluxci
           echo "--- loaded:"
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_in
-          sudo bpftool prog show pinned /sys/fs/bpf/fluxci/flx_verify
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_in
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_verify
           sudo rm -rf /sys/fs/bpf/fluxci
 
   android:
@@ -139,11 +161,16 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev
           sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
+      # GITHUB_PATH only takes effect in SUBSEQUENT steps, so appending to it
+      # and invoking cargo in the same step left the NDK linker
+      # (aarch64-linux-android31-clang) unreachable and the build failing with
+      # "linker not found". Export PATH for this shell directly instead.
       - name: Cross build
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          command -v aarch64-linux-android31-clang
           cargo build --workspace --target aarch64-linux-android
 
       # Blueprint 13.4 / implementation.md 17.4 exit criteria 4 and 5: two

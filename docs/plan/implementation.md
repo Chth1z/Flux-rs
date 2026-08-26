@@ -102,7 +102,7 @@
 
 **禁止**：
 
-- **`flux-core` 里不得出现任何 I/O、`unsafe`、async、netlink、BPF。** 它存在的意义就是"能在开发机上全速测"。
+- **`flux-core` 里不得出现任何 I/O、`unsafe`、async、netlink 或 BPF syscall/loader。** §12.3、§15.2(6) 明确要求的 BTF 字节构造器是纯序列化逻辑，属于唯一例外；它不能读取 ELF、访问内核或依赖平台。`flux-core` 存在的意义就是"能在开发机上全速测"。
 - 不要为阶段 2 的 reactor 预建 trait 或事件抽象。
 - 不要引入新的运行时依赖。依赖清单的变更属 `governance.md` §1.2，要问。
 
@@ -161,7 +161,7 @@
 
 ## 17.7 阶段 4 — BPF 加载器（只加载，不挂载）
 
-**交付物**：手写 ELF 解析、relocation、map 创建（12 张）、`SK_STORAGE` 的手写 BTF、ARRAY_OF_MAPS 内层 map、ringbuf；`fluxd check` 的 BPF 半。
+**交付物**：手写 ELF 解析、relocation、map 创建（12 张）、加载阶段 1 已生成的 `SK_STORAGE` 手写 BTF、ARRAY_OF_MAPS 内层 map、ringbuf；`fluxd check` 的 BPF 半。
 
 **必读**：`blueprint.md` §12（BPF 加载与最小依赖，全节，尤其 §12.7 的 11 条加固）、§6（ABI）、§7.5.0（arm64 无带返回值原子操作）、§7.5.1（verifier 陷阱清单）、`verification/phase0.md` §16.8。
 

@@ -22,6 +22,9 @@ use serde_json::{json, Value};
 
 use crate::abi::{LISTEN_V4_STR, LISTEN_V6_STR};
 
+/// Largest accepted user `sing-box.json`, in bytes (blueprint §9.6).
+pub const MAX_ENGINE_CONFIG_BYTES: usize = 8 * 1024 * 1024;
+
 /// Tag of the injected IPv4 tproxy inbound.
 pub const INBOUND_TAG_V4: &str = "flux-in-v4";
 /// Tag of the injected IPv6 tproxy inbound.
@@ -62,7 +65,7 @@ pub fn build_effective(user: &Value, params: &EngineParams) -> Result<Value, Eng
     let user_obj = user.as_object().ok_or(EngineConfigError::NotAnObject)?;
 
     match user_obj.get("inbounds") {
-        None | Some(Value::Null) => {}
+        None => {}
         Some(Value::Array(items)) if items.is_empty() => {}
         Some(Value::Array(_)) => return Err(EngineConfigError::UserSuppliedInbound),
         Some(_) => return Err(EngineConfigError::InboundsNotArray),
@@ -269,6 +272,15 @@ mod tests {
     fn empty_inbounds_array_is_accepted() {
         let user = json!({ "inbounds": [], "outbounds": [] });
         assert!(build_effective(&user, &params()).is_ok());
+    }
+
+    #[test]
+    fn null_inbounds_is_rejected_as_the_wrong_type() {
+        let user = json!({ "inbounds": null, "outbounds": [] });
+        assert_eq!(
+            build_effective(&user, &params()),
+            Err(EngineConfigError::InboundsNotArray)
+        );
     }
 
     #[test]

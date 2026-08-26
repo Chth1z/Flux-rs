@@ -14,6 +14,7 @@
 //!   still `0x1000` and is checked against `engine.lock` rather than rebuilt.
 
 mod abi_check;
+mod btf_check;
 mod cdefs;
 mod doc_check;
 mod elf;
@@ -31,6 +32,8 @@ cargo xtask <TASK>
 TASKS:
     ci             fmt --check, clippy -D warnings, test, deny, doc-check
     abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
+    btf-check      clang .BTF flux_decision layout vs the hand-written blob
+    template-check pinned official sing-box validates the shipped default template
     doc-check      the four mechanical documentation checks (implementation.md \u{a7}17.4)
     build-bpf      compile bpf/flux.bpf.c with clang
     package        build the module ZIP from the allowlist
@@ -88,6 +91,8 @@ fn main() -> ExitCode {
         }
         "ci" => ci(),
         "abi-check" => abi_check::run(),
+        "btf-check" => btf_check::run(),
+        "template-check" => package::template_check(),
         "doc-check" => doc_check::run(),
         "build-bpf" => package::build_bpf(),
         "package" => package::run(),

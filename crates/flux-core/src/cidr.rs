@@ -103,6 +103,9 @@ impl Ipv4Cidr {
         let addr: Ipv4Addr = addr_str
             .parse()
             .map_err(|_| CidrError::Malformed(text.to_string()))?;
+        if text != format!("{addr}/{prefix_len}") {
+            return Err(CidrError::Malformed(text.to_string()));
+        }
         let bits = u32::from(addr);
         let mask = mask32(prefix_len);
         if bits & !mask != 0 {
@@ -140,6 +143,9 @@ impl Ipv6Cidr {
         let addr: Ipv6Addr = addr_str
             .parse()
             .map_err(|_| CidrError::Malformed(text.to_string()))?;
+        if text != format!("{addr}/{prefix_len}") {
+            return Err(CidrError::Malformed(text.to_string()));
+        }
         let bits = u128::from(addr);
         let mask = mask128(prefix_len);
         if bits & !mask != 0 {
@@ -276,6 +282,14 @@ mod tests {
             Ipv6Cidr::parse("::/129"),
             Err(CidrError::PrefixTooLong(129))
         );
+        assert!(matches!(
+            Ipv6Cidr::parse("2001:0db8:0:1:0:0:0:2/128"),
+            Err(CidrError::Malformed(_))
+        ));
+        assert!(matches!(
+            Ipv6Cidr::parse("2001:DB8:0:1::2/128"),
+            Err(CidrError::Malformed(_))
+        ));
     }
 
     #[test]

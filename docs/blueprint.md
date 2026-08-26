@@ -207,7 +207,7 @@ Flux 不注入任何 `package_name` 规则，也不替用户维护包名表—�
 
 **待证**：`tun.NewPackageManager` 在目标设备上能否成功读取包数据库（失败时 sing-box 只 warn 并继续，届时 `package_name` 规则静默不匹配）。Phase 0 Q9 顺带验证。
 
-**用户 CIDR bypass 对 :53 同样生效。** 旧 cgroup 实现里有一段 `should_bypass_v4/v6` 在 `dport == 53` 时直接返回 0，即用户 bypass 永远豁免不了 53 端口（`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`）；CHIZI 的 `dns_mode: hijack` 更进一步，连 UID 判定都跳过（§0.5.3）。**0.9.0 都不采用。** 用户把 `192.168.0.0/16` 写进 `bypass_cidrs` 是在明确表达"局域网直连"，此时强行把 app 对路由器 `192.168.1.1:53` 的查询送进代理会打断本地名称解析，而且是用户无法关掉的隐藏行为。让显式配置说话；需要"DNS 永不 bypass"的用户不要把 DNS 服务器写进 bypass 即可。
+**用户 CIDR bypass 对 :53 同样生效。** 旧 cgroup 实现里有一段 `should_bypass_v4/v6` 在 `dport == 53` 时直接返回 0，即用户 bypass 永远豁免不了 53 端口（`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`）；CHIZI 的 `dns_mode: hijack` 更进一步，连 UID 判定都跳过（§0.5.3）。**0.9.0 都不采用。** 用户把 `192.168.0.0/16` 写进 `bypass_v4` 是在明确表达"局域网直连"，此时强行把 app 对路由器 `192.168.1.1:53` 的查询送进代理会打断本地名称解析，而且是用户无法关掉的隐藏行为。让显式配置说话；需要"DNS 永不 bypass"的用户不要把 DNS 服务器写进 bypass 即可。
 
 ## 1.4 选择单位与身份边界
 
@@ -562,6 +562,7 @@ Flux-rs/
 │   │       ├── cidr.rs            # v4/v6 CIDR canonicalize、固定 bypass、LPM key 编码
 │   │       ├── engine_config.rs   # 用户 sing-box.json 校验 + effective JSON 生成
 │   │       ├── abi.rs             # flux_abi.h 的 Rust 镜像 + size/offset 断言
+│   │       ├── btf.rs             # 纯字节逻辑：SK_STORAGE 所需的最小 BTF blob
 │   │       ├── control_wire.rs    # 控制协议请求/响应类型（serde）
 │   │       └── version.rs         # SemVer → versionCode / artifact 名
 │   └── fluxd/                     # Linux/Android 运行时（单一产品二进制）
@@ -1448,8 +1449,8 @@ pt_load_align   = "0x1000"   # 四段均为 0x1000 → 0.9.0 只支持 4 KiB bas
 
 | 状态 | 含义 |
 |---|---|
-| `Disabled` | `state/enabled == 0`。不启动 engine、不新建或激活数据面。 |
-| `Inactive` | `enabled == 1` 但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
+| `Disabled` | `disable` 文件存在（唯一开关真相源，C9，`docs/ux.md` §1）。不启动 engine、不新建或激活数据面。 |
+| `Inactive` | `disable` 文件不存在，但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
 | `Active` | control `active == 1`。 |
 
 hot candidate 无效时**保持当前 `Active` generation**并附带 candidate error，不创造第四种持久状态。daemon 重启后只从权威文件重新求值。
@@ -1535,7 +1536,7 @@ impl EngineChild {
 
 ```jsonc
 // Request
-{ "op": "status" | "check" | "enable" | "disable" | "reload" | "stop" }
+{ "protocol_version": 1, "op": "status" | "check" | "enable" | "disable" | "reload" | "stop" }
 
 // Response
 {
@@ -1561,7 +1562,7 @@ impl EngineChild {
 | 源 | 触发内容 |
 |---|---|
 | rtnetlink（`RTMGRP_LINK|IPV4_IFADDR|IPV6_IFADDR|IPV4_ROUTE|IPV6_ROUTE|IPV4_RULE|IPV6_RULE` + TC） | interface admission、**捕获侧漂移**（qdisc/filter 被 netd 删，§8.5.1）、**核心漂移**（veth/rule/route/ingress filter）、本机地址 bypass 更新。两类漂移的处置**不同**，见 §26 不变量 4 |
-| inotify | `config/` 目录与两个配置文件的原子替换；`/data/system/packages.list` |
+| inotify | 状态根的 `disable` 开关文件（C9）；`config/` 目录与两个配置文件的原子替换；`/data/system/packages.list` |
 | pidfd | sing-box 退出 |
 | BPF ringbuf | 已去重的 listener/assign fault |
 | signalfd | `SIGTERM`/`SIGINT`（停机）、`SIGHUP`（reload） |
@@ -1605,8 +1606,8 @@ socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**�
 | `fluxd daemon` | `service.sh` 调用；进入 reactor |
 | `fluxd status` | 输出 §10.3 的 Response（人类可读 + `--json`） |
 | `fluxd check` | 只读校验两份配置、package 解析、engine `check`；不改任何状态 |
-| `fluxd enable` | 原子写 `state/enabled=1` 并请求激活 |
-| `fluxd disable` | 写 0、publish `active=0`、停 engine；daemon 继续等待命令 |
+| `fluxd enable` | 删除 `disable` 文件并请求激活。**只是开关文件的前端**（C9），不是第二个真相源 |
+| `fluxd disable` | 创建 `disable` 文件、publish `active=0`、停 engine；daemon 继续等待命令 |
 | `fluxd reload` | 触发 policy 与 engine 候选流程 |
 | `fluxd stop` | service/uninstall 用：publish `active=0`、停 child、daemon 正常退出（exit 0） |
 
@@ -1620,17 +1621,17 @@ socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**�
 
 | 路径 | 权威内容 | 失败行为 |
 |---|---|---|
-| `state/enabled` | 唯一持久 enable 位，内容仅 `0\n` 或 `1\n` | 缺失/非法视为 0 |
+| `disable`（状态根直下） | 唯一持久开关：**存在 = 停用，不存在 = 启用**（C9，`docs/ux.md` §1）。由既有 inotify 源监视，运行时立即生效 | 只看存在性，不读内容 |
 | `config/flux.toml` | package 选择与 CIDR bypass | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `config/sing-box.json` | 唯一用户 engine 配置 | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `run/effective-sing-box.<generation>.json` | 对应 child 的一次性 immutable 生成物；事务中最多 current + candidate 两份 | 非权威源；daemon 重启后精确清理并从用户配置重建 |
 | `run/daemon.lock` / `run/control.sock` | 单实例与 IPC | — |
 
-不使用 last-known-good 持久副本；不在 TOML 里重复 `enabled`；不从 `module.prop` 推断运行状态；**Flux 从不反写用户配置**。fresh install 默认 disabled。
+不使用 last-known-good 持久副本；不在 TOML 里重复 `enabled`；不从 `module.prop` 推断运行状态；**Flux 从不反写用户配置**。fresh install 默认 disabled（由安装脚本创建 `disable` 文件，§13.2 的职责）。
 
 daemon 冷启动确认没有自己的存活 child 后，只枚举并删除 `run/` 中严格匹配 `effective-sing-box.<u64>.json` 格式且属 root 的普通文件。
 
-权限：状态根与子目录 `root:root 0700`；用户 config、`state/enabled`、generation effective 文件 `0600`；控制 socket `0600`。
+权限：状态根与子目录 `root:root 0700`；用户 config、generation effective 文件 `0600`；控制 socket `0600`。
 
 ## 11.2 `flux.toml` 唯一 schema
 
@@ -1640,10 +1641,8 @@ apps = [
   "10:com.example.chat",
 ]
 
-bypass_cidrs = [
-  "192.168.0.0/16",
-  "fd00::/8",
-]
+bypass_v4 = ["192.168.0.0/16"]
+bypass_v6 = ["fd00::/8"]
 ```
 
 硬限：文件 256 KiB；`apps` ≤ 1024；解析后总 UID entry ≤ 4096；IPv4/IPv6 LPM 各 ≤ 65536（**本机地址不占 LPM**，见 D20）；package 字符串与 CIDR 必须 canonical 且无重复。超限是清晰的配置错误，**不截断、不部分应用**。
@@ -2136,7 +2135,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | 双 Capture 外部接口（`Capture` vs `NativeCaptureConvergence`） | 设计 P1 #5 | 架构性关闭：不为单一实现创建 trait（§5） |
 | Capture Path 选择器骨架、`CapturePathId::ALL`、租约、digest、wire 残留 | 设计 P1 #7–#8、过度设计 P1 #5 | 架构性关闭：只有一条数据路径，代码里没有"路径"这个概念 |
 | ~12k 行 fwmark / TPROXY topology / canary facility / Passed catalog 仍在 `flux-core` 公开 API | 设计 P1 #9–#10 | 架构性关闭：不写 fwmark、不做 topology 规划、无 catalog（§3.1、§8.3） |
-| `forwarded_ingress` / `forwarded_proxy` 等已删配置键仍在类型与 digest 里 | 设计 P1 #11 | 架构性关闭：`flux.toml` 只有 `apps` 与 `bypass_cidrs`（§11.2） |
+| `forwarded_ingress` / `forwarded_proxy` 等已删配置键仍在类型与 digest 里 | 设计 P1 #11 | 架构性关闭：`flux.toml` 只有 `apps`、`bypass_v4` 与 `bypass_v6`（§11.2） |
 | Geek IPv4-only TCP 切片是第二条写入路径 | 设计 P1 #12 | 架构性关闭：一个数据面、两个 entry（按 L2/L3 布局，不按协议族分叉） |
 | god object（coordinator / engine_supervisor / generation_source 各数千行） | 设计 P1 #13、过度设计 P0 #1 | 架构性关闭：§5 的模块划分 + §10.5 的幂等收敛取代事务编排 |
 | `cidr4`/`cidr6` map 创建但未 pin | 设计 P1 #13b | 架构性关闭：不 pin 任何 map（§6.1） |
@@ -2209,8 +2208,8 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | 事件 | `Disabled` | `Inactive` | `Active` |
 |---|---|---|---|
 | 启动完成（bootstrap） | 停在 Disabled | 尝试完整激活序列（§8.7） | — |
-| `enable` | 写 `enabled=1` → 尝试激活 | 幂等，无操作 | 幂等，无操作 |
-| `disable` | 幂等 | 写 `enabled=0` → 停 engine → Disabled | publish `active=0` → 停 engine → 写 `enabled=0` → Disabled |
+| `enable`（删除 `disable` 文件） | 尝试激活 | 幂等，无操作 | 幂等，无操作 |
+| `disable`（创建 `disable` 文件） | 幂等 | 停 engine → Disabled | publish `active=0` → 停 engine → Disabled |
 | `reload` | 只重新校验配置，报告结果 | 重新尝试激活 | policy 域：§10.5 的加减法（**不动 `active`**）；engine 域：§9.4 的候选切换 |
 | `stop` | 正常退出(0) | publish `active=0` → 停 engine → 退出(0) | 同 Inactive |
 | `status` / `check` | 只读 | 只读 | 只读 |
