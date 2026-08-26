@@ -26,19 +26,19 @@ mod bpf;
 mod dataplane;
 mod packages;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod bugreport;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod checks;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod control;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod engine;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod layout;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod netlink;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod reactor;
 
 use std::process::ExitCode;
@@ -95,13 +95,13 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn dispatch(command: &str, _rest: &[String]) -> ExitCode {
     eprintln!("fluxd: `{command}` requires Linux/Android; this host build supports only `version` and `help`");
     ExitCode::from(69) // EX_UNAVAILABLE
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn dispatch(command: &str, rest: &[String]) -> ExitCode {
     use std::time::Duration;
 

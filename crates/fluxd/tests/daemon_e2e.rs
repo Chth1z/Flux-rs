@@ -23,18 +23,18 @@
 #[path = "common/fake_engine.rs"]
 mod fake_engine;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn main() {
-    println!("daemon_e2e: skipped (Linux-only)");
+    println!("daemon_e2e: skipped (Linux/Android-only)");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn main() {
     fake_engine::maybe_run();
     tests::run_all();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod tests {
     use std::io::Read;
     use std::net::Ipv4Addr;
