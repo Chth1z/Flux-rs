@@ -298,6 +298,13 @@ impl Reactor {
         let dataplane = crate::dataplane::Manager::open()?;
         let root_manager = root_manager_from_env();
 
+        // Fresh installs deliberately start Disabled, so convergence would
+        // otherwise never read the engine config and the public bootstrap
+        // marker could survive the daemon's first start. Initialise it before
+        // the state-machine branch; later config replacements are still caught
+        // by `read_engine_config` below.
+        initialize_generated_secret(&layout.sing_box_json())?;
+
         // Cold start: any effective file is a leftover of a previous instance
         // — we hold the lock and have no child yet (§11.1).
         let mut logger = logger;
