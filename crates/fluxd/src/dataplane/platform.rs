@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
@@ -5,8 +6,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
-use flux_core::abi::{self, Control, Counter};
-use flux_core::control_wire::IfaceStatus;
+#[cfg(test)]
+use flux_core::abi::UidStats;
+use flux_core::abi::{self, Control, Counter, LpmV4Key, LpmV6Key};
+use flux_core::control_wire::{Counters, IfaceStatus, PolicyCounts};
 
 use crate::bpf::{self, ProgramIdentity, RingBuffer, Runtime};
 use crate::netlink::{
@@ -28,6 +31,17 @@ const RT_SCOPE_UNIVERSE: u8 = 0;
 const RTN_UNICAST: u8 = 1;
 const TC_VERIFY_WINDOW: Duration = Duration::from_secs(2);
 const TC_VERIFY_MAX_ATTEMPTS: u8 = 3;
+const IFA_F_SECONDARY_TEMPORARY: u32 = 0x01;
+const IFA_F_DADFAILED: u32 = 0x08;
+const IFA_F_TENTATIVE: u32 = 0x40;
+const IFA_F_STABLE_PRIVACY: u32 = 0x800;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesiredPolicy {
+    pub selected_uids: BTreeSet<u32>,
+    pub bypass_v4: BTreeSet<LpmV4Key>,
+    pub bypass_v6: BTreeSet<LpmV6Key>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentProgress {
@@ -78,11 +92,13 @@ impl std::fmt::Display for DataplaneError {
 
 #[derive(Debug, Clone, Default)]
 pub struct DataplaneStatus {
+    pub active: bool,
     pub topology_ready: bool,
     pub bpf_ready: bool,
     pub attachment_ready: bool,
     pub ifaces: Vec<IfaceStatus>,
     pub sysctl: BTreeMap<String, i64>,
+    pub policy: PolicyCounts,
     pub warnings: Vec<String>,
     pub error: Option<DataplaneError>,
 }
@@ -97,6 +113,14 @@ pub struct Manager {
     last_control: Option<Control>,
     attached: Vec<OwnedFilter>,
     attachment: Option<AttachmentState>,
+    uid_modes: BTreeMap<u32, u8>,
+    bypass_v4: BTreeSet<LpmV4Key>,
+    bypass_v6: BTreeSet<LpmV6Key>,
+    self_v4: BTreeSet<[u8; 4]>,
+    self_v6: BTreeSet<[u8; 16]>,
+    address_seen_v4: BTreeMap<[u8; 4], u64>,
+    address_seen_v6: BTreeMap<[u8; 16], u64>,
+    address_tick: u64,
     status: DataplaneStatus,
 }
 
@@ -144,6 +168,8 @@ struct Verification {
     wait: Duration,
 }
 
+type SelfAddressSelection = (BTreeSet<[u8; 4]>, BTreeSet<[u8; 16]>, bool);
+
 impl Manager {
     /// Opens the event socket before the initial dump, closing the race between
     /// subscription and the first snapshot (§10.4.1).
@@ -165,6 +191,14 @@ impl Manager {
             last_control: None,
             attached: Vec::new(),
             attachment: None,
+            uid_modes: BTreeMap::new(),
+            bypass_v4: BTreeSet::new(),
+            bypass_v6: BTreeSet::new(),
+            self_v4: BTreeSet::new(),
+            self_v6: BTreeSet::new(),
+            address_seen_v4: BTreeMap::new(),
+            address_seen_v6: BTreeMap::new(),
+            address_tick: 0,
             status: DataplaneStatus::default(),
         })
     }
@@ -192,6 +226,33 @@ impl Manager {
                 .map_err(|error| DataplaneError::io("ringbuf_drain", error)),
             None => Ok(Vec::new()),
         }
+    }
+
+    pub fn counters(&self) -> Result<Counters, DataplaneError> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(Counters::default());
+        };
+        let read = |counter| runtime.counter_sum(counter).map_err(DataplaneError::bpf);
+        Ok(Counters {
+            admit_tcp: read(Counter::AdmitTcp)?,
+            direct_tcp: read(Counter::DirectTcp)?,
+            admit_udp: read(Counter::AdmitUdp)?,
+            drop_inactive: read(Counter::DropInactive)?,
+            drop_stale_gen: read(Counter::DropStaleGen)?,
+            drop_handoff: read(Counter::DropHandoff)?,
+            drop_udp_frag: read(Counter::DropUdpFrag)?,
+            drop_corrupt: read(Counter::DropCorrupt)?,
+            decision_alloc_fail: read(Counter::DecisionAllocFail)?,
+            egress_listener_miss: read(Counter::EgressListenerMiss)?,
+            in_assign_tcp: read(Counter::InAssignTcp)?,
+            in_assign_udp: read(Counter::InAssignUdp)?,
+            in_pass_established: read(Counter::InPassEstablished)?,
+            in_pass_fragment: read(Counter::InPassFragment)?,
+            in_drop_no_listener: read(Counter::InDropNoListener)?,
+            in_drop_assign: read(Counter::InDropAssign)?,
+            in_drop_parse: read(Counter::InDropParse)?,
+            in_drop_snapshot: read(Counter::InDropSnapshot)?,
+        })
     }
 
     /// Device integration tests need to leave the owner's phone exactly as it
@@ -285,6 +346,18 @@ impl Manager {
             .map_err(DataplaneError::bpf)
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn uid_stats_for_test(&self, uid: u32) -> Result<UidStats, DataplaneError> {
+        self.runtime
+            .as_ref()
+            .ok_or_else(|| {
+                DataplaneError::new("bpf_runtime_missing", "test runtime was not loaded")
+            })?
+            .uid_stats_sum(uid)
+            .map_err(DataplaneError::bpf)
+    }
+
     /// Phase 3-only compatibility seam used by its device lifecycle test.
     pub fn converge(&mut self, enabled: bool) {
         self.converge_inner(enabled, None);
@@ -299,6 +372,7 @@ impl Manager {
     fn converge_inner(&mut self, enabled: bool, object: Option<&[u8]>) {
         if self.test_bypass {
             self.status = DataplaneStatus {
+                policy: self.status.policy,
                 warnings: vec![
                     "no data plane: debug-only daemon integration-test bypass".to_string()
                 ],
@@ -308,7 +382,9 @@ impl Manager {
         }
 
         let mut next = DataplaneStatus {
+            active: self.status.active,
             sysctl: read_status_sysctls(),
+            policy: self.status.policy,
             ..DataplaneStatus::default()
         };
 
@@ -324,6 +400,12 @@ impl Manager {
         }
 
         if !enabled {
+            if let Err(error) = self.publish_inactive() {
+                next.error = Some(error);
+                self.status = next;
+                return;
+            }
+            next.active = false;
             self.status = next;
             return;
         }
@@ -334,7 +416,9 @@ impl Manager {
             return;
         }
 
-        if let Err(error) = self.ensure_topology() {
+        let topology = self.ensure_topology();
+        next.active = self.status.active;
+        if let Err(error) = topology {
             next.error = Some(error);
             self.status = next;
             return;
@@ -359,7 +443,7 @@ impl Manager {
                         "phase-3 network seam is ready; no BPF object was requested by this test"
                             .to_string(),
                     );
-                } else {
+                } else if !next.active {
                     next.warnings.push(
                         "BPF runtime is loaded with a frozen active=0 snapshot; capture waits for engine readiness"
                             .to_string(),
@@ -391,15 +475,349 @@ impl Manager {
             self.runtime = Some(runtime);
             self.fault_ring = Some(ring);
             self.last_control = Some(control);
-        } else if self.last_control != Some(control) {
-            self.runtime
-                .as_mut()
-                .ok_or_else(|| DataplaneError::new("bpf_runtime_missing", "runtime disappeared"))?
+        }
+        Ok(())
+    }
+
+    /// Converges the policy domain without changing `active` or generation.
+    /// Every add happens before any downgrade/delete (blueprint §10.5 / D5).
+    pub fn apply_policy(&mut self, desired: &DesiredPolicy) -> Result<(), DataplaneError> {
+        if self.test_bypass {
+            self.status.policy = PolicyCounts {
+                selected: desired.selected_uids.len() as u32,
+                bypass_v4: desired.bypass_v4.len() as u32,
+                bypass_v6: desired.bypass_v6.len() as u32,
+                ..PolicyCounts::default()
+            };
+            return Ok(());
+        }
+        if desired.selected_uids.len() > abi::UID_SELECTED_MAX as usize {
+            return Err(DataplaneError::new(
+                "policy_capacity:selected",
+                "selected UID count exceeds the ABI limit",
+            ));
+        }
+        let total_uids = self
+            .uid_modes
+            .keys()
+            .copied()
+            .chain(desired.selected_uids.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .len();
+        if total_uids > abi::UID_POLICY_MAX_ENTRIES as usize {
+            return Err(DataplaneError::new(
+                "policy_capacity:uid_policy",
+                "selected plus boot-lifetime draining UIDs exceed the ABI limit",
+            ));
+        }
+        if desired.bypass_v4.len() > abi::LPM_MAX_ENTRIES as usize
+            || desired.bypass_v6.len() > abi::LPM_MAX_ENTRIES as usize
+        {
+            return Err(DataplaneError::new(
+                "policy_capacity:bypass",
+                "bypass prefix count exceeds the ABI limit",
+            ));
+        }
+
+        let snapshot = self
+            .route
+            .snapshot()
+            .map_err(|error| DataplaneError::io("rtnetlink_dump", error))?;
+        let (desired_self_v4, desired_self_v6, truncated) =
+            self.desired_self_addresses(&snapshot.addresses)?;
+
+        // Additive half: new SELECTED entries and every new bypass target.
+        for uid in desired.selected_uids.iter().copied().collect::<Vec<_>>() {
+            if self.uid_modes.get(&uid) == Some(&(abi::UidMode::Selected as u8)) {
+                continue;
+            }
+            self.runtime_ref()?
+                .update_uid_mode(uid, abi::UidMode::Selected as u8)
+                .map_err(DataplaneError::bpf)?;
+            self.uid_modes.insert(uid, abi::UidMode::Selected as u8);
+        }
+        for key in desired
+            .bypass_v4
+            .difference(&self.bypass_v4)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .update_bypass_v4(&key)
+                .map_err(DataplaneError::bpf)?;
+            self.bypass_v4.insert(key);
+        }
+        for key in desired
+            .bypass_v6
+            .difference(&self.bypass_v6)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .update_bypass_v6(&key)
+                .map_err(DataplaneError::bpf)?;
+            self.bypass_v6.insert(key);
+        }
+        for address in desired_self_v4
+            .difference(&self.self_v4)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .update_self_v4(&address)
+                .map_err(DataplaneError::bpf)?;
+            self.self_v4.insert(address);
+        }
+        for address in desired_self_v6
+            .difference(&self.self_v6)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .update_self_v6(&address)
+                .map_err(DataplaneError::bpf)?;
+            self.self_v6.insert(address);
+        }
+
+        // Subtractive half. UID entries are downgraded, never deleted within
+        // this boot; prefix/address maps delete only keys no longer desired.
+        let removed_uids = self
+            .uid_modes
+            .iter()
+            .filter_map(|(uid, mode)| {
+                (*mode == abi::UidMode::Selected as u8 && !desired.selected_uids.contains(uid))
+                    .then_some(*uid)
+            })
+            .collect::<Vec<_>>();
+        for uid in removed_uids {
+            self.runtime_ref()?
+                .update_uid_mode(uid, abi::UidMode::Draining as u8)
+                .map_err(DataplaneError::bpf)?;
+            self.uid_modes.insert(uid, abi::UidMode::Draining as u8);
+        }
+        for key in self
+            .bypass_v4
+            .difference(&desired.bypass_v4)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .delete_bypass_v4(&key)
+                .map_err(DataplaneError::bpf)?;
+            self.bypass_v4.remove(&key);
+        }
+        for key in self
+            .bypass_v6
+            .difference(&desired.bypass_v6)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .delete_bypass_v6(&key)
+                .map_err(DataplaneError::bpf)?;
+            self.bypass_v6.remove(&key);
+        }
+        for address in self
+            .self_v4
+            .difference(&desired_self_v4)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .delete_self_v4(&address)
+                .map_err(DataplaneError::bpf)?;
+            self.self_v4.remove(&address);
+        }
+        for address in self
+            .self_v6
+            .difference(&desired_self_v6)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.runtime_ref()?
+                .delete_self_v6(&address)
+                .map_err(DataplaneError::bpf)?;
+            self.self_v6.remove(&address);
+        }
+
+        self.status.policy = self.policy_counts();
+        if let Some(control) = self.last_control.as_mut() {
+            control.selected_count = self.status.policy.selected;
+            control.draining_count = self.status.policy.draining;
+            control.bypass_v4_count = self.status.policy.bypass_v4;
+            control.bypass_v6_count = self.status.policy.bypass_v6;
+        }
+        self.status
+            .warnings
+            .retain(|warning| !warning.contains("self_addr_lru"));
+        if truncated {
+            self.status.warnings.push(
+                "self_addr_lru: more than 256 live privacy addresses; oldest entries were omitted"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn clear_fault_latch(&self) -> Result<(), DataplaneError> {
+        if self.test_bypass {
+            return Ok(());
+        }
+        self.runtime_ref()?
+            .clear_fault_latch()
+            .map_err(DataplaneError::bpf)
+    }
+
+    /// The sole Phase 6 commit point. TC ingress and every admitted egress
+    /// entry must already be installed before this pointer swap.
+    pub fn publish_active(&mut self) -> Result<(), DataplaneError> {
+        if self.test_bypass {
+            return Ok(());
+        }
+        if !self.status.attachment_ready
+            || !self
+                .status
+                .ifaces
+                .iter()
+                .any(|iface| iface.status == "active")
+        {
+            return Err(DataplaneError::new(
+                "dataplane_not_ready",
+                "no positively attached capture interface is ready for activation",
+            ));
+        }
+        let mut control = self.last_control.ok_or_else(|| {
+            DataplaneError::new("control_missing", "inactive generation was not published")
+        })?;
+        control.active = 1;
+        let counts = self.policy_counts();
+        control.selected_count = counts.selected;
+        control.draining_count = counts.draining;
+        control.bypass_v4_count = counts.bypass_v4;
+        control.bypass_v6_count = counts.bypass_v6;
+        self.runtime_mut()?
+            .publish_control(&control)
+            .map_err(DataplaneError::bpf)?;
+        self.last_control = Some(control);
+        self.status.active = true;
+        Ok(())
+    }
+
+    pub fn publish_inactive(&mut self) -> Result<(), DataplaneError> {
+        if self.test_bypass {
+            return Ok(());
+        }
+        let Some(mut control) = self.last_control else {
+            self.status.active = false;
+            return Ok(());
+        };
+        if control.active != 0 {
+            control.active = 0;
+            self.runtime_mut()?
                 .publish_control(&control)
                 .map_err(DataplaneError::bpf)?;
             self.last_control = Some(control);
         }
+        self.status.active = false;
         Ok(())
+    }
+
+    fn runtime_ref(&self) -> Result<&Runtime, DataplaneError> {
+        self.runtime.as_ref().ok_or_else(|| {
+            DataplaneError::new("bpf_runtime_missing", "Phase 6 runtime has not been loaded")
+        })
+    }
+
+    fn runtime_mut(&mut self) -> Result<&mut Runtime, DataplaneError> {
+        self.runtime.as_mut().ok_or_else(|| {
+            DataplaneError::new("bpf_runtime_missing", "Phase 6 runtime has not been loaded")
+        })
+    }
+
+    fn policy_counts(&self) -> PolicyCounts {
+        PolicyCounts {
+            selected: self
+                .uid_modes
+                .values()
+                .filter(|mode| **mode == abi::UidMode::Selected as u8)
+                .count() as u32,
+            draining: self
+                .uid_modes
+                .values()
+                .filter(|mode| **mode == abi::UidMode::Draining as u8)
+                .count() as u32,
+            bypass_v4: self.bypass_v4.len() as u32,
+            bypass_v6: self.bypass_v6.len() as u32,
+            self_addresses: (self.self_v4.len() + self.self_v6.len()) as u32,
+        }
+    }
+
+    fn desired_self_addresses(
+        &mut self,
+        addresses: &[netlink::Address],
+    ) -> Result<SelfAddressSelection, DataplaneError> {
+        let mut v4 = BTreeMap::<[u8; 4], bool>::new();
+        let mut v6 = BTreeMap::<[u8; 16], bool>::new();
+        for address in addresses {
+            if address.flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED) != 0 {
+                continue;
+            }
+            match address.family as i32 {
+                libc::AF_INET if address.bytes.len() == 4 => {
+                    let bytes: [u8; 4] =
+                        address.bytes.as_slice().try_into().expect("length checked");
+                    let ip = Ipv4Addr::from(bytes);
+                    if ip.is_unspecified() || ip.is_multicast() {
+                        continue;
+                    }
+                    v4.entry(bytes)
+                        .and_modify(|existing| *existing = false)
+                        .or_insert(false);
+                }
+                libc::AF_INET6 if address.bytes.len() == 16 => {
+                    let bytes: [u8; 16] =
+                        address.bytes.as_slice().try_into().expect("length checked");
+                    let ip = Ipv6Addr::from(bytes);
+                    if ip.is_unspecified() || ip.is_multicast() {
+                        continue;
+                    }
+                    let privacy = is_privacy_address(address.family, address.flags);
+                    v6.entry(bytes)
+                        .and_modify(|existing| *existing &= privacy)
+                        .or_insert(privacy);
+                }
+                _ => {}
+            }
+        }
+
+        self.address_seen_v4
+            .retain(|address, _| v4.contains_key(address));
+        self.address_seen_v6
+            .retain(|address, _| v6.contains_key(address));
+        for address in v4.keys() {
+            if !self.address_seen_v4.contains_key(address) {
+                self.address_tick = self.address_tick.saturating_add(1);
+                self.address_seen_v4.insert(*address, self.address_tick);
+            }
+        }
+        for address in v6.keys() {
+            if !self.address_seen_v6.contains_key(address) {
+                self.address_tick = self.address_tick.saturating_add(1);
+                self.address_seen_v6.insert(*address, self.address_tick);
+            }
+        }
+
+        let (v4, truncated_v4) = select_self_addresses(
+            &v4,
+            &self.address_seen_v4,
+            abi::SELF_ADDR_MAX_ENTRIES as usize,
+        )?;
+        let (v6, truncated_v6) = select_self_addresses(
+            &v6,
+            &self.address_seen_v6,
+            abi::SELF_ADDR_MAX_ENTRIES as usize,
+        )?;
+        Ok((v4, v6, truncated_v4 || truncated_v6))
     }
 
     pub fn prepare_generation(
@@ -420,8 +838,14 @@ impl Manager {
         let peer = link_named(&snapshot, PEER_NAME)
             .ok_or_else(|| DataplaneError::new("veth_missing:flxrs1", "owned peer veth absent"))?;
         let control = inactive_control(host.ifindex, peer.ifindex, generation, port_v4, port_v6)?;
+        let mut control = control;
+        let counts = self.policy_counts();
+        control.selected_count = counts.selected;
+        control.draining_count = counts.draining;
+        control.bypass_v4_count = counts.bypass_v4;
+        control.bypass_v6_count = counts.bypass_v6;
         let runtime = self.runtime.as_mut().ok_or_else(|| {
-            DataplaneError::new("bpf_runtime_missing", "Phase 5 runtime has not been loaded")
+            DataplaneError::new("bpf_runtime_missing", "Phase 6 runtime has not been loaded")
         })?;
         if self.last_control != Some(control) {
             runtime
@@ -429,6 +853,7 @@ impl Manager {
                 .map_err(DataplaneError::bpf)?;
             self.last_control = Some(control);
         }
+        self.status.active = false;
         Ok(())
     }
 
@@ -436,6 +861,7 @@ impl Manager {
     /// calls `advance_attachment` when it expires; the reactor never sleeps.
     pub fn begin_attachment(&mut self) -> Result<AttachmentProgress, DataplaneError> {
         if self.test_bypass {
+            self.status.attachment_ready = true;
             return Ok(AttachmentProgress::Complete);
         }
         if self.status.attachment_ready {
@@ -586,10 +1012,18 @@ impl Manager {
             if self.verify_owned_filter(&existing).is_ok() {
                 return Ok(());
             }
+            // Ingress is part of the core capture path. Freeze the public
+            // control pointer before repairing anything underneath it.
+            if self.status.active {
+                self.publish_inactive()?;
+            }
             // A netd clsact reset removes the filter underneath our process.
             // Forget the stale record and let `attach_exact` either restore
             // an empty slot or reject a foreign replacement.
             self.attached.remove(index);
+        }
+        if self.status.active {
+            self.publish_inactive()?;
         }
         self.attach_exact(FilterSlot {
             ifname: PEER_NAME,
@@ -613,7 +1047,15 @@ impl Manager {
                 .pop_front()
             else {
                 self.attachment = None;
-                self.status.attachment_ready = true;
+                let has_active = self
+                    .status
+                    .ifaces
+                    .iter()
+                    .any(|iface| iface.status == "active");
+                self.status.attachment_ready = has_active;
+                if self.status.active && !has_active {
+                    self.publish_inactive()?;
+                }
                 self.status
                     .warnings
                     .retain(|warning| !warning.contains("capture waits for engine readiness"));
@@ -1250,10 +1692,16 @@ impl Manager {
             .route
             .snapshot()
             .map_err(|e| DataplaneError::io("rtnetlink_dump", e))?;
-        match topology_state(&snapshot)? {
-            TopologyState::Complete => return Ok(()),
-            TopologyState::Absent => {}
-            TopologyState::OwnedDrift => self.cleanup_owned()?,
+        let state = topology_state(&snapshot)?;
+        if state == TopologyState::Complete {
+            return Ok(());
+        }
+        // Veth/rule/route repair is a core-path mutation. No captured socket
+        // may observe it under active=1 (§10.4.2).
+        self.publish_inactive()?;
+        self.status.attachment_ready = false;
+        if state == TopologyState::OwnedDrift {
+            self.cleanup_owned()?;
         }
         self.create_topology()
     }
@@ -1583,6 +2031,44 @@ struct CleanupPlan {
     lo_ifindex: u32,
     rule_families: Vec<u8>,
     route_families: Vec<u8>,
+}
+
+fn select_self_addresses<const N: usize>(
+    candidates: &BTreeMap<[u8; N], bool>,
+    seen: &BTreeMap<[u8; N], u64>,
+    capacity: usize,
+) -> Result<(BTreeSet<[u8; N]>, bool), DataplaneError> {
+    let mut selected = candidates
+        .iter()
+        .filter_map(|(address, privacy)| (!*privacy).then_some(*address))
+        .collect::<BTreeSet<_>>();
+    if selected.len() > capacity {
+        return Err(DataplaneError::new(
+            "policy_capacity:self_addr",
+            "non-privacy device addresses exceed the exact bypass map limit",
+        ));
+    }
+    let mut privacy = candidates
+        .iter()
+        .filter_map(|(address, is_privacy)| {
+            (*is_privacy).then_some((Reverse(seen.get(address).copied().unwrap_or(0)), *address))
+        })
+        .collect::<Vec<_>>();
+    privacy.sort_unstable();
+    let available = capacity - selected.len();
+    let truncated = privacy.len() > available;
+    selected.extend(
+        privacy
+            .into_iter()
+            .take(available)
+            .map(|(_, address)| address),
+    );
+    Ok((selected, truncated))
+}
+
+fn is_privacy_address(family: u8, flags: u32) -> bool {
+    family as i32 == libc::AF_INET6
+        && flags & (IFA_F_SECONDARY_TEMPORARY | IFA_F_STABLE_PRIVACY) != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2247,6 +2733,7 @@ mod tests {
                 family: libc::AF_INET6 as u8,
                 prefix_len: 64,
                 scope: 253,
+                flags: 0,
                 bytes: vec![0xfe, 0x80],
             }],
             ..NetworkSnapshot::default()
@@ -2273,6 +2760,40 @@ mod tests {
         );
         values.insert("all.rp_filter".to_string(), 0);
         assert!(validate_rp_filter(&values).is_ok());
+    }
+
+    #[test]
+    fn self_address_capacity_protects_stable_and_keeps_newest_privacy() {
+        let stable = [1u8; 4];
+        let old_privacy = [2u8; 4];
+        let new_privacy = [3u8; 4];
+        let candidates =
+            BTreeMap::from([(stable, false), (old_privacy, true), (new_privacy, true)]);
+        let seen = BTreeMap::from([(stable, 1), (old_privacy, 2), (new_privacy, 3)]);
+        let (selected, truncated) = select_self_addresses(&candidates, &seen, 2).unwrap();
+        assert!(truncated);
+        assert_eq!(selected, BTreeSet::from([stable, new_privacy]));
+
+        let stable_only = BTreeMap::from([([1u8; 4], false), ([2u8; 4], false)]);
+        assert_eq!(
+            select_self_addresses(&stable_only, &BTreeMap::new(), 1)
+                .unwrap_err()
+                .code,
+            "policy_capacity:self_addr"
+        );
+
+        assert!(is_privacy_address(
+            libc::AF_INET6 as u8,
+            IFA_F_SECONDARY_TEMPORARY
+        ));
+        assert!(is_privacy_address(
+            libc::AF_INET6 as u8,
+            IFA_F_STABLE_PRIVACY
+        ));
+        assert!(
+            !is_privacy_address(libc::AF_INET as u8, IFA_F_SECONDARY_TEMPORARY),
+            "IPv4 secondary shares the temporary flag bit but is not a privacy address"
+        );
     }
 
     #[test]

@@ -9,9 +9,8 @@
 //! periodic polling anywhere** — that is a hard product constraint, not a
 //! preference; both timers here are one-shot and armed only by an event.
 //!
-//! Reachable states remain `Disabled` and `Inactive`: Phase 5 attaches the BPF
-//! generation under a frozen `active=0` control leaf; Phase 6 is the first
-//! phase allowed to publish `active=1`.
+//! Phase 6 publishes `active=1` only after policy preparation, four verified
+//! engine sockets and positively verified ingress/egress TC attachment.
 //!
 //! Convergence is non-reentrant by construction: the loop is single-threaded,
 //! while each engine transaction advances one fd/timer event at a time. Later
@@ -22,7 +21,7 @@
 //! timeout, I/O); a config problem waits for the config to change — retrying
 //! a deterministic failure on a timer would just be polling with extra steps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -30,8 +29,9 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use flux_core::config::FluxConfig;
-use flux_core::control_wire::{Counters, EngineStatus, PolicyCounts, Request, Response, State};
+use flux_core::control_wire::{Counters, EngineStatus, Request, Response, State};
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
+use flux_core::selector::{PackageIndex, SelectorError};
 
 use crate::checks;
 use crate::control::{ControlConn, ControlServer};
@@ -88,7 +88,15 @@ struct SwitchPlan {
     generation: u64,
     params: engine_config::EngineParams,
     candidate: std::path::PathBuf,
+    user: serde_json::Value,
     old: Option<OldGeneration>,
+}
+
+#[derive(Debug, Clone)]
+struct PolicyCandidate {
+    flux: FluxConfig,
+    desired: crate::dataplane::DesiredPolicy,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +245,8 @@ struct Reactor {
     next_control_token: u64,
     engine: Option<EngineChild>,
     engine_transaction: Option<EngineTransaction>,
+    /// A socket-ready child waiting for the Phase 6 TC/control commit point.
+    activation_role: Option<WaitRole>,
     engine_cancel_requested: bool,
     shutdown_requested: bool,
     /// Buffered partial line of engine output between reads.
@@ -247,12 +257,17 @@ struct Reactor {
     generation: u64,
     last_error: Option<String>,
     last_error_detail: Option<String>,
+    policy_error: Option<(String, Option<String>)>,
     crash_count: u32,
     reload_requested: bool,
-    config_changed: bool,
+    policy_changed: bool,
+    engine_config_changed: bool,
     topology_changed: bool,
     dataplane_error_active: bool,
     config_warnings: Vec<String>,
+    current_policy: Option<PolicyCandidate>,
+    current_engine_user: Option<serde_json::Value>,
+    policy_retry_available: bool,
     /// `None` when the page size is the required 4096; otherwise the actual
     /// size. sing-box and the BPF maps both assume 4 KiB pages (§25).
     bad_page_size: Option<i64>,
@@ -325,6 +340,7 @@ impl Reactor {
             next_control_token: TOK_CONTROL_CONN_BASE,
             engine: None,
             engine_transaction: None,
+            activation_role: None,
             engine_cancel_requested: false,
             shutdown_requested: false,
             engine_line: Vec::new(),
@@ -332,12 +348,17 @@ impl Reactor {
             generation: 0,
             last_error: None,
             last_error_detail: None,
+            policy_error: None,
             crash_count: 0,
             reload_requested: false,
-            config_changed: false,
+            policy_changed: false,
+            engine_config_changed: false,
             topology_changed: false,
             dataplane_error_active: false,
             config_warnings: Vec::new(),
+            current_policy: None,
+            current_engine_user: None,
+            policy_retry_available: true,
             bad_page_size,
         })
     }
@@ -428,6 +449,10 @@ impl Reactor {
         }
         self.logger.log(&format!("shutting down ({why})"));
         self.shutdown_requested = true;
+        if let Err(error) = self.dataplane.publish_inactive() {
+            self.logger
+                .log(&format!("cannot freeze capture during shutdown: {error}"));
+        }
         disarm_timer(&self.tc_verify_timer);
         if let Err(error) = self.dataplane.cancel_attachment() {
             self.logger
@@ -466,6 +491,7 @@ impl Reactor {
                 libc::SIGHUP => {
                     self.logger.log("SIGHUP: reload");
                     self.reload_requested = true;
+                    self.policy_retry_available = true;
                     self.converge("SIGHUP");
                 }
                 libc::SIGTERM | libc::SIGINT => exit = true,
@@ -669,7 +695,7 @@ impl Reactor {
             else {
                 continue;
             };
-            let response = self.build_status(self.last_error.is_none());
+            let response = self.build_status(self.overall_ok());
             match conn.send_response(&response) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -713,7 +739,7 @@ impl Reactor {
                     self.logger.log(&format!("enable failed: {e}"));
                 }
                 self.converge("enable");
-                if result.is_ok() && self.engine_transaction.is_some() {
+                if result.is_ok() && self.convergence_busy() {
                     return (None, false);
                 }
                 let mut response = self.build_status(result.is_ok());
@@ -728,7 +754,7 @@ impl Reactor {
                     self.logger.log(&format!("disable failed: {e}"));
                 }
                 self.converge("disable");
-                if result.is_ok() && self.engine_transaction.is_some() {
+                if result.is_ok() && self.convergence_busy() {
                     return (None, false);
                 }
                 let mut response = self.build_status(result.is_ok());
@@ -739,11 +765,12 @@ impl Reactor {
             }
             Request::Reload => {
                 self.reload_requested = true;
+                self.policy_retry_available = true;
                 self.converge("reload");
-                if self.engine_transaction.is_some() {
+                if self.convergence_busy() {
                     return (None, false);
                 }
-                let ok = self.last_error.is_none();
+                let ok = self.overall_ok();
                 Some(self.build_status(ok))
             }
             Request::Stop => {
@@ -758,7 +785,8 @@ impl Reactor {
     fn handle_inotify(&mut self) {
         let mut buf = [0u8; 4096];
         let mut switch_changed = false;
-        let mut config_changed = false;
+        let mut policy_changed = false;
+        let mut engine_config_changed = false;
         loop {
             // SAFETY: buf is a valid buffer for its length; the fd is our
             // non-blocking inotify fd.
@@ -789,13 +817,16 @@ impl Reactor {
                     .map(|s| String::from_utf8_lossy(s).into_owned())
                     .unwrap_or_default();
                 if event.mask & libc::IN_Q_OVERFLOW != 0 {
-                    config_changed = true;
+                    policy_changed = true;
+                    engine_config_changed = true;
                 } else if event.wd == self.root_wd && name == "disable" {
                     switch_changed = true;
-                } else if event.wd == self.config_wd
-                    || (self.packages_wd == Some(event.wd) && name == "packages.list")
-                {
-                    config_changed = true;
+                } else if event.wd == self.config_wd && name == "flux.toml" {
+                    policy_changed = true;
+                } else if event.wd == self.config_wd && name == "sing-box.json" {
+                    engine_config_changed = true;
+                } else if self.packages_wd == Some(event.wd) && name == "packages.list" {
+                    policy_changed = true;
                 }
                 offset += EVENT_HEAD + name_len;
             }
@@ -804,8 +835,12 @@ impl Reactor {
         if switch_changed {
             self.converge("disable-file change");
         }
-        if config_changed {
-            self.config_changed = true;
+        if policy_changed || engine_config_changed {
+            self.policy_changed |= policy_changed;
+            self.engine_config_changed |= engine_config_changed;
+            if policy_changed {
+                self.policy_retry_available = true;
+            }
             arm_timer(&self.debounce_timer, DEBOUNCE);
         }
     }
@@ -839,10 +874,26 @@ impl Reactor {
                 arm_timer(&self.tc_verify_timer, delay);
             }
             Ok(crate::dataplane::AttachmentProgress::Complete) => {
-                self.logger
-                    .log("Phase 5 TC attachment and liveness verification complete");
+                if !self.capture_interface_ready() {
+                    self.logger
+                        .log("no usable capture interface; waiting for rtnetlink change");
+                    return;
+                }
+                if self.activation_role.is_some() || !self.dataplane.status().active {
+                    self.finish_phase6_activation();
+                } else {
+                    self.logger.log(
+                        "Phase 6 TC attachment maintenance and liveness verification complete",
+                    );
+                }
             }
-            Err(error) => self.record_dataplane_error("TC liveness verification", error),
+            Err(error) => {
+                if self.activation_role.is_some() || !self.dataplane.status().active {
+                    self.fail_phase6_activation("TC liveness verification", error);
+                } else {
+                    self.record_dataplane_error("TC liveness verification", error);
+                }
+            }
         }
     }
 
@@ -851,12 +902,8 @@ impl Reactor {
             Ok(events) => {
                 for event in events {
                     self.logger.log(&format!(
-                        "BPF fault while inactive: generation={} family={} protocol={} reason={} seq={}",
-                        event.generation,
-                        event.family,
-                        event.protocol,
-                        event.reason,
-                        event.seq
+                        "BPF fault: generation={} family={} protocol={} reason={} seq={}",
+                        event.generation, event.family, event.protocol, event.reason, event.seq
                     ));
                 }
             }
@@ -865,6 +912,10 @@ impl Reactor {
     }
 
     fn handle_engine_exit(&mut self) {
+        if let Err(error) = self.dataplane.publish_inactive() {
+            self.logger
+                .log(&format!("cannot freeze capture after engine exit: {error}"));
+        }
         disarm_timer(&self.tc_verify_timer);
         if let Err(error) = self.dataplane.cancel_attachment() {
             self.logger
@@ -891,6 +942,21 @@ impl Reactor {
             "engine (generation {generation}) exited unexpectedly ({exit}) after {}s",
             ran_for.as_secs()
         ));
+        let activation_error = EngineError::Exited {
+            exit: exit.clone(),
+            output_head: output_head.clone(),
+        };
+        if let Some(role) = self.activation_role.take() {
+            match role {
+                WaitRole::Candidate(plan) => {
+                    self.begin_candidate_failure(plan, activation_error);
+                }
+                WaitRole::Recovery { candidate_error } => {
+                    self.finish_transaction_error(candidate_error, Some(activation_error));
+                }
+            }
+            return;
+        }
         self.last_error = Some(format!("engine_exited:{exit}"));
         self.last_error_detail = (!output_head.is_empty()).then_some(output_head);
 
@@ -966,13 +1032,20 @@ impl Reactor {
         Ok(())
     }
 
-    fn start_phase5_attachment(&mut self, params: engine_config::EngineParams) {
-        if let Err(error) =
-            self.dataplane
-                .prepare_generation(params.generation, params.port_v4, params.port_v6)
-        {
-            self.record_dataplane_error("inactive control publication", error);
-            return;
+    fn start_phase6_attachment(&mut self, params: engine_config::EngineParams) {
+        let activating = self.activation_role.is_some() || !self.dataplane.status().active;
+        if activating {
+            if let Err(error) =
+                self.dataplane
+                    .prepare_generation(params.generation, params.port_v4, params.port_v6)
+            {
+                self.fail_phase6_activation("inactive control publication", error);
+                return;
+            }
+            if let Err(error) = self.dataplane.clear_fault_latch() {
+                self.fail_phase6_activation("fault-latch reset", error);
+                return;
+            }
         }
         match self.dataplane.begin_attachment() {
             Ok(crate::dataplane::AttachmentProgress::Wait(delay)) => {
@@ -980,11 +1053,100 @@ impl Reactor {
             }
             Ok(crate::dataplane::AttachmentProgress::Complete) => {
                 disarm_timer(&self.tc_verify_timer);
-                self.logger
-                    .log("Phase 5 TC attachment is complete under active=0");
+                if !self.capture_interface_ready() {
+                    self.logger
+                        .log("no usable capture interface; waiting for rtnetlink change");
+                    return;
+                }
+                if activating || !self.dataplane.status().active {
+                    self.finish_phase6_activation();
+                } else {
+                    self.logger.log("Phase 6 TC maintenance complete");
+                }
             }
-            Err(error) => self.record_dataplane_error("TC attachment", error),
+            Err(error) => {
+                if activating || !self.dataplane.status().active {
+                    self.fail_phase6_activation("TC attachment", error);
+                } else {
+                    self.record_dataplane_error("TC attachment maintenance", error);
+                }
+            }
         }
+    }
+
+    fn finish_phase6_activation(&mut self) {
+        if let Err(error) = self.dataplane.publish_active() {
+            self.fail_phase6_activation("active control publication", error);
+            return;
+        }
+        let Some(child) = self.engine.as_ref() else {
+            let error = crate::dataplane::DataplaneError {
+                code: "engine_not_ready".to_string(),
+                detail: "TC became ready without a supervised engine child".to_string(),
+            };
+            self.fail_phase6_activation("activation commit", error);
+            return;
+        };
+        self.generation = child.params.generation;
+        match self.activation_role.take() {
+            Some(WaitRole::Candidate(plan)) => {
+                if let Some(old) = plan.old {
+                    let _ = fs::remove_file(old.effective);
+                }
+                self.current_engine_user = Some(plan.user);
+                self.last_error = None;
+                self.last_error_detail = None;
+                self.logger.log(&format!(
+                    "generation {}: policy, 4/4 sockets and TC verified; active=1 committed",
+                    child.params.generation
+                ));
+            }
+            Some(WaitRole::Recovery { candidate_error }) => {
+                self.last_error = Some(candidate_error.token());
+                self.last_error_detail = candidate_error.detail();
+                self.logger.log(&format!(
+                    "generation {}: old generation recovered and active=1 committed",
+                    child.params.generation
+                ));
+            }
+            None => {
+                self.logger.log(&format!(
+                    "generation {}: inactive data plane reactivated",
+                    child.params.generation
+                ));
+            }
+        }
+        self.engine_cancel_requested = false;
+        self.refresh_config_warnings();
+        self.run_queued_convergence();
+        if self.engine_transaction.is_none() && self.activation_role.is_none() {
+            self.complete_convergence_controls();
+        }
+    }
+
+    fn fail_phase6_activation(&mut self, operation: &str, error: crate::dataplane::DataplaneError) {
+        let detail = format!("{operation} failed: {error}");
+        let engine_error = EngineError::Io(io::Error::other(detail.clone()));
+        self.record_dataplane_error(operation, error);
+        let Some(role) = self.activation_role.take() else {
+            let _ = self.dataplane.publish_inactive();
+            return;
+        };
+        let Some(child) = self.engine.take() else {
+            self.finish_transaction_error(engine_error, None);
+            return;
+        };
+        let next = match role {
+            WaitRole::Candidate(plan) => StopNext::Recover {
+                plan,
+                candidate_error: engine_error,
+            },
+            WaitRole::Recovery { candidate_error } => StopNext::FinishRecoveryFailure {
+                candidate_error,
+                recovery_error: engine_error,
+            },
+        };
+        self.begin_stop(child, next);
     }
 
     fn record_dataplane_error(&mut self, operation: &str, error: crate::dataplane::DataplaneError) {
@@ -1017,7 +1179,8 @@ impl Reactor {
             self.engine_cancel_requested = true;
             self.cancel_engine_work();
             self.reload_requested = false;
-            self.config_changed = false;
+            self.policy_changed = false;
+            self.engine_config_changed = false;
             self.topology_changed = false;
             disarm_timer(&self.backoff_timer);
             return;
@@ -1037,35 +1200,96 @@ impl Reactor {
             return;
         }
 
-        let engine_busy = self.engine_transaction.is_some();
+        let refresh_self_addresses = self.topology_changed;
+        let engine_busy = self.convergence_busy();
         let need_start = !engine_busy && self.engine.is_none();
-        let need_switch =
-            !engine_busy && self.engine.is_some() && (self.reload_requested || self.config_changed);
-        let candidate_user = if need_start || need_switch {
-            match self.read_user_config() {
-                Ok(user) => Some(user),
+        let want_engine =
+            !engine_busy && (need_start || self.reload_requested || self.engine_config_changed);
+        let want_policy = self.current_policy.is_none()
+            || self.reload_requested
+            || self.policy_changed
+            || self.topology_changed;
+
+        let mut candidate_policy = if want_policy {
+            match self.read_policy_config() {
+                Ok(candidate) => Some(candidate),
                 Err((token, detail)) => {
-                    if self.engine.is_some() {
-                        self.logger.log(&format!(
-                            "config invalid ({token}); keeping the running generation {}",
-                            self.generation
-                        ));
-                    } else {
-                        // Cold invalid input still performs exact stale cleanup,
-                        // but never creates a new network object (§8.7).
-                        self.dataplane.converge(false);
-                        self.logger.log(&format!("cannot start engine: {token}"));
-                    }
-                    self.last_error = Some(token);
-                    self.last_error_detail = detail;
-                    self.reload_requested = false;
-                    self.config_changed = false;
-                    return;
+                    self.logger
+                        .log(&format!("policy candidate rejected: {token}"));
+                    self.set_policy_error(token, detail);
+                    None
                 }
             }
         } else {
             None
         };
+        self.policy_changed = false;
+
+        let mut candidate_user = if want_engine {
+            match self.read_engine_config() {
+                Ok(user) => Some(user),
+                Err((token, detail)) => {
+                    self.logger
+                        .log(&format!("engine candidate rejected: {token}"));
+                    self.last_error = Some(token);
+                    self.last_error_detail = detail;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // A new policy must be safe for the currently active engine before it
+        // is installed. A new engine is validated against the policy that will
+        // remain installed if its sibling domain is invalid (§10.5).
+        if let Some(policy) = candidate_policy.as_ref() {
+            if let Some(user) = self
+                .current_engine_user
+                .as_ref()
+                .or(candidate_user.as_ref())
+            {
+                if let Err(error) = checks::validate_fakeip_bypass(&policy.flux, user) {
+                    self.logger
+                        .log(&format!("policy candidate rejected: {error}"));
+                    self.set_policy_error("fakeip_bypass_overlap".to_string(), Some(error));
+                    candidate_policy = None;
+                }
+            }
+        }
+        if let Some(user) = candidate_user.as_ref() {
+            let flux = candidate_policy
+                .as_ref()
+                .map(|policy| &policy.flux)
+                .or_else(|| self.current_policy.as_ref().map(|policy| &policy.flux));
+            match flux {
+                Some(flux) => {
+                    if let Err(error) = checks::validate_fakeip_bypass(flux, user) {
+                        self.logger
+                            .log(&format!("engine candidate rejected: {error}"));
+                        self.last_error = Some("fakeip_bypass_overlap".to_string());
+                        self.last_error_detail = Some(error);
+                        candidate_user = None;
+                    }
+                }
+                None => {
+                    self.last_error = Some("flux_config_invalid".to_string());
+                    self.last_error_detail =
+                        Some("no valid policy exists for the engine candidate".to_string());
+                    candidate_user = None;
+                }
+            }
+        }
+
+        if !engine_busy && self.engine.is_none() && candidate_user.is_none() {
+            // Cold invalid input performs stale cleanup only and cannot create
+            // a topology or an inactive BPF runtime (§8.7).
+            self.dataplane.converge(false);
+            self.reload_requested = false;
+            self.engine_config_changed = false;
+            self.topology_changed = false;
+            return;
+        }
 
         disarm_timer(&self.tc_verify_timer);
         if let Err(error) = self.dataplane.cancel_attachment() {
@@ -1073,7 +1297,6 @@ impl Reactor {
             return;
         }
         self.dataplane.converge_with_bpf(true, crate::BPF_OBJECT);
-        self.topology_changed = false;
         if let Some(error) = self.dataplane.status().error.clone() {
             disarm_timer(&self.tc_verify_timer);
             if let Err(cancel_error) = self.dataplane.cancel_attachment() {
@@ -1104,6 +1327,48 @@ impl Reactor {
             self.dataplane_error_active = false;
         }
 
+        if let Some(policy) = candidate_policy {
+            match self.dataplane.apply_policy(&policy.desired) {
+                Ok(()) => {
+                    self.current_policy = Some(policy);
+                    self.policy_retry_available = true;
+                    self.clear_policy_error();
+                    self.refresh_config_warnings();
+                }
+                Err(error) => {
+                    self.set_policy_error(error.code.clone(), Some(error.detail.clone()));
+                    self.queue_policy_retry();
+                    self.record_dataplane_error("policy convergence", error);
+                    if self.current_policy.is_none() {
+                        candidate_user = None;
+                    }
+                }
+            }
+        } else if refresh_self_addresses {
+            if let Some(desired) = self
+                .current_policy
+                .as_ref()
+                .map(|policy| policy.desired.clone())
+            {
+                if let Err(error) = self.dataplane.apply_policy(&desired) {
+                    self.set_policy_error(error.code.clone(), Some(error.detail.clone()));
+                    self.queue_policy_retry();
+                    self.record_dataplane_error("self-address refresh", error);
+                }
+            }
+        }
+        self.topology_changed = false;
+
+        // A socket-ready candidate can legitimately wait with active=0 while
+        // the device has no upstream. A later rtnetlink event must resume its
+        // TC phase instead of being trapped behind `convergence_busy()`.
+        if self.activation_role.is_some() {
+            if let Some(params) = self.engine.as_ref().map(|child| child.params) {
+                self.start_phase6_attachment(params);
+            }
+            return;
+        }
+
         if engine_busy {
             self.logger.log(&format!(
                 "{reason}: engine transaction already in progress; queued"
@@ -1111,15 +1376,22 @@ impl Reactor {
             return;
         }
 
+        let force_engine_restart = self.reload_requested;
         self.reload_requested = false;
-        self.config_changed = false;
+        self.engine_config_changed = false;
+        let need_switch = self.engine.is_some()
+            && candidate_user.as_ref().is_some_and(|user| {
+                force_engine_restart || self.current_engine_user.as_ref() != Some(user)
+            });
         if !need_start && !need_switch {
             if let Some(params) = self.engine.as_ref().map(|child| child.params) {
-                self.start_phase5_attachment(params);
+                self.start_phase6_attachment(params);
             }
             return;
         }
-        let user = candidate_user.expect("a start or switch has a parsed candidate");
+        let Some(user) = candidate_user else {
+            return;
+        };
 
         self.generation_counter += 1;
         let generation = self.generation_counter;
@@ -1183,6 +1455,7 @@ impl Reactor {
                 generation,
                 params,
                 candidate,
+                user,
                 old: None,
             },
             deadline: Instant::now() + engine::CHECK_DEADLINE,
@@ -1291,6 +1564,19 @@ impl Reactor {
                         let _ = fs::remove_file(&plan.candidate);
                         self.finish_cancelled();
                     } else if let Some(child) = self.engine.take() {
+                        if let Err(error) = self.dataplane.publish_inactive() {
+                            self.logger.log(&format!(
+                                "generation {}: cannot freeze capture before switch: {error}",
+                                plan.generation
+                            ));
+                            let _ = fs::remove_file(&plan.candidate);
+                            self.engine = Some(child);
+                            self.finish_transaction_error(
+                                EngineError::Io(io::Error::other(error.to_string())),
+                                None,
+                            );
+                            return;
+                        }
                         plan.old = Some(OldGeneration {
                             params: child.params,
                             effective: child.effective.clone(),
@@ -1535,37 +1821,14 @@ impl Reactor {
         }
         disarm_timer(&self.engine_timer);
         let params = child.params;
-        self.generation = params.generation;
-        match role {
-            WaitRole::Candidate(plan) => {
-                if let Some(old) = plan.old {
-                    let _ = fs::remove_file(old.effective);
-                }
-                self.logger.log(&format!(
-                    "generation {}: 4/4 sockets verified by pid+inode, promoted (pid {}, starttime {})",
-                    child.params.generation, child.pid, child.start_time
-                ));
-                self.engine = Some(child);
-                self.last_error = None;
-                self.last_error_detail = None;
-                self.engine_cancel_requested = false;
-            }
-            WaitRole::Recovery { candidate_error } => {
-                self.logger.log(&format!(
-                    "generation {}: old generation recovered, 4/4 sockets verified",
-                    child.params.generation
-                ));
-                self.engine = Some(child);
-                self.last_error = Some(candidate_error.token());
-                self.last_error_detail = candidate_error.detail();
-                self.engine_cancel_requested = false;
-            }
-        }
-        self.start_phase5_attachment(params);
-        self.run_queued_convergence();
-        if self.engine_transaction.is_none() {
-            self.complete_convergence_controls();
-        }
+        self.logger.log(&format!(
+            "generation {}: 4/4 sockets verified by pid+inode; waiting for Phase 6 commit (pid {}, starttime {})",
+            child.params.generation, child.pid, child.start_time
+        ));
+        self.engine = Some(child);
+        self.activation_role = Some(role);
+        self.engine_cancel_requested = false;
+        self.start_phase6_attachment(params);
     }
 
     fn begin_candidate_failure(&mut self, mut plan: SwitchPlan, error: EngineError) {
@@ -1703,6 +1966,9 @@ impl Reactor {
 
     fn cancel_engine_work(&mut self) {
         let Some(transaction) = self.engine_transaction.take() else {
+            if let Some(role) = self.activation_role.take() {
+                self.cleanup_cancelled_wait_role(&role);
+            }
             if let Some(child) = self.engine.take() {
                 self.begin_stop(child, StopNext::Cancelled);
             } else {
@@ -1772,7 +2038,7 @@ impl Reactor {
                 self.complete_convergence_controls();
             } else if !self.shutdown_requested {
                 self.converge("post-cancel enable");
-                if self.engine_transaction.is_none() {
+                if !self.convergence_busy() {
                     self.complete_convergence_controls();
                 }
             }
@@ -1804,7 +2070,7 @@ impl Reactor {
             arm_timer(&self.backoff_timer, Duration::from_secs(step));
         }
         self.run_queued_convergence();
-        if self.engine_transaction.is_none() {
+        if !self.convergence_busy() {
             self.complete_convergence_controls();
         }
     }
@@ -1812,10 +2078,47 @@ impl Reactor {
     fn run_queued_convergence(&mut self) {
         if !self.shutdown_requested
             && !self.layout.disabled()
-            && (self.reload_requested || self.config_changed)
+            && (self.reload_requested || self.policy_changed || self.engine_config_changed)
         {
             self.converge("queued change");
         }
+    }
+
+    fn convergence_busy(&self) -> bool {
+        self.engine_transaction.is_some() || self.activation_role.is_some()
+    }
+
+    fn queue_policy_retry(&mut self) {
+        if !self.policy_retry_available {
+            return;
+        }
+        self.policy_retry_available = false;
+        self.policy_changed = true;
+        arm_timer(&self.debounce_timer, DEBOUNCE);
+    }
+
+    fn set_policy_error(&mut self, token: String, detail: Option<String>) {
+        self.policy_error = Some((token.clone(), detail.clone()));
+        self.last_error = Some(token);
+        self.last_error_detail = detail;
+    }
+
+    fn clear_policy_error(&mut self) {
+        let Some((token, _)) = self.policy_error.take() else {
+            return;
+        };
+        if self.last_error.as_deref() == Some(token.as_str()) {
+            self.last_error = None;
+            self.last_error_detail = None;
+        }
+    }
+
+    fn overall_ok(&self) -> bool {
+        self.last_error.is_none() && self.policy_error.is_none()
+    }
+
+    fn capture_interface_ready(&self) -> bool {
+        self.dataplane.status().attachment_ready
     }
 
     fn register_new_transaction_child(&self, child: &EngineChild) -> io::Result<()> {
@@ -1843,9 +2146,10 @@ impl Reactor {
         )
     }
 
-    /// Reads and parses `config/sing-box.json`. Errors come back as
-    /// `(stable token, optional detail)`.
-    fn read_user_config(&mut self) -> Result<serde_json::Value, (String, Option<String>)> {
+    /// Reads only the engine domain. Policy parsing and package resolution are
+    /// deliberately independent so a broken sibling file cannot roll back a
+    /// valid update (§10.5).
+    fn read_engine_config(&self) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.sing_box_json();
         let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
@@ -1879,8 +2183,26 @@ impl Reactor {
                 Some("sing-box.json is not UTF-8".to_string()),
             )
         })?;
-        let user = engine_config::parse_jsonc(&text)
-            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
+        engine_config::parse_jsonc(&text)
+            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))
+    }
+
+    fn read_policy_config(&self) -> Result<PolicyCandidate, (String, Option<String>)> {
+        let release = kernel_release().map_err(|error| {
+            (
+                "kernel_release_unreadable".to_string(),
+                Some(error.to_string()),
+            )
+        })?;
+        if !lpm_trie_kernel_safe(&release) {
+            return Err((
+                format!("unsupported_lpm_trie_kernel:{release}"),
+                Some(
+                    "Linux 6.6.0-6.6.46 has a known LPM trie UBSAN crash; upgrade to 6.6.47+"
+                        .to_string(),
+                ),
+            ));
+        }
         let flux = match checks::read_capped(
             &self.layout.flux_toml(),
             flux_core::config::MAX_CONFIG_BYTES + 1,
@@ -1899,42 +2221,123 @@ impl Reactor {
                 ));
             }
         };
-        let mut selector_report = checks::CheckReport::default();
-        checks::check_selectors(&flux, &mut selector_report);
-        if !selector_report.errors.is_empty() {
-            return Err((
-                "selector_invalid".to_string(),
-                Some(selector_report.errors.join("; ")),
-            ));
+
+        let mut selected_uids = BTreeSet::new();
+        let mut warnings = Vec::new();
+        if flux.apps.is_empty() {
+            warnings.push("flux.toml selects no apps: nothing will be proxied".to_string());
+        } else {
+            let packages = crate::packages::read().map_err(|error| {
+                (
+                    "packages_list_unreadable".to_string(),
+                    Some(error.to_string()),
+                )
+            })?;
+            let index = PackageIndex::parse(&packages);
+            for selector in &flux.apps {
+                let selection = index.resolve(selector).map_err(|error| {
+                    let detail = match error {
+                        SelectorError::UnknownPackage(package) => {
+                            format!(
+                                "{}: package `{package}` is not installed",
+                                selector.canonical()
+                            )
+                        }
+                        SelectorError::AppIdOutOfRange(app_id) => {
+                            format!("{}: app id {app_id} is out of range", selector.canonical())
+                        }
+                        SelectorError::UserIdOutOfRange(user_id) => format!(
+                            "{}: user id {user_id} is out of range",
+                            selector.canonical()
+                        ),
+                        SelectorError::Malformed(text) => {
+                            format!("{}: selector `{text}` is malformed", selector.canonical())
+                        }
+                    };
+                    ("selector_invalid".to_string(), Some(detail))
+                })?;
+                selected_uids.insert(selection.uid);
+                let siblings = index
+                    .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
+                    .into_iter()
+                    .filter(|package| *package != selector.package)
+                    .collect::<Vec<_>>();
+                if !siblings.is_empty() {
+                    warnings.push(format!(
+                        "uid {} also covers: {}",
+                        selection.uid,
+                        siblings.join(", ")
+                    ));
+                }
+            }
         }
-        checks::validate_fakeip_bypass(&flux, &user)
-            .map_err(|error| ("fakeip_bypass_overlap".to_string(), Some(error)))?;
-        self.config_warnings = selector_report.warnings;
-        self.config_warnings
-            .extend(checks::sing_box_warnings(&user));
-        Ok(user)
+
+        let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
+        let bypass_v4 = fixed_v4
+            .iter()
+            .chain(flux.bypass_v4.iter())
+            .copied()
+            .map(|cidr| cidr.to_lpm_key())
+            .collect();
+        let bypass_v6 = fixed_v6
+            .iter()
+            .chain(flux.bypass_v6.iter())
+            .copied()
+            .map(|cidr| cidr.to_lpm_key())
+            .collect();
+
+        Ok(PolicyCandidate {
+            flux,
+            desired: crate::dataplane::DesiredPolicy {
+                selected_uids,
+                bypass_v4,
+                bypass_v6,
+            },
+            warnings,
+        })
     }
 
-    /// Builds the §24.1 status response. Phase 5 intentionally remains
-    /// Inactive: Phase 6 owns the first `active=1` publication.
+    fn refresh_config_warnings(&mut self) {
+        self.config_warnings = self
+            .current_policy
+            .as_ref()
+            .map(|policy| policy.warnings.clone())
+            .unwrap_or_default();
+        if let Some(user) = self.current_engine_user.as_ref() {
+            self.config_warnings.extend(checks::sing_box_warnings(user));
+            if !engine_config::has_dns_hijack_rule(user) {
+                self.config_warnings.push(
+                    "no hijack-dns rule; selected apps' DNS will be forwarded verbatim and domain rules will not apply"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    /// Builds the §24.1 status response from committed runtime state.
     fn build_status(&self, ok: bool) -> Response {
         let disabled = self.layout.disabled();
-        let state = if disabled && self.engine.is_none() && self.engine_transaction.is_none() {
+        let state = if disabled && self.engine.is_none() && !self.convergence_busy() {
             State::Disabled
+        } else if self.dataplane.status().active
+            && self.engine.is_some()
+            && self.activation_role.is_none()
+        {
+            State::Active
         } else {
             State::Inactive
         };
         // Only a promoted generation is reported as running. A candidate may
         // already have a pid and some sockets, but exposing it here would let
         // clients mistake partial readiness for the commit point.
-        let engine_status = match &self.engine {
-            Some(child) => EngineStatus {
+        let engine_status = match (&self.engine, &self.activation_role) {
+            (Some(child), None) => EngineStatus {
                 running: true,
                 pid: Some(child.pid as u32),
                 sockets_verified: child.sockets_verified,
                 effective_config: Some(child.effective.display().to_string()),
             },
-            None => EngineStatus {
+            _ => EngineStatus {
                 running: false,
                 pid: None,
                 sockets_verified: 0,
@@ -1948,24 +2351,24 @@ impl Reactor {
                 "disabled: the switch file {} exists; `fluxd enable` removes it",
                 self.layout.disable_file().display()
             ));
-            if self.engine.is_some() || self.engine_transaction.is_some() {
+            if self.engine.is_some() || self.convergence_busy() {
                 warnings.push(
                     "disable is pending: the engine has not confirmed termination".to_string(),
                 );
             }
         } else {
             warnings.extend(self.dataplane.status().warnings.iter().cloned());
-            if self.dataplane.status().attachment_ready {
+            if state != State::Active && self.dataplane.status().attachment_ready {
                 warnings.push(
-                    "traffic is NOT proxied yet: Phase 5 TC programs are attached under a frozen active=0 control snapshot; Phase 6 policy activation is pending"
+                    "traffic is NOT proxied yet: TC is attached but the Phase 6 active control commit is pending"
                         .to_string(),
                 );
-            } else if self.dataplane.status().bpf_ready {
+            } else if state != State::Active && self.dataplane.status().bpf_ready {
                 warnings.push(
                     "traffic is NOT proxied yet: the inactive BPF runtime is ready and TC liveness verification is pending"
                         .to_string(),
                 );
-            } else if self.dataplane.status().topology_ready {
+            } else if state != State::Active && self.dataplane.status().topology_ready {
                 warnings.push(
                     "traffic is NOT proxied yet: the network seam is ready but no BPF runtime is loaded"
                         .to_string(),
@@ -1975,7 +2378,21 @@ impl Reactor {
         if let Some(detail) = &self.last_error_detail {
             warnings.push(detail.clone());
         }
+        if let Some((_, Some(detail))) = &self.policy_error {
+            if self.last_error_detail.as_ref() != Some(detail) {
+                warnings.push(detail.clone());
+            }
+        }
         warnings.extend(self.config_warnings.iter().cloned());
+
+        let counters = match self.dataplane.counters() {
+            Ok(counters) => counters,
+            Err(error) => {
+                warnings.push(format!("counter read failed: {error}"));
+                Counters::default()
+            }
+        };
+        let hints = counter_hints(state, &counters);
 
         Response {
             ok,
@@ -1984,34 +2401,86 @@ impl Reactor {
             state,
             generation: self.generation,
             engine: engine_status,
-            policy: self.policy_counts(),
+            policy: self.dataplane.status().policy,
             ifaces: self.dataplane.status().ifaces.clone(),
-            counters: Counters::default(),
+            counters,
             sysctl: self.dataplane.status().sysctl.clone(),
             warnings,
-            hints: Vec::new(),
-            last_error: self.last_error.clone(),
+            hints,
+            last_error: self
+                .policy_error
+                .as_ref()
+                .map(|(token, _)| token.clone())
+                .or_else(|| self.last_error.clone()),
         }
     }
+}
 
-    /// Policy counts from `flux.toml`, best effort: a status request must not
-    /// fail because the config is momentarily broken.
-    fn policy_counts(&self) -> PolicyCounts {
-        let Ok(bytes) = fs::read(self.layout.flux_toml()) else {
-            return PolicyCounts::default();
-        };
-        let Ok(config) = FluxConfig::parse(&bytes) else {
-            return PolicyCounts::default();
-        };
-        let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
-        PolicyCounts {
-            selected: config.apps.len() as u32,
-            draining: 0,
-            bypass_v4: (config.bypass_v4.len() + fixed_v4.len()) as u32,
-            bypass_v6: (config.bypass_v6.len() + fixed_v6.len()) as u32,
-            self_addresses: 0,
-        }
+fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
+    let admitted = counters.admit_tcp.saturating_add(counters.admit_udp);
+    let mut hints = Vec::new();
+    if admitted > 0 && counters.in_drop_assign > 0 {
+        hints.push(
+            "assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"
+                .to_string(),
+        );
     }
+    if admitted > 0 && counters.in_drop_no_listener > 0 {
+        hints.push(
+            "packets reached the veth but no listener was found; engine may be restarting"
+                .to_string(),
+        );
+    }
+    if counters.egress_listener_miss > 0 && admitted == 0 {
+        hints.push("nothing is being captured because the engine listener is absent".to_string());
+    }
+    if counters.direct_tcp > 0 && counters.admit_tcp == 0 {
+        hints.push(
+            "selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"
+                .to_string(),
+        );
+    }
+    if state == State::Active && *counters == Counters::default() {
+        hints.push(
+            "no selected traffic observed; verify the app list resolves to the UIDs you expect"
+                .to_string(),
+        );
+    }
+    if counters.drop_udp_frag > 0 {
+        hints.push(
+            "fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"
+                .to_string(),
+        );
+    }
+    hints
+}
+
+fn kernel_release() -> io::Result<String> {
+    // SAFETY: uname writes one fixed-size utsname value into valid storage.
+    let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
+    // SAFETY: `uts` points to writable storage for one complete utsname.
+    let result = unsafe { libc::uname(&mut uts) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: uname guarantees NUL-terminated fields.
+    Ok(unsafe { std::ffi::CStr::from_ptr(uts.release.as_ptr()) }
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn lpm_trie_kernel_safe(release: &str) -> bool {
+    let mut numbers = release
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok());
+    let (Some(major), Some(minor)) = (numbers.next(), numbers.next()) else {
+        return true;
+    };
+    if (major, minor) != (6, 6) {
+        return true;
+    }
+    numbers.next().is_some_and(|patch| patch >= 47)
 }
 
 /// Whether a failed cold start should be retried on the backoff timer.
@@ -2307,5 +2776,37 @@ mod tests {
             exit: "code=1".into(),
             output_head: String::new(),
         }));
+    }
+
+    #[test]
+    fn lpm_trie_kernel_gate_covers_the_known_crash_window_only() {
+        assert!(!lpm_trie_kernel_safe("6.6.0-android15"));
+        assert!(!lpm_trie_kernel_safe("6.6.46-gki"));
+        assert!(lpm_trie_kernel_safe("6.6.47-gki"));
+        assert!(lpm_trie_kernel_safe("5.15.211-android14"));
+        assert!(lpm_trie_kernel_safe("6.12.0"));
+    }
+
+    #[test]
+    fn status_hints_follow_the_documented_counter_combinations() {
+        let counters = Counters {
+            admit_tcp: 1,
+            in_drop_assign: 1,
+            in_drop_no_listener: 1,
+            drop_udp_frag: 1,
+            ..Counters::default()
+        };
+        let hints = counter_hints(State::Active, &counters);
+        assert!(hints
+            .iter()
+            .any(|hint| hint.starts_with("assign is failing")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.starts_with("packets reached the veth")));
+        assert!(hints.iter().any(|hint| hint.starts_with("fragmented UDP")));
+
+        let empty = counter_hints(State::Active, &Counters::default());
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].starts_with("no selected traffic observed"));
     }
 }

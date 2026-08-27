@@ -9,7 +9,6 @@ mod wire;
 
 pub mod sock_diag;
 
-#[cfg(test)]
 pub use route::Address;
 pub use route::{
     EventSocket, Filter, Link, NetworkSnapshot, Qdisc, Route, RouteNetlink, Rule, IFF_LOOPBACK,

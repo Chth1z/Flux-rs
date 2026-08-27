@@ -12,10 +12,12 @@
 //! 3. `fluxd disable` / `enable`: the state flips Disabled ⇄ Inactive, the
 //!    engine stops and restarts with a new generation.
 //! 4. `fluxd reload`: hot switch — generation grows, pid changes.
-//! 5. Overlapping reload clients wait until the queued transaction converges.
-//! 6. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
+//! 5. Policy-only hot updates preserve the generation and engine pid; an
+//!    invalid policy remains reported across a successful engine update.
+//! 6. Overlapping reload clients wait until the queued transaction converges.
+//! 7. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
 //!    configs never included (exit criterion 5).
-//! 7. `fluxd stop`: daemon exits cleanly, control socket removed, no
+//! 8. `fluxd stop`: daemon exits cleanly, control socket removed, no
 //!    effective file left behind; `status` then fails with a clear message.
 //!
 //! On kernels without `udp_diag` (some sandboxes) the engine cannot verify
@@ -133,6 +135,7 @@ mod tests {
             scenario_disable_enable(&env, full);
             if full {
                 scenario_reload_hot_switch(&env);
+                scenario_policy_domain_hot_reload(&env);
                 scenario_queued_reload_waits_for_convergence(&env);
             }
             scenario_bugreport(&env);
@@ -269,6 +272,88 @@ mod tests {
         println!(
             "PASS reload hot switch (generation {} -> {}, pid {:?} -> {:?})",
             old_generation, response.generation, old_pid, response.engine.pid
+        );
+    }
+
+    fn scenario_policy_domain_hot_reload(env: &Env) {
+        let before = env.status();
+        let generation = before.generation;
+        let pid = before.engine.pid;
+        let initial_v4 = before.policy.bypass_v4;
+
+        std::fs::write(
+            env.root.join("config/flux.toml"),
+            "apps = []\nbypass_cidrs = [\"203.0.113.0/24\"]\n",
+        )
+        .expect("write valid policy");
+        let updated = wait_status(env, Duration::from_secs(10), |response| {
+            response.policy.bypass_v4 == initial_v4 + 1 && response.last_error.is_none()
+        });
+        assert_eq!(
+            updated.generation, generation,
+            "policy must not restart engine"
+        );
+        assert_eq!(updated.engine.pid, pid, "policy must preserve engine pid");
+
+        std::fs::write(
+            env.root.join("config/flux.toml"),
+            "apps = []\nbypass_cidrs = [true]\n",
+        )
+        .expect("write invalid policy");
+        let rejected = wait_status(env, Duration::from_secs(10), |response| {
+            response.last_error.as_deref() == Some("flux_config_invalid")
+        });
+        assert_eq!(
+            rejected.policy, updated.policy,
+            "invalid candidate must preserve the committed policy"
+        );
+        assert_eq!(rejected.generation, generation);
+        assert_eq!(rejected.engine.pid, pid);
+
+        std::fs::write(
+            env.root.join("config/sing-box.json"),
+            serde_json::json!({
+                "outbounds": [ {
+                    "type": "direct",
+                    "tag": format!("{CONFIG_SENTINEL}-updated")
+                } ]
+            })
+            .to_string(),
+        )
+        .expect("write updated engine config");
+        let engine_updated = wait_status(env, Duration::from_secs(10), |response| {
+            response.engine.running
+                && response.generation > generation
+                && response.last_error.as_deref() == Some("flux_config_invalid")
+        });
+        assert_ne!(
+            engine_updated.engine.pid, pid,
+            "engine update must switch pid"
+        );
+        assert_eq!(
+            engine_updated.policy, updated.policy,
+            "engine success must not alter the policy domain"
+        );
+
+        std::fs::write(
+            env.root.join("config/flux.toml"),
+            "apps = []\nbypass_cidrs = [\"203.0.113.0/24\", \"198.51.100.0/24\"]\n",
+        )
+        .expect("repair policy");
+        let repaired = wait_status(env, Duration::from_secs(10), |response| {
+            response.last_error.is_none() && response.policy.bypass_v4 == initial_v4 + 2
+        });
+        assert_eq!(
+            repaired.generation, engine_updated.generation,
+            "policy repair must not advance generation"
+        );
+        assert_eq!(
+            repaired.engine.pid, engine_updated.engine.pid,
+            "policy repair must not restart engine"
+        );
+        println!(
+            "PASS policy and engine transaction domains remain independent (generation {})",
+            repaired.generation
         );
     }
 
@@ -411,6 +496,25 @@ mod tests {
                 path.display()
             );
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_status(
+        env: &Env,
+        timeout: Duration,
+        mut ready: impl FnMut(&Response) -> bool,
+    ) -> Response {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let response = env.status();
+            if ready(&response) {
+                return response;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status did not converge: {response:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

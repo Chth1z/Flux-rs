@@ -275,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn package_name_rules_survive_effective_config_injection_byte_for_byte() {
+        let user = json!({
+            "route": {
+                "rules": [{
+                    "package_name": ["com.example.browser"],
+                    "outbound": "direct"
+                }]
+            },
+            "outbounds": [{ "type": "direct", "tag": "direct" }]
+        });
+        let effective = build_effective(&user, &params()).expect("valid package rule");
+        assert_eq!(effective["route"], user["route"]);
+    }
+
+    #[test]
     fn null_inbounds_is_rejected_as_the_wrong_type() {
         let user = json!({ "inbounds": null, "outbounds": [] });
         assert_eq!(

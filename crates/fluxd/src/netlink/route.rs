@@ -45,6 +45,7 @@ const VETH_INFO_PEER: u16 = 1;
 
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+const IFA_FLAGS: u16 = 8;
 
 #[cfg(test)]
 const NDA_DST: u16 = 1;
@@ -130,6 +131,9 @@ pub struct Address {
     pub family: u8,
     pub prefix_len: u8,
     pub scope: u8,
+    /// Full 32-bit IFA flag set. `IFA_FLAGS` overrides the legacy 8-bit
+    /// header field when present.
+    pub flags: u32,
     pub bytes: Vec<u8>,
 }
 
@@ -708,10 +712,12 @@ fn parse_link(payload: &[u8]) -> io::Result<Link> {
 fn parse_address(payload: &[u8]) -> io::Result<Address> {
     let header: IfAddrMsg = read_struct(payload)?;
     let mut address = None;
+    let mut flags = u32::from(header.flags);
     for attr in attrs(&payload[size_of::<IfAddrMsg>()..])? {
         match attr.kind {
             IFA_LOCAL => address = Some(attr.payload.to_vec()),
             IFA_ADDRESS if address.is_none() => address = Some(attr.payload.to_vec()),
+            IFA_FLAGS => flags = attr_u32(attr)?,
             _ => {}
         }
     }
@@ -720,6 +726,7 @@ fn parse_address(payload: &[u8]) -> io::Result<Address> {
         family: header.family,
         prefix_len: header.prefix_len,
         scope: header.scope,
+        flags,
         bytes: address
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "address has no bytes"))?,
     })
