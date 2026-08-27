@@ -31,7 +31,15 @@ else
 	MANAGER_MODE=n/a
 fi
 
-RUNTIME_ROOT=/data/adb/flux-rs
+# Pass the positively identified manager into the daemon's structured status.
+# These variables are process-local metadata; they are not another state file.
+export FLUX_ROOT_MANAGER="$MANAGER"
+export FLUX_ROOT_MANAGER_VERSION="$MANAGER_VER"
+export FLUX_ROOT_MANAGER_MODE="$MANAGER_MODE"
+
+# FLUX_RUNTIME_ROOT is the daemon's existing integration-test seam. Root
+# managers never set it; production therefore always uses the fixed path.
+RUNTIME_ROOT=${FLUX_RUNTIME_ROOT:-/data/adb/flux-rs}
 LOG="$RUNTIME_ROOT/service.log"
 
 mkdir -p "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"

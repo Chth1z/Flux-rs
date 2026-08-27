@@ -114,6 +114,14 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
     // dmesg needs root on Android; a failure is recorded, not fatal.
     let dmesg = capture_command("dmesg", &[], CAPTURE_DEADLINE)
         .unwrap_or_else(|e| format!("(dmesg failed: {e})\n"));
+    // Default reports must not become a device-wide activity transcript.
+    // Keep only kernel lines that can diagnose this data plane. `--raw` is an
+    // explicit opt-in to the full command output.
+    let dmesg = if redact_on {
+        filter_kernel_lines(&dmesg)
+    } else {
+        dmesg
+    };
     zip.add("dmesg.txt", maybe_redact(&dmesg, redact_on).as_bytes());
 
     if options.with_logcat {
@@ -309,6 +317,24 @@ fn filter_flux_lines(text: &str) -> String {
     out
 }
 
+fn filter_kernel_lines(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if ["flux", "flx_", "bpf", "verifier", "sched_cls"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(no Flux/BPF-related kernel lines)\n");
+    }
+    out
+}
+
 fn readme_text(options: &BugreportOptions) -> String {
     let mut text = String::from(
         "flux-rs bug report\n\
@@ -366,9 +392,64 @@ fn maybe_redact(text: &str, on: bool) -> String {
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
-        out.push_str(&redact_line(line));
+        out.push_str(&redact_domains(&redact_line(line)));
     }
     out
+}
+
+/// Masks domain/package-like tokens so default engine-log tails cannot reveal
+/// browsing habits. Third-party package names are allowed by the Phase 8
+/// contract, but masking them too is the safer and simpler privacy boundary.
+fn redact_domains(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_domain_byte(bytes[index]) {
+            let width = utf8_len(bytes[index]);
+            out.push_str(&line[index..(index + width).min(bytes.len())]);
+            index += width;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_domain_byte(bytes[index]) {
+            index += 1;
+        }
+        let token = &line[start..index];
+        if is_domain_like(token) {
+            out.push_str("[domain-redacted]");
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
+fn is_domain_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+fn is_domain_like(token: &str) -> bool {
+    let token = token.trim_matches(|character| matches!(character, '.' | '-' | '_'));
+    let labels = token.split('.').collect::<Vec<_>>();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        })
+    {
+        return false;
+    }
+    let suffix = labels[labels.len() - 1].to_ascii_lowercase();
+    if ["json", "toml", "log", "txt", "zip", "srs", "rs", "md", "so"].contains(&suffix.as_str()) {
+        return false;
+    }
+    suffix.len() >= 2 && suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
 }
 
 fn redact_line(line: &str) -> String {
@@ -601,7 +682,7 @@ mod tests {
 
     #[test]
     fn redaction_masks_addresses_but_not_timestamps() {
-        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 cookie \"123456789: at 12:34:56\n\
+        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 cookie \"123456789: at 12:34:56 host api.example.com package com.example.app sing-box.json\n\
                      plain 10.0.0.1 and version 1.2.3 and 300.1.2.3 stay sane\n";
         let out = redact(input);
         assert!(out.contains("192.x.x.x:8443"), "{out}");
@@ -617,6 +698,22 @@ mod tests {
         assert!(out.contains("300.1.2.3"), "octet >255 is not an IP: {out}");
         assert!(!out.contains("192.168.1.5"), "{out}");
         assert!(!out.contains("123456789"), "{out}");
+        assert!(!out.contains("api.example.com"), "{out}");
+        assert!(!out.contains("com.example.app"), "{out}");
+        assert!(
+            out.contains("sing-box.json"),
+            "file names remain diagnostic: {out}"
+        );
+    }
+
+    #[test]
+    fn default_kernel_filter_excludes_unrelated_activity() {
+        let filtered = filter_kernel_lines(
+            "audit: unrelated app launch\nBPF: verifier rejected flx_cap_l2\nfluxd denied\n",
+        );
+        assert!(!filtered.contains("app launch"));
+        assert!(filtered.contains("verifier rejected"));
+        assert!(filtered.contains("fluxd denied"));
     }
 
     #[test]

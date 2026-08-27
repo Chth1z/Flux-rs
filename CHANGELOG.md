@@ -31,6 +31,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `cargo xtask doc-check` (in CI): chapter map, relative links,
   `FLUX_SEC_*`/`SEC_*` identity within the measured-usable set, and overturn
   numbering consistency.
+- Phase 2–7 runtime: root-only control socket and event-driven reactor;
+  typed rtnetlink ownership/cleanup; embedded raw-syscall BPF loader; exact TC
+  attachment and liveness admission; official sing-box check/readiness,
+  generation switching and crash recovery; policy/config/topology convergence;
+  per-UID statistics, status hints and privacy-preserving bug reports.
+- Phase 8 module lifecycle: one `service.sh` boot path for Magisk, KernelSU and
+  APatch; structured root-manager/runtime-mode status; non-interactive
+  `action.sh` with explicit enable/disable and live module description;
+  synchronous narrow uninstall; first-start random Clash API secret.
+- Signed-tag release workflow with tag/workspace-version equality,
+  reproducible package verification, git-commit provenance, SHA256SUMS, and the
+  pinned official sing-box Corresponding Source archive beside the module ZIP.
 
 ### Removed
 

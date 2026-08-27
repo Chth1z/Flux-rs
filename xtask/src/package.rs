@@ -77,6 +77,40 @@ pub fn verify() -> Result<(), String> {
     Ok(())
 }
 
+/// Release preparation for one already-signed tag.
+///
+/// Signature verification belongs to the GitHub workflow because GitHub has
+/// the authoritative verification result for both GPG- and SSH-signed tags.
+/// This side owns every deterministic artifact and the single-version check.
+pub fn release(tag: &str) -> Result<(), String> {
+    let root = util::repo_root();
+    let version = workspace_version(&root)?;
+    let expected = flux_core::version::version_tag(&version);
+    if tag != expected {
+        return Err(format!(
+            "release tag `{tag}` does not equal workspace version tag `{expected}`"
+        ));
+    }
+    verify()?;
+    let (source, digest) = corresponding_source(&root)?;
+    let zip_name = flux_core::version::artifact_name(&version);
+    let sums = root.join("dist/SHA256SUMS");
+    let module_sum = util::read_text(&sums)?;
+    if !module_sum.ends_with(&format!("  {zip_name}\n")) {
+        return Err("package checksum does not name the version-derived module ZIP".into());
+    }
+    let source_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Corresponding Source artifact name is not UTF-8".to_string())?;
+    util::write_bytes(
+        &sums,
+        format!("{module_sum}{}  {source_name}\n", sha256::hex(&digest)).as_bytes(),
+    )?;
+    println!("release: OK — {tag}, {zip_name}, {source_name}, and SHA256SUMS agree");
+    Ok(())
+}
+
 fn clean_cross_target(root: &Path) -> Result<(), String> {
     let dir = root.join("target/aarch64-linux-android");
     if dir.exists() {
@@ -300,6 +334,7 @@ fn check_pin(lock: &toml::Value, what: &str, data: &[u8]) -> Result<(), String> 
 /// Cross-build `fluxd` with the embedded BPF object and the 16 KiB page-size
 /// link flags, then enforce `p_align >= 0x4000` on every LOAD segment.
 fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
+    let provenance = git_provenance(root)?;
     let mut cmd = Command::new(util::cargo());
     cmd.current_dir(root)
         .args([
@@ -312,6 +347,7 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
             "aarch64-linux-android",
         ])
         .env("FLUX_BUILD_BPF", "1")
+        .env("FLUX_COMMIT", &provenance)
         // RUSTFLAGS replaces the [target.aarch64-linux-android] rustflags from
         // .cargo/config.toml, so crt-static must be restated here.
         .env(
@@ -351,7 +387,9 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
         cmd.env("PATH", joined);
     }
 
-    println!("package: cross-building fluxd (aarch64-linux-android, BPF object embedded)");
+    println!(
+        "package: cross-building fluxd (aarch64-linux-android, BPF object embedded, commit {provenance})"
+    );
     util::run(&mut cmd, "fluxd cross build")?;
 
     let fluxd = root.join("target/aarch64-linux-android/release/fluxd");
@@ -370,6 +408,92 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
         aligns.len()
     );
     Ok(fluxd)
+}
+
+fn git_provenance(root: &Path) -> Result<String, String> {
+    if let Ok(value) = std::env::var("FLUX_COMMIT") {
+        let value = value.trim();
+        if valid_provenance(value) {
+            return Ok(value.to_string());
+        }
+        return Err("FLUX_COMMIT is not a 7-64 character hex commit provenance".into());
+    }
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| format!("read git commit: {error}"))?;
+    if !output.status.success() {
+        return Err("git rev-parse HEAD failed; set FLUX_COMMIT explicitly".into());
+    }
+    let commit = String::from_utf8(output.stdout)
+        .map_err(|_| "git commit is not UTF-8".to_string())?
+        .trim()
+        .to_string();
+    if !valid_provenance(&commit) {
+        return Err(format!("git returned invalid commit provenance `{commit}`"));
+    }
+    let status = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+        .map_err(|error| format!("read git worktree status: {error}"))?;
+    if !status.status.success() {
+        return Err("git status failed while deriving build provenance".into());
+    }
+    Ok(if status.stdout.is_empty() {
+        commit
+    } else {
+        format!("{commit}-dirty")
+    })
+}
+
+fn valid_provenance(value: &str) -> bool {
+    let commit = value.strip_suffix("-dirty").unwrap_or(value);
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Fetch and verify the exact upstream tree used to build the pinned binary.
+/// The archive includes upstream's Makefile, release scripts, `go.mod` and
+/// `go.sum`, satisfying the build-script/dependency-source part of §9.7.
+fn corresponding_source(root: &Path) -> Result<(PathBuf, [u8; 32]), String> {
+    let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
+        .parse()
+        .map_err(|error| format!("parse engine.lock: {error}"))?;
+    let version = lock_str(&lock, "version")?;
+    let commit = lock_str(&lock, "upstream_commit")?;
+    let url = lock_str(&lock, "source_archive_url")?;
+    if !url.contains(commit) {
+        return Err("engine.lock source_archive_url does not contain upstream_commit".into());
+    }
+    let name = format!("sing-box-v{version}-source.tar.gz");
+    let cache = root.join("target/xtask/source").join(&name);
+    if !cache.is_file() {
+        if let Some(parent) = cache.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        let partial = cache.with_extension("partial");
+        util::run(
+            Command::new("curl")
+                .arg("-fsSL")
+                .arg("--retry")
+                .arg("3")
+                .arg("-o")
+                .arg(&partial)
+                .arg(url),
+            "Corresponding Source download",
+        )?;
+        std::fs::rename(&partial, &cache)
+            .map_err(|error| format!("rename source download: {error}"))?;
+    }
+    let bytes = util::read_bytes(&cache)?;
+    check_pin(&lock, "source_archive", &bytes)?;
+    let destination = root.join("dist").join(&name);
+    util::write_bytes(&destination, &bytes)?;
+    let digest = sha256::digest(&bytes);
+    println!("release: sing-box {version} Corresponding Source verified at commit {commit}");
+    Ok((destination, digest))
 }
 
 /// The first `clang` on PATH that is not part of an NDK toolchain. NDK bin
@@ -665,4 +789,44 @@ fn multiarch_include() -> Option<PathBuf> {
     let triple = std::str::from_utf8(&output.stdout).ok()?.trim();
     let include = PathBuf::from("/usr/include").join(triple);
     include.is_dir().then_some(include)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provenance_accepts_commits_and_explicit_dirty_suffix_only() {
+        assert!(valid_provenance("0123456"));
+        assert!(valid_provenance(
+            "0123456789abcdef0123456789abcdef01234567-dirty"
+        ));
+        assert!(!valid_provenance("012345"));
+        assert!(!valid_provenance("0123456-unknown"));
+        assert!(!valid_provenance("not-a-commit"));
+    }
+
+    #[test]
+    fn source_lock_is_tied_to_the_pinned_upstream_commit() {
+        let root = util::repo_root();
+        let lock: toml::Value = util::read_text(&root.join("engine.lock"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let commit = lock_str(&lock, "upstream_commit").unwrap();
+        let url = lock_str(&lock, "source_archive_url").unwrap();
+        let digest = lock_str(&lock, "source_archive_sha256").unwrap();
+        assert_eq!(commit.len(), 40);
+        assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(url.contains(commit));
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(lock_int(&lock, "source_archive_size").unwrap() > 0);
+    }
+
+    #[test]
+    fn release_refuses_a_tag_that_is_not_the_workspace_version() {
+        let error = release("v999.0.0").unwrap_err();
+        assert!(error.contains("does not equal workspace version tag"));
+    }
 }

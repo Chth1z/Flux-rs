@@ -79,6 +79,33 @@ pub struct PolicyCounts {
     pub self_addresses: u32,
 }
 
+/// Root-module manager identity exported by `service.sh` (blueprint §13.2.0).
+///
+/// KernelSU's runtime mode is operationally important: `lkm` and `late-load`
+/// use the vendor kernel and therefore have a different BPF capability profile
+/// from `built-in`.  Keeping this structured avoids burying the first support
+/// question in a free-text warning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RootManagerStatus {
+    /// `magisk`, `kernelsu`, `apatch`, or `unknown` for a manual launch.
+    pub name: String,
+    /// Manager version as supplied by its documented environment.
+    pub version: String,
+    /// KernelSU `built-in` / `lkm` / `late-load`; `n/a` otherwise.
+    pub runtime_mode: String,
+}
+
+impl Default for RootManagerStatus {
+    fn default() -> Self {
+        Self {
+            name: "unknown".to_string(),
+            version: "unknown".to_string(),
+            runtime_mode: "n/a".to_string(),
+        }
+    }
+}
+
 /// Per-interface status (blueprint §24.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IfaceStatus {
@@ -170,6 +197,9 @@ pub struct Response {
     /// when no one-shot backoff is armed (blueprint §25).
     #[serde(default)]
     pub backoff_seconds: u64,
+    /// Root manager and, for KernelSU, its runtime mode (§13.2.0).
+    #[serde(default)]
+    pub root_manager: RootManagerStatus,
     /// Engine child status.
     pub engine: EngineStatus,
     /// Policy population counts.
@@ -248,6 +278,11 @@ mod tests {
             state: State::Active,
             generation: 7,
             backoff_seconds: 0,
+            root_manager: RootManagerStatus {
+                name: "kernelsu".to_string(),
+                version: "1.0.5".to_string(),
+                runtime_mode: "lkm".to_string(),
+            },
             engine: EngineStatus {
                 running: true,
                 pid: Some(1234),

@@ -29,6 +29,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", include.display());
     println!("cargo:rerun-if-changed={}", libbpf_include.display());
     println!("cargo:rerun-if-env-changed=FLUX_BUILD_BPF");
+    println!("cargo:rerun-if-env-changed=FLUX_COMMIT");
     println!("cargo:rustc-env=FLUX_BPF_OBJECT={}", object.display());
 
     if env::var_os("FLUX_BUILD_BPF").is_none() {

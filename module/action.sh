@@ -20,6 +20,35 @@ set_description() {
 	sed -i "s|^description=.*|description=$1|" "$MODDIR/module.prop"
 }
 
+json_number() {
+	printf '%s\n' "$1" | sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p"
+}
+
+# Re-read after the explicit action: enable may still be converging, and the
+# manager list must say Inactive rather than claim Active prematurely.
+refresh_description() {
+	CURRENT=$("$FLUXD" status --json 2>/dev/null)
+	if [ -z "$CURRENT" ]; then
+		set_description "[Enabled] Daemon not reachable; check service.log."
+		return
+	fi
+	GEN=$(json_number "$CURRENT" generation)
+	APPS=$(json_number "$CURRENT" selected)
+	TCP=$(json_number "$CURRENT" admit_tcp)
+	UDP=$(json_number "$CURRENT" admit_udp)
+	[ -n "$GEN" ] || GEN=0
+	[ -n "$APPS" ] || APPS=0
+	[ -n "$TCP" ] || TCP=0
+	[ -n "$UDP" ] || UDP=0
+	case "$CURRENT" in
+	*'"state":"Active"'*) LABEL=Active ;;
+	*'"state":"Inactive"'*) LABEL=Inactive ;;
+	*'"state":"Disabled"'*) LABEL=Disabled ;;
+	*) LABEL=Unknown ;;
+	esac
+	set_description "[$LABEL] gen $GEN · $APPS apps · $TCP tcp / $UDP udp"
+}
+
 if [ ! -x "$FLUXD" ]; then
 	echo "Flux-rs: fluxd binary is missing or not executable."
 	set_description "[Error] fluxd binary missing."
@@ -32,16 +61,16 @@ case "$STATE" in
 *'"state":"Disabled"'*)
 	echo "Flux-rs is disabled. Enabling."
 	"$FLUXD" enable 2>&1
-	set_description "[Enabled] Tap to disable; use fluxd status for details."
+	refresh_description
 	;;
 *'"state":"Inactive"'* | *'"state":"Active"'*)
 	echo "Flux-rs is enabled. Disabling."
 	"$FLUXD" disable 2>&1
-	set_description "[Disabled] Tap to enable."
+	refresh_description
 	;;
 *)
 	echo "Flux-rs daemon is not reachable; persisting the enabled switch."
 	"$FLUXD" enable 2>&1
-	set_description "[Enabled] Daemon not reachable; check service.log."
+	refresh_description
 	;;
 esac

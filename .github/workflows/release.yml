@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: signed tag / reproducible release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A lightweight or unsigned annotated tag is not a release authority.
+      # GitHub's tag-object verification handles both GPG and SSH signatures.
+      - name: Verify signed annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object')
+          object_type=$(printf '%s' "$tag_object" | jq -r '.type')
+          object_sha=$(printf '%s' "$tag_object" | jq -r '.sha')
+          test "$object_type" = tag || {
+            echo "release tag must be annotated and signed"; exit 1;
+          }
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.verification.verified')
+          test "$verified" = true || {
+            echo "GitHub did not verify the release-tag signature"; exit 1;
+          }
+
+      - name: Set up NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+
+      - name: Install BPF build inputs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev
+          sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+
+      - name: Source and test gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          cargo xtask doc-check
+          cargo xtask template-check
+
+      - name: Build release and Corresponding Source
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo xtask release "$GITHUB_REF_NAME"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Flux-rs-"$GITHUB_REF_NAME"-arm64.zip \
+            dist/SHA256SUMS \
+            dist/sing-box-v*-source.tar.gz \
+            --verify-tag \
+            --generate-notes \
+            --title "Flux-rs $GITHUB_REF_NAME"

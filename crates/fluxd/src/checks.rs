@@ -402,10 +402,10 @@ fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
         return;
     };
     match clash.get("secret").and_then(|s| s.as_str()) {
-        Some(secret) if !secret.is_empty() => {}
+        Some(secret) if !secret.is_empty() && secret != "__FLUX_GENERATE_SECRET__" => {}
         _ => {
             report.errors.push(
-                "clash_api_secret_missing: experimental.clash_api.secret is empty or absent; \
+                "clash_api_secret_missing: experimental.clash_api.secret is empty, absent, or still the bootstrap marker; \
                  any app could reconfigure the proxy (docs/ux.md §3.2)"
                     .to_string(),
             );

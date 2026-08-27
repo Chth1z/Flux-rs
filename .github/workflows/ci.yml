@@ -181,6 +181,18 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo xtask verify-package
 
+      # A short-lived CI artifact is for device acceptance only. It is not a
+      # release channel; signed v* tags are published by release.yml.
+      - name: Upload device-acceptance package
+        uses: actions/upload-artifact@v4
+        with:
+          name: flux-rs-module-${{ github.sha }}
+          path: |
+            dist/Flux-rs-v*-arm64.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
   supply-chain:
     name: cargo deny
     runs-on: ubuntu-latest
@@ -201,3 +213,6 @@ jobs:
           sudo apt-get install -y shellcheck
           # Module scripts run under BusyBox ash, so target sh, not bash.
           shellcheck --shell=sh --severity=warning module/*.sh
+
+      - name: Module lifecycle contract
+        run: sh tools/phase8/module_lifecycle_test.sh

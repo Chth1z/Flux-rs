@@ -129,6 +129,12 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         };
         println!("state:      {state}");
         println!("generation: {}", response.generation);
+        println!(
+            "manager:    {} {} ({})",
+            response.root_manager.name,
+            response.root_manager.version,
+            response.root_manager.runtime_mode
+        );
         if response.backoff_seconds > 0 {
             println!("backoff:    {}s", response.backoff_seconds);
         }

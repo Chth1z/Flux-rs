@@ -23,17 +23,27 @@ ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 # persistent state; booting a half-installed control plane is worse than a
 # loud install failure.
 for payload in \
+	module.prop \
+	customize.sh \
+	service.sh \
+	action.sh \
+	uninstall.sh \
 	bin/fluxd \
 	bin/sing-box \
 	etc/default-flux.toml \
 	etc/default-sing-box.json \
 	engine.lock \
 	LICENSE \
-	THIRD_PARTY_NOTICES.md; do
+	THIRD_PARTY_NOTICES.md \
+	licenses/sing-box-LICENSE \
+	licenses/DEPENDENCIES.md; do
 	if [ ! -s "$MODPATH/$payload" ]; then
 		abort "! Incomplete module payload: $payload is missing or empty."
 	fi
 done
+if [ ! -e "$MODPATH/skip_mount" ]; then
+	abort "! Incomplete module payload: skip_mount is missing."
+fi
 
 # Architecture. The data plane is aarch64-only.
 if [ "$ARCH" != "arm64" ]; then

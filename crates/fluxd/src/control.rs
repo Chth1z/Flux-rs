@@ -363,7 +363,9 @@ mod tests {
     }
 
     fn sample_response() -> Response {
-        use flux_core::control_wire::{Counters, EngineStatus, PolicyCounts, State};
+        use flux_core::control_wire::{
+            Counters, EngineStatus, PolicyCounts, RootManagerStatus, State,
+        };
         Response {
             ok: true,
             version: flux_core::VERSION.to_string(),
@@ -371,6 +373,7 @@ mod tests {
             state: State::Inactive,
             generation: 0,
             backoff_seconds: 0,
+            root_manager: RootManagerStatus::default(),
             engine: EngineStatus {
                 running: false,
                 pid: None,

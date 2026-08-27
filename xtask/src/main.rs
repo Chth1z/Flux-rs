@@ -38,6 +38,7 @@ TASKS:
     build-bpf      compile bpf/flux.bpf.c with clang
     package        build the module ZIP from the allowlist
     verify-package package twice from clean cross-build state, assert equal hashes
+    release TAG    verify TAG/version, package reproducibly, add Corresponding Source
 "
 }
 
@@ -97,6 +98,10 @@ fn main() -> ExitCode {
         "build-bpf" => package::build_bpf(),
         "package" => package::run(),
         "verify-package" => package::verify(),
+        "release" => match std::env::args().nth(2) {
+            Some(tag) => package::release(&tag),
+            None => Err("release requires the pushed v* tag as its only argument".into()),
+        },
         other => {
             eprintln!("xtask: unknown task `{other}`");
             eprint!("{}", usage());

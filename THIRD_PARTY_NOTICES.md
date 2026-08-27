@@ -10,6 +10,12 @@ The module distributes the **unmodified** official release binary, pinned by
 - Upstream: <https://github.com/SagerNet/sing-box>
 - License: GPL-3.0-or-later
 
+Every Flux-rs release publishes the exact upstream source tree pinned by
+`engine.lock` beside the module ZIP. That archive includes sing-box's build
+scripts, `go.mod`, and `go.sum`; its size and SHA-256 are verified before the
+release is created. The source archive is intentionally not nested inside the
+module ZIP.
+
 ## Vendored at build time
 
 ### libbpf headers (header-only subset)

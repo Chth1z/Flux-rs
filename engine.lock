@@ -18,6 +18,7 @@
 name = "sing-box"
 version = "1.13.19"
 released = "2026-08-17T09:47:06Z"
+upstream_commit = "b5ebaa1fc0f2b94256180b95468e73ef53caa27d"
 
 archive_url = "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box-1.13.19-android-arm64.tar.gz"
 archive_sha256 = "e737ac40187563673e1fc282aebf1774e09f3b2057203872798968a2126fab53"
@@ -26,6 +27,13 @@ archive_size = 18106459
 binary_path_in_archive = "sing-box-1.13.19-android-arm64/sing-box"
 binary_sha256 = "8279e9a05a5ee4e0700989a70517a86da29490113c85d2f84316a837f9b56b02"
 binary_size = 58641280
+
+# Exact Corresponding Source for the shipped official binary. Phase 8's tag
+# workflow verifies this archive and publishes it beside the module ZIP; it is
+# deliberately not included inside the module ZIP (blueprint §9.7).
+source_archive_url = "https://github.com/SagerNet/sing-box/archive/b5ebaa1fc0f2b94256180b95468e73ef53caa27d.tar.gz"
+source_archive_sha256 = "ced35366a3aacc43b52abfd69b1827df7d9eda988392758dd98f2c45922dc2c3"
+source_archive_size = 958453
 
 # GPL-3.0-or-later. Shipped alongside the binary; see THIRD_PARTY_NOTICES.md.
 license_path_in_archive = "sing-box-1.13.19-android-arm64/LICENSE"
