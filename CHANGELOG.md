@@ -39,7 +39,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Phase 8 module lifecycle: one `service.sh` boot path for Magisk, KernelSU and
   APatch; structured root-manager/runtime-mode status; non-interactive
   `action.sh` with explicit enable/disable and live module description;
-  synchronous narrow uninstall; first-start random Clash API secret.
+  synchronous narrow uninstall; blueprint-minimal direct bootstrap config with
+  no remote rule-set or WebUI downloads.
 - Signed-tag release workflow with tag/workspace-version equality,
   reproducible package verification, git-commit provenance, SHA256SUMS, and the
   pinned official sing-box Corresponding Source archive beside the module ZIP.

@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -297,13 +297,6 @@ impl Reactor {
         let server = ControlServer::bind(&layout.control_socket())?;
         let dataplane = crate::dataplane::Manager::open()?;
         let root_manager = root_manager_from_env();
-
-        // Fresh installs deliberately start Disabled, so convergence would
-        // otherwise never read the engine config and the public bootstrap
-        // marker could survive the daemon's first start. Initialise it before
-        // the state-machine branch; later config replacements are still caught
-        // by `read_engine_config` below.
-        initialize_generated_secret(&layout.sing_box_json())?;
 
         // Cold start: any effective file is a leftover of a previous instance
         // — we hold the lock and have no child yet (§11.1).
@@ -2255,20 +2248,6 @@ impl Reactor {
     /// valid update (§10.5).
     fn read_engine_config(&self) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.sing_box_json();
-        if let Err(error) = initialize_generated_secret(&path) {
-            let token = if error.kind() == io::ErrorKind::InvalidData {
-                "engine_config_invalid".to_string()
-            } else {
-                format!(
-                    "engine_config_unreadable:{}",
-                    error
-                        .raw_os_error()
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| format!("{:?}", error.kind()))
-                )
-            };
-            return Err((token, Some(error.to_string())));
-        }
         let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -2534,80 +2513,6 @@ impl Reactor {
                 .or_else(|| self.last_error.clone()),
         }
     }
-}
-
-const GENERATED_SECRET_MARKER: &[u8] = b"__FLUX_GENERATE_SECRET__";
-
-/// Replaces the one bootstrap secret marker with 256 bits from `/dev/urandom`.
-///
-/// The replacement is an atomic, mode-0600 rename in the same directory.  It
-/// happens before the config is parsed or handed to sing-box, so the public
-/// Clash API can never run with the known marker from the shipped template.
-fn initialize_generated_secret(path: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let input = match fs::read(path) {
-        Ok(input) => input,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let positions = input
-        .windows(GENERATED_SECRET_MARKER.len())
-        .enumerate()
-        .filter_map(|(index, value)| (value == GENERATED_SECRET_MARKER).then_some(index))
-        .collect::<Vec<_>>();
-    let Some(&position) = positions.first() else {
-        return Ok(false);
-    };
-    if positions.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sing-box.json contains the generated-secret marker more than once",
-        ));
-    }
-
-    let mut random = [0_u8; 32];
-    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut secret = [0_u8; 64];
-    for (index, byte) in random.iter().copied().enumerate() {
-        secret[index * 2] = HEX[usize::from(byte >> 4)];
-        secret[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
-    }
-
-    let mut output = Vec::with_capacity(input.len() - GENERATED_SECRET_MARKER.len() + secret.len());
-    output.extend_from_slice(&input[..position]);
-    output.extend_from_slice(&secret);
-    output.extend_from_slice(&input[position + GENERATED_SECRET_MARKER.len()..]);
-
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "sing-box.json has no parent directory",
-        )
-    })?;
-    let suffix = random[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let temporary = parent.join(format!(".sing-box.json.secret.{suffix}"));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(&output)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.map(|()| true)
 }
 
 fn root_manager_from_env() -> RootManagerStatus {
@@ -3034,37 +2939,6 @@ mod tests {
         assert!(lpm_trie_kernel_safe("6.6.47-gki"));
         assert!(lpm_trie_kernel_safe("5.15.211-android14"));
         assert!(lpm_trie_kernel_safe("6.12.0"));
-    }
-
-    #[test]
-    fn bootstrap_secret_is_replaced_once_and_atomically() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!(
-            "flux-secret-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join("sing-box.json");
-        fs::write(&path, b"{\"secret\":\"__FLUX_GENERATE_SECRET__\"}\n").unwrap();
-
-        assert!(initialize_generated_secret(&path).unwrap());
-        let first = fs::read_to_string(&path).unwrap();
-        assert!(!first.contains("__FLUX_GENERATE_SECRET__"));
-        let secret = first.split('"').nth(3).unwrap();
-        assert_eq!(secret.len(), 64);
-        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert!(!initialize_generated_secret(&path).unwrap());
-        assert_eq!(fs::read_to_string(&path).unwrap(), first);
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

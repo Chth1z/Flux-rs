@@ -108,9 +108,10 @@ The two authority files are:
 - `/data/adb/flux-rs/config/sing-box.json` — the complete user-owned official
   sing-box configuration. Flux only injects its two generated TProxy inbounds.
 
-On first daemon start, the known Clash API bootstrap marker in the default
-config is atomically replaced with a random 256-bit secret. Reinstalling does
-not overwrite either config.
+The shipped bootstrap config is deliberately minimal: one official direct
+outbound, a direct final route, and the required `sniff` / `hijack-dns` rules.
+It has no remote rule-set or WebUI downloads. Flux never rewrites either user
+authority file, and reinstalling does not overwrite them.
 
 ```sh
 FLUXD=/data/adb/modules/flux_rs/bin/fluxd

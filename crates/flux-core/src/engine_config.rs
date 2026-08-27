@@ -335,7 +335,27 @@ mod tests {
         // No inbound, so Flux can inject its own.
         assert!(build_effective(&config, &params()).is_ok());
 
-        // Both route rules present (blueprint §1.3.4).
+        // The bootstrap remains exactly the small §9.6 direct configuration;
+        // remote rule sets, selectors, DNS policy, and WebUI belong to the
+        // user's authority file rather than the module default.
+        let top = config.as_object().expect("template is an object");
+        assert_eq!(top.len(), 2);
+        assert!(top.contains_key("outbounds"));
+        assert!(top.contains_key("route"));
+        assert_eq!(
+            config["outbounds"],
+            json!([{ "type": "direct", "tag": "DIRECT" }])
+        );
+        assert_eq!(config["route"]["final"], "DIRECT");
+        assert_eq!(
+            config["route"]["rules"]
+                .as_array()
+                .expect("template route.rules is an array")
+                .len(),
+            2
+        );
+
+        // Both route rules remain present (blueprint §1.3.4).
         assert!(
             has_sniff_rule(&config),
             "default template lacks a sniff rule"
@@ -344,28 +364,6 @@ mod tests {
             has_dns_hijack_rule(&config),
             "default template lacks a hijack-dns rule"
         );
-
-        // sing-box rejects a selector/urltest with no members ("missing
-        // tags"); this crate cannot run `sing-box check`, so it re-asserts
-        // the one semantic rule the shipped template has actually violated.
-        // Caught for real: the region selectors were shipped with
-        // `"outbounds": []` and v1.13.19 refused the whole config.
-        for outbound in config["outbounds"]
-            .as_array()
-            .expect("template has outbounds")
-        {
-            let kind = outbound["type"].as_str().unwrap_or_default();
-            if kind == "selector" || kind == "urltest" {
-                assert!(
-                    outbound["outbounds"]
-                        .as_array()
-                        .is_some_and(|o| !o.is_empty()),
-                    "{} `{}` has no member outbounds; sing-box check fails on it",
-                    kind,
-                    outbound["tag"].as_str().unwrap_or("?")
-                );
-            }
-        }
     }
 
     #[test]

@@ -1,137 +1,27 @@
-// Flux-rs 随模块分发的 sing-box 配置模板。
-// 首次启动时若 /data/adb/flux-rs/sing-box.json 不存在，则复制过去。
+// Flux-rs bootstrap configuration (blueprint §9.6).
 //
-// 与旧版 Flux 模板的三处必要改动（不是风格问题，理由见 docs/blueprint.md §9.0）：
-//   1. 删除了 inbounds —— Flux 独占注入两个 tproxy inbound，模板里出现会抢端口
-//   2. clash_api 加了 secret —— Android 的 loopback 不按应用隔离，没有 secret
-//      等于让任意应用能改你的代理配置、读取访问过的域名
-//   3. fakeip 地址段改了 —— 旧的 198.18.0.0/15 与 fc00::/18 都落在 Flux 的
-//      固定 bypass 里，会让 fakeip 静默完全失效
-//
-// 改完执行 `fluxd check`。它会交叉校验 fakeip 段与 bypass 集是否相交。
+// Flux injects exactly two tproxy inbounds into an immutable per-generation
+// copy. Keep this user-authority template deliberately small: one official
+// direct outbound, a direct final route, and the two §1.3.4 DNS rules. Users
+// can replace the file with any complete supported sing-box configuration.
 {
-  "log": {
-    "level": "error",
-    "timestamp": true,
-    "output": "./sing-box.log"
-  },
-
-  "dns": {
-    "servers": [
-      {
-        "type": "https",
-        "tag": "dns_proxy",
-        "server": "1.1.1.1",
-        "detour": "PROXY"
-      },
-      {
-        "type": "https",
-        "tag": "dns_direct",
-        "server": "223.5.5.5"
-      },
-      {
-        // 两段都必须在 Flux 的 bypass 之外，否则 fakeip 会失效。
-        // 不要改回 198.18.0.0/15 或 fc00::/18。
-        "type": "fakeip",
-        "tag": "dns_fakeip",
-        "inet4_range": "198.19.0.0/16",
-        "inet6_range": "2001:db8:f::/48"
-      }
-    ],
-    "rules": [
-      { "clash_mode": "Direct", "server": "dns_direct" },
-      { "clash_mode": "Global", "server": "dns_proxy" },
-      { "rule_set": "cn", "server": "dns_direct" },
-      {
-        "query_type": ["A", "AAAA"],
-        "rule_set": "proxy",
-        "server": "dns_fakeip"
-      }
-    ],
-    "final": "dns_proxy",
-    "strategy": "prefer_ipv4",
-    "independent_cache": true
-  },
-
-  // 没有 inbounds。Flux 会注入。
   "outbounds": [
-    { "type": "direct", "tag": "DIRECT" },
-
-    // 订阅更新会把下面地区 selector 的成员替换成对应节点。
-    // 想增删地区，在这里加一个同名 selector 即可。DIRECT 占位不能删：
-    // sing-box 拒绝空 selector（`missing tags`），删掉它 `sing-box check`
-    // 直接失败，模板就违反了 §15.2 测试 4。
-    {
-      "type": "selector",
-      "tag": "PROXY",
-      "outbounds": ["HK", "TW", "JP", "SG", "US"],
-      "interrupt_exist_connections": true
-    },
-    { "type": "selector", "tag": "GLOBAL", "outbounds": ["PROXY"] },
-    { "type": "selector", "tag": "HK", "outbounds": ["DIRECT"] },
-    { "type": "selector", "tag": "TW", "outbounds": ["DIRECT"] },
-    { "type": "selector", "tag": "JP", "outbounds": ["DIRECT"] },
-    { "type": "selector", "tag": "SG", "outbounds": ["DIRECT"] },
-    { "type": "selector", "tag": "US", "outbounds": ["DIRECT"] }
+    { "type": "direct", "tag": "DIRECT" }
   ],
 
   "route": {
     "rules": [
       { "action": "sniff" },
-      { "protocol": "dns", "action": "hijack-dns" },
-      { "clash_mode": "Direct", "outbound": "DIRECT" },
-      { "clash_mode": "Global", "outbound": "GLOBAL" },
-      { "rule_set": "cn", "outbound": "DIRECT" },
-      { "rule_set": "cnip", "outbound": "DIRECT" },
-      { "ip_is_private": true, "outbound": "DIRECT" }
-    ],
-    "rule_set": [
       {
-        "type": "remote",
-        "tag": "proxy",
-        "format": "binary",
-        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/proxy.srs",
-        "download_detour": "PROXY",
-        "update_interval": "1d"
-      },
-      {
-        "type": "remote",
-        "tag": "cn",
-        "format": "binary",
-        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs",
-        "download_detour": "PROXY",
-        "update_interval": "1d"
-      },
-      {
-        "type": "remote",
-        "tag": "cnip",
-        "format": "binary",
-        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
-        "download_detour": "PROXY",
-        "update_interval": "1d"
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          { "port": 53 },
+          { "protocol": "dns" }
+        ],
+        "action": "hijack-dns"
       }
     ],
-    "final": "PROXY",
-    "auto_detect_interface": true,
-    "default_domain_resolver": { "server": "dns_direct" }
-  },
-
-  "experimental": {
-    "cache_file": {
-      "enabled": true,
-      "store_fakeip": true,
-      "store_rdrc": true
-    },
-    "clash_api": {
-      // secret 由 fluxd 首次启动时替换成随机值。不要手工填成固定值，
-      // 也不要留空 —— 见文件顶部第 2 条。
-      // external_controller 必须绑 127.0.0.1，绝不能是 0.0.0.0。
-      "external_controller": "127.0.0.1:9090",
-      "secret": "__FLUX_GENERATE_SECRET__",
-      "external_ui": "./zashboard",
-      "external_ui_download_url": "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip",
-      "external_ui_download_detour": "PROXY",
-      "default_mode": "Rule"
-    }
+    "final": "DIRECT"
   }
 }

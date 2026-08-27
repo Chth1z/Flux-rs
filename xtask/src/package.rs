@@ -684,6 +684,61 @@ pub fn build_bpf() -> Result<(), String> {
 
 /// Runs the pinned official host binary's real `check -c` against the exact
 /// shipped template after applying Flux's two generated inbounds.
+fn validate_default_template_shape(template: &str) -> Result<(), String> {
+    let user = flux_core::engine_config::parse_jsonc(template)
+        .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
+    let top = user
+        .as_object()
+        .ok_or_else(|| "module/template.json must be a JSON object".to_string())?;
+    if top.len() != 2 || !top.contains_key("outbounds") || !top.contains_key("route") {
+        return Err(
+            "module/template.json must contain only the blueprint bootstrap outbounds and route"
+                .into(),
+        );
+    }
+
+    let outbounds = user
+        .get("outbounds")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "module/template.json outbounds must be an array".to_string())?;
+    let direct = outbounds
+        .first()
+        .and_then(|value| value.as_object())
+        .filter(|_| outbounds.len() == 1)
+        .ok_or_else(|| {
+            "module/template.json must contain exactly one direct outbound".to_string()
+        })?;
+    if direct.len() != 2
+        || direct.get("type").and_then(|value| value.as_str()) != Some("direct")
+        || direct.get("tag").and_then(|value| value.as_str()) != Some("DIRECT")
+    {
+        return Err(
+            "module/template.json must contain only the tagged official direct outbound".into(),
+        );
+    }
+
+    let route = user
+        .get("route")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| "module/template.json route must be an object".to_string())?;
+    if route.len() != 2 || route.get("final").and_then(|value| value.as_str()) != Some("DIRECT") {
+        return Err("module/template.json route must contain only rules and final=DIRECT".into());
+    }
+    let rules = route
+        .get("rules")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "module/template.json route.rules must be an array".to_string())?;
+    if rules.len() != 2 || rules[0].get("action").and_then(|value| value.as_str()) != Some("sniff")
+    {
+        return Err("module/template.json must begin with the blueprint sniff rule".into());
+    }
+    if !flux_core::engine_config::has_dns_hijack_rule(&user) {
+        return Err("module/template.json has no hijack-dns route rule".into());
+    }
+
+    Ok(())
+}
+
 pub fn template_check() -> Result<(), String> {
     let root = util::repo_root();
     let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
@@ -738,23 +793,9 @@ pub fn template_check() -> Result<(), String> {
     check_pin(&lock, "check_binary", &util::read_bytes(&binary)?)?;
 
     let template = util::read_text(&root.join("module/template.json"))?;
+    validate_default_template_shape(&template)?;
     let user = flux_core::engine_config::parse_jsonc(&template)
         .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
-    if !flux_core::engine_config::has_dns_hijack_rule(&user) {
-        return Err("module/template.json has no hijack-dns route rule".into());
-    }
-    let has_sniff = user
-        .get("route")
-        .and_then(|route| route.get("rules"))
-        .and_then(|rules| rules.as_array())
-        .is_some_and(|rules| {
-            rules
-                .iter()
-                .any(|rule| rule.get("action").and_then(|v| v.as_str()) == Some("sniff"))
-        });
-    if !has_sniff {
-        return Err("module/template.json has no sniff route rule".into());
-    }
     let params = flux_core::engine_config::EngineParams {
         generation: 1,
         port_v4: flux_core::abi::LISTEN_PORT_MIN,
@@ -794,6 +835,13 @@ fn multiarch_include() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shipped_template_remains_blueprint_minimal() {
+        let root = util::repo_root();
+        let template = util::read_text(&root.join("module/template.json")).unwrap();
+        validate_default_template_shape(&template).unwrap();
+    }
 
     #[test]
     fn provenance_accepts_commits_and_explicit_dirty_suffix_only() {
