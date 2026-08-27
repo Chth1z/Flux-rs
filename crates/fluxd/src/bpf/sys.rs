@@ -18,6 +18,8 @@ pub const BPF_F_MARK_MANGLED_0: u64 = 1 << 6;
 const BPF_MAP_CREATE: u32 = 0;
 const BPF_MAP_LOOKUP_ELEM: u32 = 1;
 const BPF_MAP_UPDATE_ELEM: u32 = 2;
+const BPF_MAP_DELETE_ELEM: u32 = 3;
+const BPF_MAP_GET_NEXT_KEY: u32 = 4;
 const BPF_PROG_LOAD: u32 = 5;
 const BPF_PROG_GET_FD_BY_ID: u32 = 13;
 const BPF_MAP_GET_FD_BY_ID: u32 = 14;
@@ -185,6 +187,41 @@ pub fn lookup_map(map_fd: RawFd, key: &[u8], value: &mut [u8]) -> io::Result<()>
     put_u64(&mut attr, 8, ptr_u64(key.as_ptr()));
     put_u64(&mut attr, 16, ptr_u64(value.as_mut_ptr()));
     bpf_zero(BPF_MAP_LOOKUP_ELEM, &mut attr)
+}
+
+pub fn delete_map(map_fd: RawFd, key: &[u8]) -> io::Result<()> {
+    if key.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "BPF map delete needs a non-empty key",
+        ));
+    }
+    let mut attr = [0u8; 16];
+    put_u32(&mut attr, 0, fd_u32(map_fd)?);
+    put_u64(&mut attr, 8, ptr_u64(key.as_ptr()));
+    bpf_zero(BPF_MAP_DELETE_ELEM, &mut attr)
+}
+
+/// Returns the key after `previous`, or the first key when `previous` is
+/// `None`. `ENOENT` is the normal end-of-map sentinel.
+pub fn next_map_key(map_fd: RawFd, previous: Option<&[u8]>, next: &mut [u8]) -> io::Result<bool> {
+    if next.is_empty() || previous.is_some_and(|key| key.len() != next.len()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "BPF map key buffers have incompatible sizes",
+        ));
+    }
+    let mut attr = [0u8; 24];
+    put_u32(&mut attr, 0, fd_u32(map_fd)?);
+    if let Some(previous) = previous {
+        put_u64(&mut attr, 8, ptr_u64(previous.as_ptr()));
+    }
+    put_u64(&mut attr, 16, ptr_u64(next.as_mut_ptr()));
+    match bpf_zero(BPF_MAP_GET_NEXT_KEY, &mut attr) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[allow(dead_code)] // Phase 5 freezes each immutable control leaf.

@@ -23,8 +23,10 @@ use std::fmt;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::{AsRawFd, OwnedFd};
 
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+use flux_core::abi::UidStats;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use flux_core::abi::{Control, Counter, FLUX_ABI_MAGIC, PROG_SECTIONS};
+use flux_core::abi::{Control, Counter, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[allow(unused_imports)] // MapSpec is part of the Phase 4 device-test API.
@@ -263,12 +265,72 @@ impl Runtime {
             .map_err(|error| LoadError::syscall("counter_read", None, error))
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn update_uid_mode(&self, uid: u32, mode: u8) -> Result<(), LoadError> {
         self.maps
             .update_uid_mode(uid, mode)
             .map_err(|error| LoadError::syscall("uid_policy_update", None, error))
+    }
+
+    pub fn update_bypass_v4(&self, key: &LpmV4Key) -> Result<(), LoadError> {
+        self.maps
+            .update_bypass_v4(key)
+            .map_err(|error| LoadError::syscall("bypass_v4_update", None, error))
+    }
+
+    pub fn delete_bypass_v4(&self, key: &LpmV4Key) -> Result<(), LoadError> {
+        self.maps
+            .delete_bypass_v4(key)
+            .map_err(|error| LoadError::syscall("bypass_v4_delete", None, error))
+    }
+
+    pub fn update_bypass_v6(&self, key: &LpmV6Key) -> Result<(), LoadError> {
+        self.maps
+            .update_bypass_v6(key)
+            .map_err(|error| LoadError::syscall("bypass_v6_update", None, error))
+    }
+
+    pub fn delete_bypass_v6(&self, key: &LpmV6Key) -> Result<(), LoadError> {
+        self.maps
+            .delete_bypass_v6(key)
+            .map_err(|error| LoadError::syscall("bypass_v6_delete", None, error))
+    }
+
+    pub fn update_self_v4(&self, address: &[u8; 4]) -> Result<(), LoadError> {
+        self.maps
+            .update_self_v4(address)
+            .map_err(|error| LoadError::syscall("self_addr_v4_update", None, error))
+    }
+
+    pub fn delete_self_v4(&self, address: &[u8; 4]) -> Result<(), LoadError> {
+        self.maps
+            .delete_self_v4(address)
+            .map_err(|error| LoadError::syscall("self_addr_v4_delete", None, error))
+    }
+
+    pub fn update_self_v6(&self, address: &[u8; 16]) -> Result<(), LoadError> {
+        self.maps
+            .update_self_v6(address)
+            .map_err(|error| LoadError::syscall("self_addr_v6_update", None, error))
+    }
+
+    pub fn delete_self_v6(&self, address: &[u8; 16]) -> Result<(), LoadError> {
+        self.maps
+            .delete_self_v6(address)
+            .map_err(|error| LoadError::syscall("self_addr_v6_delete", None, error))
+    }
+
+    pub fn clear_fault_latch(&self) -> Result<(), LoadError> {
+        self.maps
+            .clear_fault_latch()
+            .map_err(|error| LoadError::syscall("fault_latch_clear", None, error))
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn uid_stats_sum(&self, uid: u32) -> Result<UidStats, LoadError> {
+        self.maps
+            .uid_stats_sum(uid)
+            .map_err(|error| LoadError::syscall("uid_stats_read", None, error))
     }
 }
 
@@ -325,6 +387,9 @@ fn expected_program_maps(name: &str) -> &'static [String] {
                 flux_core::abi::MAP_UID_POLICY,
                 flux_core::abi::MAP_BYPASS_V4,
                 flux_core::abi::MAP_BYPASS_V6,
+                flux_core::abi::MAP_SELF_ADDR_V4,
+                flux_core::abi::MAP_SELF_ADDR_V6,
+                flux_core::abi::MAP_UID_STATS,
                 flux_core::abi::MAP_TCP_DECISION,
                 flux_core::abi::MAP_CONTROL_ROOT,
                 flux_core::abi::MAP_FAULT_LATCH,

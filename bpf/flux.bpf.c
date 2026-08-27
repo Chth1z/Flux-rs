@@ -125,6 +125,27 @@ struct {
 } bypass_v6 SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, FLUX_SELF_ADDR_MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, __u8);
+} self_addr_v4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, FLUX_SELF_ADDR_MAX_ENTRIES);
+	__type(key, __u8[16]);
+	__type(value, __u8);
+} self_addr_v6 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, FLUX_UID_STATS_MAX_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct flux_uid_stats);
+} uid_stats SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
 	__uint(max_entries, 0);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -187,6 +208,38 @@ static __always_inline void cnt(enum flux_counter which)
 	__u64 *v = bpf_map_lookup_elem(&counters, &k);
 	if (v)
 		*v += 1;
+}
+
+// Account only packets that have crossed the admission boundary. Normalize
+// both capture entries to network-layer bytes: Ethernet egress includes the
+// 14-byte L2 header in skb->len while raw-IP egress does not.
+static __always_inline void uid_stat(__u32 uid, struct __sk_buff *skb, int l3)
+{
+	__u64 bytes = skb->len;
+	if (!l3 && bytes >= FLUX_ETH_HLEN)
+		bytes -= FLUX_ETH_HLEN;
+
+	struct flux_uid_stats *s = bpf_map_lookup_elem(&uid_stats, &uid);
+	if (s) {
+		s->packets += 1;
+		s->bytes += bytes;
+		return;
+	}
+
+	struct flux_uid_stats initial = {
+		.packets = 1,
+		.bytes = bytes,
+	};
+	if (bpf_map_update_elem(&uid_stats, &uid, &initial, BPF_NOEXIST) == 0)
+		return;
+
+	// A different CPU may have won the element-creation race. Its per-CPU
+	// slot is distinct, so re-read this CPU's value and account locally.
+	s = bpf_map_lookup_elem(&uid_stats, &uid);
+	if (s) {
+		s->packets += 1;
+		s->bytes += bytes;
+	}
 }
 
 // Exactly one control_root lookup per invocation. Returns NULL when the
@@ -283,6 +336,9 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 		__u16 ihl_bytes = (__u16)ip->ihl * 4;
 		if (ihl_bytes < 20 || ihl_bytes > 60)
 			return -1;
+		__u16 total_len = bpf_ntohs(ip->tot_len);
+		if (total_len < ihl_bytes || (__u32)nh_off + total_len > skb->len)
+			return -1;
 		__builtin_memcpy(p->daddr, &ip->daddr, 4);
 
 		__u16 frag = bpf_ntohs(ip->frag_off);
@@ -298,6 +354,12 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 		if ((void *)(ip6 + 1) > end)
 			return -1;
 		if (ip6->version != 6)
+			return -1;
+		// payload_len == 0 is a jumbogram. 0.9.0 deliberately leaves it on
+		// the Android path rather than adding the Hop-by-Hop jumbo parser.
+		__u16 payload_len = bpf_ntohs(ip6->payload_len);
+		if (payload_len == 0 ||
+		    (__u32)nh_off + sizeof(*ip6) + payload_len > skb->len)
 			return -1;
 		__builtin_memcpy(p->daddr, &ip6->daddr, 16);
 
@@ -358,11 +420,19 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 static __always_inline int bypass_hit(const struct flux_pkt *p)
 {
 	if (p->family == 4) {
+		__u32 exact;
+		__builtin_memcpy(&exact, p->daddr, 4);
+		if (bpf_map_lookup_elem(&self_addr_v4, &exact))
+			return 1;
 		struct flux_lpm_v4_key k = {};
 		k.prefixlen = 32;
 		__builtin_memcpy(k.addr, p->daddr, 4);
 		return bpf_map_lookup_elem(&bypass_v4, &k) != NULL;
 	}
+	__u8 exact[16];
+	__builtin_memcpy(exact, p->daddr, 16);
+	if (bpf_map_lookup_elem(&self_addr_v6, exact))
+		return 1;
 	struct flux_lpm_v6_key k = {};
 	k.prefixlen = 128;
 	__builtin_memcpy(k.addr, p->daddr, 16);
@@ -539,6 +609,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 			cnt(FLUX_CNT_DROP_STALE_GEN);
 			return TC_ACT_SHOT;
 		}
+		uid_stat(uid, skb, l3);
 		return handoff(skb, c, l3);
 	}
 
@@ -626,6 +697,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 			return TC_ACT_SHOT;
 		}
 		cnt(FLUX_CNT_ADMIT_TCP);
+		uid_stat(uid, skb, l3);
 		return handoff(skb, c, l3);
 	}
 
@@ -642,6 +714,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (!listener_alive(skb, c, p.family, IPPROTO_UDP))
 		return TC_ACT_UNSPEC;
 	cnt(FLUX_CNT_ADMIT_UDP);
+	uid_stat(uid, skb, l3);
 	return handoff(skb, c, l3);
 }
 

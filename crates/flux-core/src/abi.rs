@@ -390,7 +390,7 @@ pub struct UidStats {
 // --------------------------------------------------------------------- bypass
 
 /// LPM trie key for the IPv4 bypass set. C: size 8.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub struct LpmV4Key {
     /// Prefix length in bits.
@@ -400,7 +400,7 @@ pub struct LpmV4Key {
 }
 
 /// LPM trie key for the IPv6 bypass set. C: size 20.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub struct LpmV6Key {
     /// Prefix length in bits.

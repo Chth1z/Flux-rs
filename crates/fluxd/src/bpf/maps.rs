@@ -307,13 +307,102 @@ impl MapSet {
             .sum())
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn update_uid_mode(&self, uid: u32, mode: u8) -> io::Result<()> {
         let fd = self
             .fd(abi::MAP_UID_POLICY)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uid_policy map missing"))?;
         sys::update_map(fd, &uid.to_ne_bytes(), &[mode], 0)
+    }
+
+    pub fn update_bypass_v4(&self, key: &LpmV4Key) -> io::Result<()> {
+        self.update_one(abi::MAP_BYPASS_V4, as_bytes(key), &[1])
+    }
+
+    pub fn delete_bypass_v4(&self, key: &LpmV4Key) -> io::Result<()> {
+        self.delete_one(abi::MAP_BYPASS_V4, as_bytes(key))
+    }
+
+    pub fn update_bypass_v6(&self, key: &LpmV6Key) -> io::Result<()> {
+        self.update_one(abi::MAP_BYPASS_V6, as_bytes(key), &[1])
+    }
+
+    pub fn delete_bypass_v6(&self, key: &LpmV6Key) -> io::Result<()> {
+        self.delete_one(abi::MAP_BYPASS_V6, as_bytes(key))
+    }
+
+    pub fn update_self_v4(&self, address: &[u8; 4]) -> io::Result<()> {
+        self.update_one(abi::MAP_SELF_ADDR_V4, address, &[1])
+    }
+
+    pub fn delete_self_v4(&self, address: &[u8; 4]) -> io::Result<()> {
+        self.delete_one(abi::MAP_SELF_ADDR_V4, address)
+    }
+
+    pub fn update_self_v6(&self, address: &[u8; 16]) -> io::Result<()> {
+        self.update_one(abi::MAP_SELF_ADDR_V6, address, &[1])
+    }
+
+    pub fn delete_self_v6(&self, address: &[u8; 16]) -> io::Result<()> {
+        self.delete_one(abi::MAP_SELF_ADDR_V6, address)
+    }
+
+    pub fn clear_fault_latch(&self) -> io::Result<()> {
+        let fd = self
+            .fd(abi::MAP_FAULT_LATCH)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fault_latch map missing"))?;
+        // active=0 prevents new latch insertions while userspace drains this
+        // small map. Repeatedly ask for the first key so deletion cannot make
+        // an iterator cursor stale.
+        loop {
+            let mut key = [0u8; size_of::<FaultKey>()];
+            if !sys::next_map_key(fd, None, &mut key)? {
+                return Ok(());
+            }
+            match sys::delete_map(fd, &key) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn uid_stats_sum(&self, uid: u32) -> io::Result<UidStats> {
+        let fd = self
+            .fd(abi::MAP_UID_STATS)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uid_stats map missing"))?;
+        let cpus = possible_cpu_count()?;
+        let mut values = vec![0u8; cpus * size_of::<UidStats>()];
+        sys::lookup_map(fd, &uid.to_ne_bytes(), &mut values)?;
+        let mut total = UidStats::default();
+        for value in values.chunks_exact(size_of::<UidStats>()) {
+            total.packets = total.packets.saturating_add(u64::from_ne_bytes(
+                value[..8].try_into().expect("uid stats packet chunk"),
+            ));
+            total.bytes = total.bytes.saturating_add(u64::from_ne_bytes(
+                value[8..16].try_into().expect("uid stats byte chunk"),
+            ));
+        }
+        Ok(total)
+    }
+
+    fn update_one(&self, name: &str, key: &[u8], value: &[u8]) -> io::Result<()> {
+        let fd = self.fd(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
+        })?;
+        sys::update_map(fd, key, value, 0)
+    }
+
+    fn delete_one(&self, name: &str, key: &[u8]) -> io::Result<()> {
+        let fd = self.fd(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
+        })?;
+        match sys::delete_map(fd, key) {
+            Ok(()) => Ok(()),
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     #[allow(dead_code)] // Read through Runtime by the Phase 4 device test.
