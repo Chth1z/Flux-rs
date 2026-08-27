@@ -290,7 +290,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
                 }
                 Err(_) => match layout.set_enabled() {
                     Ok(()) => {
-                        println!("fluxd: enabled (daemon not running; switch persisted)");
+                        println!("fluxd: enabled (switch persisted; daemon did not reply)");
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -313,7 +313,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
                 }
                 Err(_) => match layout.set_disabled() {
                     Ok(()) => {
-                        println!("fluxd: disabled (daemon not running; switch persisted)");
+                        println!("fluxd: disabled (switch persisted; daemon did not reply)");
                         ExitCode::SUCCESS
                     }
                     Err(e) => {

@@ -77,7 +77,12 @@ const TOK_BPF_RING: u64 = 16;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
-const CONTROL_CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound a mutating request below the CLI's 30-second socket timeout. TC
+/// liveness is intentionally sequential and can exceed any small fixed budget
+/// on multi-interface devices; at this deadline the daemon returns an honest
+/// intermediate status instead of letting the client mistake a live daemon
+/// for a missing one.
+const CONTROL_CONVERGE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONTROL_CONNECTIONS: usize = 32;
 
 #[derive(Debug)]
@@ -683,8 +688,38 @@ impl Reactor {
     fn expire_control_connections(&mut self) {
         drain_timer(&self.control_timer);
         let now = Instant::now();
-        self.control_conns
-            .retain(|_, pending| pending.deadline() > now);
+        let expired = self
+            .control_conns
+            .iter()
+            .filter_map(|(token, pending)| (pending.deadline() <= now).then_some(*token))
+            .collect::<Vec<_>>();
+        for token in expired {
+            let Some(pending) = self.control_conns.remove(&token) else {
+                continue;
+            };
+            let PendingControl::Converging { conn, .. } = pending else {
+                continue;
+            };
+            self.logger
+                .log("control convergence response budget elapsed; returning current status");
+            let response = Box::new(self.build_status(self.overall_ok()));
+            if let Err(error) = conn.send_response(&response) {
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && epoll_mod_events(&self.epoll, conn.as_raw_fd(), token, libc::EPOLLOUT as u32)
+                        .is_ok()
+                {
+                    self.control_conns.insert(
+                        token,
+                        PendingControl::Writing {
+                            conn,
+                            response,
+                            deadline: Instant::now() + CONTROL_TIMEOUT,
+                            stop_after: false,
+                        },
+                    );
+                }
+            }
+        }
         self.rearm_control_timer();
     }
 

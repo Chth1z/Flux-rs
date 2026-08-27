@@ -1,22 +1,18 @@
 #!/system/bin/sh
 # Flux-rs uninstaller.
 #
-# This script is load-bearing, not a formality. Flux keeps state OUTSIDE the
-# module directory — TC filters, an ip rule, a routing table entry, per-device
-# sysctls and a veth pair — and the manager only deletes the module directory
-# (docs/blueprint.md §13.2, §18.2).
-#
-# One rule that must not be relaxed: delete our FILTERS, never the clsact
-# qdisc. netd creates clsact for tethering and CLAT, and removing it would
-# break both (§8.5).
+# The manager removes the module directory. This script synchronously makes
+# the runtime inactive, stops the child and daemon, then deletes only Flux's
+# external state root (blueprint §13.2). It deliberately does not flush TC,
+# RPDB, routes, qdiscs or lookalike paths; the non-persistent kernel objects
+# disappear on the manager-required reboot (§8.8).
 
 MODDIR=${0%/*}
 FLUXD="$MODDIR/bin/fluxd"
 RUNTIME_ROOT=/data/adb/flux-rs
 
-# Ask the daemon to tear down its own objects: it is the only thing that knows
-# the full ownership predicate, so it can avoid deleting a lookalike that
-# belongs to someone else.
+# `disable` publishes active=0 before stopping the engine. `stop` then exits
+# the daemon cleanly; neither command flushes system objects (§8.8).
 if [ -x "$FLUXD" ]; then
 	"$FLUXD" disable >/dev/null 2>&1
 	"$FLUXD" stop >/dev/null 2>&1
