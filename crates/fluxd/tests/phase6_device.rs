@@ -35,6 +35,10 @@ const IPV6_RECVORIGDSTADDR: libc::c_int = 74;
 const UDP_SEGMENT: libc::c_int = 103;
 const V4_DEST: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 77);
 const V6_DEST: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 77);
+const OFFICIAL_TCP4_DEST_PORT: u16 = 42_111;
+const OFFICIAL_TCP6_DEST_PORT: u16 = 42_112;
+const OFFICIAL_UDP4_DEST_PORT: u16 = 42_113;
+const OFFICIAL_UDP6_DEST_PORT: u16 = 42_114;
 const PACKAGE_RULE_DEST_PORT: u16 = 42_101;
 const PACKAGE_RULE_REPLY: &[u8] = b"flux-package-rule-hit";
 const PACKAGE_RULE_CLIENT: &str = "--package-rule-client";
@@ -348,6 +352,31 @@ fn package_name_rule_smoke(engine_binary: PathBuf, preferred_iface: &str) {
     let (port4, port6) = (reservation.port4, reservation.port6);
     drop(reservation);
 
+    let official_tcp4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .expect("bind official-engine IPv4 TCP responder");
+    let official_tcp6 = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .expect("bind official-engine IPv6 TCP responder");
+    official_tcp4
+        .set_nonblocking(true)
+        .expect("nonblocking official-engine IPv4 TCP responder");
+    official_tcp6
+        .set_nonblocking(true)
+        .expect("nonblocking official-engine IPv6 TCP responder");
+    let official_udp4 =
+        UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind official-engine IPv4 UDP responder");
+    let official_udp6 =
+        UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind official-engine IPv6 UDP responder");
+    official_udp4
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout official-engine IPv4 UDP responder");
+    official_udp6
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout official-engine IPv6 UDP responder");
+    let official_tcp4_port = official_tcp4.local_addr().unwrap().port();
+    let official_tcp6_port = official_tcp6.local_addr().unwrap().port();
+    let official_udp4_port = official_udp4.local_addr().unwrap().port();
+    let official_udp6_port = official_udp6.local_addr().unwrap().port();
+
     let reply_listener =
         TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind package-rule response listener");
     reply_listener
@@ -369,6 +398,42 @@ fn package_name_rule_smoke(engine_binary: PathBuf, preferred_iface: &str) {
         "outbounds": [ { "type": "direct", "tag": "direct" } ],
         "route": {
             "rules": [
+                {
+                    "network": "tcp",
+                    "ip_cidr": format!("{V4_DEST}/32"),
+                    "port": OFFICIAL_TCP4_DEST_PORT,
+                    "action": "route",
+                    "outbound": "direct",
+                    "override_address": "127.0.0.1",
+                    "override_port": official_tcp4_port
+                },
+                {
+                    "network": "tcp",
+                    "ip_cidr": format!("{V6_DEST}/128"),
+                    "port": OFFICIAL_TCP6_DEST_PORT,
+                    "action": "route",
+                    "outbound": "direct",
+                    "override_address": "::1",
+                    "override_port": official_tcp6_port
+                },
+                {
+                    "network": "udp",
+                    "ip_cidr": format!("{V4_DEST}/32"),
+                    "port": OFFICIAL_UDP4_DEST_PORT,
+                    "action": "route",
+                    "outbound": "direct",
+                    "override_address": "127.0.0.1",
+                    "override_port": official_udp4_port
+                },
+                {
+                    "network": "udp",
+                    "ip_cidr": format!("{V6_DEST}/128"),
+                    "port": OFFICIAL_UDP6_DEST_PORT,
+                    "action": "route",
+                    "outbound": "direct",
+                    "override_address": "::1",
+                    "override_port": official_udp6_port
+                },
                 {
                     "package_name": [package_name],
                     "action": "route",
@@ -449,6 +514,37 @@ fn package_name_rule_smoke(engine_binary: PathBuf, preferred_iface: &str) {
         })
         .map(|iface| iface.name.clone())
         .expect("package-rule test needs an active interface");
+
+    official_tcp_origdst_smoke(
+        &official_tcp4,
+        &ifname,
+        SocketAddr::new(IpAddr::V4(V4_DEST), OFFICIAL_TCP4_DEST_PORT),
+        matching_uid,
+        b"official-tcp4",
+    );
+    official_tcp_origdst_smoke(
+        &official_tcp6,
+        &ifname,
+        SocketAddr::new(IpAddr::V6(V6_DEST), OFFICIAL_TCP6_DEST_PORT),
+        matching_uid,
+        b"official-tcp6",
+    );
+    official_udp_origdst_smoke(
+        &official_udp4,
+        &ifname,
+        SocketAddr::new(IpAddr::V4(V4_DEST), OFFICIAL_UDP4_DEST_PORT),
+        matching_uid,
+        b"official-udp4",
+    );
+    official_udp_origdst_smoke(
+        &official_udp6,
+        &ifname,
+        SocketAddr::new(IpAddr::V6(V6_DEST), OFFICIAL_UDP6_DEST_PORT),
+        matching_uid,
+        b"official-udp6",
+    );
+    println!("phase6 official sing-box dual-stack TCP/UDP origdst routes: PASS");
+
     let destination = SocketAddr::new(IpAddr::V4(V4_DEST), PACKAGE_RULE_DEST_PORT);
     let counters_before = manager.counters().expect("read pre-Q9 counters");
 
@@ -519,6 +615,96 @@ fn package_name_rule_smoke(engine_binary: PathBuf, preferred_iface: &str) {
     drop(engine);
     drop(files);
     println!("phase6 package_name route: PASS");
+}
+
+fn official_tcp_origdst_smoke(
+    responder: &TcpListener,
+    ifname: &str,
+    destination: SocketAddr,
+    owner_uid: u32,
+    payload: &[u8],
+) {
+    let mut app = tcp_connect_timeout(ifname, destination, owner_uid, Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("official sing-box TCP connect to {destination}: {error}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut accepted = loop {
+        match responder.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "official sing-box did not route TCP {destination}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("official sing-box TCP responder failed: {error}"),
+        }
+    };
+    accepted
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout official-engine TCP responder");
+    app.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout official-engine TCP app");
+    app.write_all(payload)
+        .expect("write official-engine TCP probe");
+    let mut received = vec![0u8; payload.len()];
+    accepted
+        .read_exact(&mut received)
+        .expect("read official-engine TCP probe");
+    assert_eq!(received, payload);
+    accepted
+        .write_all(b"official-reply")
+        .expect("write official-engine TCP reply");
+    let mut reply = [0u8; 14];
+    app.read_exact(&mut reply)
+        .expect("read official-engine TCP reply");
+    assert_eq!(&reply, b"official-reply");
+}
+
+fn official_udp_origdst_smoke(
+    responder: &UdpSocket,
+    ifname: &str,
+    destination: SocketAddr,
+    owner_uid: u32,
+    payload: &[u8],
+) {
+    let bind = if destination.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let app = UdpSocket::bind(bind).expect("bind official-engine UDP app");
+    bind_to_device(app.as_raw_fd(), ifname).expect("bind official-engine UDP app interface");
+    // The route test must use an app-owned socket so sing-box's root-owned
+    // outbound socket cannot be selected and recaptured.
+    // SAFETY: fchown accepts this live socket fd; gid=-1 leaves its group alone.
+    let chown =
+        unsafe { libc::fchown(app.as_raw_fd(), owner_uid as libc::uid_t, libc::gid_t::MAX) };
+    assert_eq!(
+        chown,
+        0,
+        "fchown official-engine UDP app: {}",
+        io::Error::last_os_error()
+    );
+    app.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout official-engine UDP app");
+    app.send_to(payload, destination)
+        .expect("send official-engine UDP probe");
+    let mut received = vec![0u8; payload.len()];
+    let (length, peer) = responder
+        .recv_from(&mut received)
+        .expect("official sing-box did not route UDP destination");
+    received.truncate(length);
+    assert_eq!(received, payload);
+    responder
+        .send_to(b"official-reply", peer)
+        .expect("write official-engine UDP reply");
+    let mut reply = [0u8; 14];
+    let (length, source) = app
+        .recv_from(&mut reply)
+        .expect("read official-engine UDP reply");
+    assert_eq!(&reply[..length], b"official-reply");
+    assert_eq!(source, destination);
 }
 
 fn package_rule_candidates() -> ((String, u32), (String, u32)) {
