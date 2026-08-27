@@ -12,12 +12,14 @@
 //! 3. `fluxd disable` / `enable`: the state flips Disabled ⇄ Inactive, the
 //!    engine stops and restarts with a new generation.
 //! 4. `fluxd reload`: hot switch — generation grows, pid changes.
-//! 5. Policy-only hot updates preserve the generation and engine pid; an
+//! 5. `SIGKILL` of the supervised engine freezes capture, exposes the
+//!    1/2-second crash backoff and recovers through fresh generations.
+//! 6. Policy-only hot updates preserve the generation and engine pid; an
 //!    invalid policy remains reported across a successful engine update.
-//! 6. Overlapping reload clients wait until the queued transaction converges.
-//! 7. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
+//! 7. Overlapping reload clients wait until the queued transaction converges.
+//! 8. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
 //!    configs never included (exit criterion 5).
-//! 8. `fluxd stop`: daemon exits cleanly, control socket removed, no
+//! 9. `fluxd stop`: daemon exits cleanly, control socket removed, no
 //!    effective file left behind; `status` then fails with a clear message.
 //!
 //! On kernels without `udp_diag` (some sandboxes) the engine cannot verify
@@ -135,6 +137,7 @@ mod tests {
             scenario_disable_enable(&env, full);
             if full {
                 scenario_reload_hot_switch(&env);
+                scenario_engine_crash_backoff(&env);
                 scenario_policy_domain_hot_reload(&env);
                 scenario_queued_reload_waits_for_convergence(&env);
             }
@@ -272,6 +275,44 @@ mod tests {
         println!(
             "PASS reload hot switch (generation {} -> {}, pid {:?} -> {:?})",
             old_generation, response.generation, old_pid, response.engine.pid
+        );
+    }
+
+    fn scenario_engine_crash_backoff(env: &Env) {
+        let mut previous = env.status();
+        for expected_backoff in [1, 2] {
+            let pid = previous.engine.pid.expect("promoted engine pid");
+            let generation = previous.generation;
+            // SAFETY: `pid` is the exact supervised fake-engine child reported
+            // by this test daemon. The daemon remains alive and reaps it via
+            // pidfd; no process-name or recycled-pid lookup is involved.
+            assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+
+            let inactive = wait_status(env, Duration::from_secs(2), |response| {
+                !response.engine.running
+                    && response
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("engine_exited:signal=9"))
+            });
+            assert_eq!(
+                inactive.backoff_seconds, expected_backoff,
+                "status must expose the current crash-backoff step"
+            );
+            assert_eq!(
+                inactive.generation, generation,
+                "no unverified generation may be reported during backoff"
+            );
+
+            previous = wait_status(env, Duration::from_secs(10), |response| {
+                response.engine.running && response.generation > generation
+            });
+            assert_ne!(previous.engine.pid, Some(pid));
+            assert_eq!(previous.backoff_seconds, 0);
+        }
+        println!(
+            "PASS engine SIGKILL recovery exposed 1/2s backoff through generation {}",
+            previous.generation
         );
     }
 
