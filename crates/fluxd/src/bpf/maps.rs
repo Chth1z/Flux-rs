@@ -366,6 +366,10 @@ impl MapSet {
         }
     }
 
+    pub fn delete_fault_latch(&self, key: &FaultKey) -> io::Result<()> {
+        self.delete_one(abi::MAP_FAULT_LATCH, as_bytes(key))
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn uid_stats_sum(&self, uid: u32) -> io::Result<UidStats> {

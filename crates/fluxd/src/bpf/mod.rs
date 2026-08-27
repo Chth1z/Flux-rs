@@ -26,7 +26,9 @@ use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 use flux_core::abi::UidStats;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use flux_core::abi::{Control, Counter, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS};
+use flux_core::abi::{
+    Control, Counter, FaultKey, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS,
+};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[allow(unused_imports)] // MapSpec is part of the Phase 4 device-test API.
@@ -323,6 +325,12 @@ impl Runtime {
         self.maps
             .clear_fault_latch()
             .map_err(|error| LoadError::syscall("fault_latch_clear", None, error))
+    }
+
+    pub fn delete_fault_latch(&self, key: &FaultKey) -> Result<(), LoadError> {
+        self.maps
+            .delete_fault_latch(key)
+            .map_err(|error| LoadError::syscall("fault_latch_delete", None, error))
     }
 
     #[cfg(test)]

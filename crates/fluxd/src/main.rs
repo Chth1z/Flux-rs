@@ -129,6 +129,9 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         };
         println!("state:      {state}");
         println!("generation: {}", response.generation);
+        if response.backoff_seconds > 0 {
+            println!("backoff:    {}s", response.backoff_seconds);
+        }
         match (response.engine.running, response.engine.pid) {
             (true, Some(pid)) => {
                 println!(

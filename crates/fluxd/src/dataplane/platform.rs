@@ -8,7 +8,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use flux_core::abi::UidStats;
-use flux_core::abi::{self, Control, Counter, LpmV4Key, LpmV6Key};
+use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key};
 use flux_core::control_wire::{Counters, IfaceStatus, PolicyCounts};
 
 use crate::bpf::{self, ProgramIdentity, RingBuffer, Runtime};
@@ -668,6 +668,15 @@ impl Manager {
             .map_err(DataplaneError::bpf)
     }
 
+    pub fn delete_fault_latch(&self, key: &FaultKey) -> Result<(), DataplaneError> {
+        if self.test_bypass {
+            return Ok(());
+        }
+        self.runtime_ref()?
+            .delete_fault_latch(key)
+            .map_err(DataplaneError::bpf)
+    }
+
     /// The sole Phase 6 commit point. TC ingress and every admitted egress
     /// entry must already be installed before this pointer swap.
     pub fn publish_active(&mut self) -> Result<(), DataplaneError> {
@@ -894,6 +903,10 @@ impl Manager {
             verifying: None,
         });
         self.start_next_verification()
+    }
+
+    pub fn attachment_in_progress(&self) -> bool {
+        self.attachment.is_some()
     }
 
     pub fn advance_attachment(&mut self) -> Result<AttachmentProgress, DataplaneError> {

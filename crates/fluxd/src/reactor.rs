@@ -28,6 +28,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
+use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
 use flux_core::config::FluxConfig;
 use flux_core::control_wire::{Counters, EngineStatus, Request, Response, State};
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
@@ -240,7 +241,6 @@ struct Reactor {
     tc_verify_timer: OwnedFd,
     server: ControlServer,
     dataplane: crate::dataplane::Manager,
-    bpf_ring_registered: bool,
     control_conns: BTreeMap<u64, PendingControl>,
     next_control_token: u64,
     engine: Option<EngineChild>,
@@ -259,6 +259,9 @@ struct Reactor {
     last_error_detail: Option<String>,
     policy_error: Option<(String, Option<String>)>,
     crash_count: u32,
+    /// Deadline of the one-shot crash retry, exposed as `backoff_seconds`.
+    /// `None` means no crash retry is armed; this is never a health poll.
+    backoff_until: Option<Instant>,
     reload_requested: bool,
     policy_changed: bool,
     engine_config_changed: bool,
@@ -335,7 +338,6 @@ impl Reactor {
             tc_verify_timer,
             server,
             dataplane,
-            bpf_ring_registered: false,
             control_conns: BTreeMap::new(),
             next_control_token: TOK_CONTROL_CONN_BASE,
             engine: None,
@@ -350,6 +352,7 @@ impl Reactor {
             last_error_detail: None,
             policy_error: None,
             crash_count: 0,
+            backoff_until: None,
             reload_requested: false,
             policy_changed: false,
             engine_config_changed: false,
@@ -407,6 +410,7 @@ impl Reactor {
                     }
                     TOK_BACKOFF => {
                         drain_timer(&self.backoff_timer);
+                        self.backoff_until = None;
                         if self.shutdown_requested || self.layout.disabled() {
                             self.engine_cancel_requested = true;
                             self.cancel_engine_work();
@@ -869,8 +873,13 @@ impl Reactor {
 
     fn handle_tc_verify(&mut self) {
         drain_timer(&self.tc_verify_timer);
+        self.logger.log("TC liveness verification timer fired");
         match self.dataplane.advance_attachment() {
             Ok(crate::dataplane::AttachmentProgress::Wait(delay)) => {
+                self.logger.log(&format!(
+                    "TC liveness verification rearmed for {}ms",
+                    delay.as_millis()
+                ));
                 arm_timer(&self.tc_verify_timer, delay);
             }
             Ok(crate::dataplane::AttachmentProgress::Complete) => {
@@ -886,6 +895,7 @@ impl Reactor {
                         "Phase 6 TC attachment maintenance and liveness verification complete",
                     );
                 }
+                self.run_queued_convergence();
             }
             Err(error) => {
                 if self.activation_role.is_some() || !self.dataplane.status().active {
@@ -905,6 +915,44 @@ impl Reactor {
                         "BPF fault: generation={} family={} protocol={} reason={} seq={}",
                         event.generation, event.family, event.protocol, event.reason, event.seq
                     ));
+
+                    let Some(key) = fault_key(&event) else {
+                        self.logger.log("ignoring malformed BPF fault record");
+                        continue;
+                    };
+                    let is_current = event.generation == self.generation
+                        && self.dataplane.status().active
+                        && self
+                            .engine
+                            .as_ref()
+                            .is_some_and(|child| child.params.generation == event.generation)
+                        && !self.layout.disabled()
+                        && !self.shutdown_requested;
+                    if !is_current {
+                        if let Err(error) = self.dataplane.delete_fault_latch(&key) {
+                            self.logger
+                                .log(&format!("cannot clear ignored BPF fault latch: {error}"));
+                        }
+                        self.logger.log(&format!(
+                            "ignored stale/repeated BPF fault for generation {}",
+                            event.generation
+                        ));
+                        continue;
+                    }
+
+                    // §7.4/§26: leaving Active starts with one inactive control
+                    // publication. Stopping the supervised child then funnels
+                    // through the normal enabled convergence path, which
+                    // allocates a fresh, monotonically increasing generation.
+                    if let Err(error) = self.dataplane.publish_inactive() {
+                        self.record_dataplane_error("BPF fault inactive publication", error);
+                    }
+                    self.logger.log(&format!(
+                        "generation {} faulted; capture frozen before engine restart",
+                        event.generation
+                    ));
+                    self.engine_cancel_requested = true;
+                    self.cancel_engine_work();
                 }
             }
             Err(error) => self.record_dataplane_error("BPF fault ring", error),
@@ -968,7 +1016,7 @@ impl Reactor {
             self.crash_count += 1;
             self.logger
                 .log(&format!("restart in {step}s (crash {})", self.crash_count));
-            arm_timer(&self.backoff_timer, Duration::from_secs(step));
+            self.schedule_backoff(step);
         } else {
             self.logger
                 .log("current engine exited while its replacement was being checked");
@@ -1021,15 +1069,14 @@ impl Reactor {
     }
 
     fn register_bpf_ring(&mut self) -> io::Result<()> {
-        if self.bpf_ring_registered {
-            return Ok(());
-        }
         let Some(fd) = self.dataplane.fault_fd() else {
             return Ok(());
         };
-        epoll_add(&self.epoll, fd, TOK_BPF_RING)?;
-        self.bpf_ring_registered = true;
-        Ok(())
+        // A core-topology repair may replace the entire anonymous BPF runtime.
+        // The old fd is then removed from epoll by close, and Linux may reuse
+        // the same numeric fd for the new ring. MOD-or-ADD proves registration
+        // against the current open-file description every convergence.
+        epoll_retag(&self.epoll, fd, TOK_BPF_RING, libc::EPOLLIN as u32)
     }
 
     fn start_phase6_attachment(&mut self, params: engine_config::EngineParams) {
@@ -1049,6 +1096,10 @@ impl Reactor {
         }
         match self.dataplane.begin_attachment() {
             Ok(crate::dataplane::AttachmentProgress::Wait(delay)) => {
+                self.logger.log(&format!(
+                    "TC liveness verification armed for {}ms",
+                    delay.as_millis()
+                ));
                 arm_timer(&self.tc_verify_timer, delay);
             }
             Ok(crate::dataplane::AttachmentProgress::Complete) => {
@@ -1182,7 +1233,7 @@ impl Reactor {
             self.policy_changed = false;
             self.engine_config_changed = false;
             self.topology_changed = false;
-            disarm_timer(&self.backoff_timer);
+            self.cancel_backoff();
             return;
         }
 
@@ -1197,6 +1248,22 @@ impl Reactor {
             self.logger
                 .log(&format!("runtime directory check failed: {mode_error}"));
             self.last_error = Some(mode_error);
+            return;
+        }
+
+        // Installing or verifying our own TC filters emits rtnetlink events.
+        // Restarting an in-flight verification for those events creates a
+        // self-sustaining debounce loop. Preserve a pure topology change and
+        // reconcile it as soon as the bounded attachment run completes. A
+        // reload or config change still supersedes the attachment immediately.
+        if self.topology_changed
+            && self.dataplane.attachment_in_progress()
+            && !self.reload_requested
+            && !self.policy_changed
+            && !self.engine_config_changed
+        {
+            self.logger
+                .log("rtnetlink change deferred until TC verification completes");
             return;
         }
 
@@ -1395,7 +1462,7 @@ impl Reactor {
 
         self.generation_counter += 1;
         let generation = self.generation_counter;
-        disarm_timer(&self.backoff_timer);
+        self.cancel_backoff();
         self.logger.log(&format!(
             "generation {generation}: transaction start ({reason})"
         ));
@@ -1961,7 +2028,7 @@ impl Reactor {
         self.engine_cancel_requested = false;
         disarm_timer(&self.engine_timer);
         self.complete_convergence_controls();
-        arm_timer(&self.backoff_timer, Duration::from_secs(1));
+        self.schedule_backoff(1);
     }
 
     fn cancel_engine_work(&mut self) {
@@ -2067,7 +2134,7 @@ impl Reactor {
             let step = BACKOFF_STEPS[(self.crash_count as usize).min(BACKOFF_STEPS.len() - 1)];
             self.crash_count += 1;
             self.logger.log(&format!("retry in {step}s"));
-            arm_timer(&self.backoff_timer, Duration::from_secs(step));
+            self.schedule_backoff(step);
         }
         self.run_queued_convergence();
         if !self.convergence_busy() {
@@ -2078,7 +2145,10 @@ impl Reactor {
     fn run_queued_convergence(&mut self) {
         if !self.shutdown_requested
             && !self.layout.disabled()
-            && (self.reload_requested || self.policy_changed || self.engine_config_changed)
+            && (self.reload_requested
+                || self.policy_changed
+                || self.engine_config_changed
+                || self.topology_changed)
         {
             self.converge("queued change");
         }
@@ -2115,6 +2185,27 @@ impl Reactor {
 
     fn overall_ok(&self) -> bool {
         self.last_error.is_none() && self.policy_error.is_none()
+    }
+
+    fn schedule_backoff(&mut self, seconds: u64) {
+        let delay = Duration::from_secs(seconds);
+        self.backoff_until = Some(Instant::now() + delay);
+        arm_timer(&self.backoff_timer, delay);
+    }
+
+    fn cancel_backoff(&mut self) {
+        self.backoff_until = None;
+        disarm_timer(&self.backoff_timer);
+    }
+
+    fn backoff_seconds(&self) -> u64 {
+        let Some(deadline) = self.backoff_until else {
+            return 0;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() != 0))
     }
 
     fn capture_interface_ready(&self) -> bool {
@@ -2400,6 +2491,7 @@ impl Reactor {
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),
             state,
             generation: self.generation,
+            backoff_seconds: self.backoff_seconds(),
             engine: engine_status,
             policy: self.dataplane.status().policy,
             ifaces: self.dataplane.status().ifaces.clone(),
@@ -2414,6 +2506,26 @@ impl Reactor {
                 .or_else(|| self.last_error.clone()),
         }
     }
+}
+
+fn fault_key(event: &FaultEvent) -> Option<FaultKey> {
+    let valid = event.generation != 0
+        && matches!(event.family, 4 | 6)
+        && matches!(event.protocol, value if value == libc::IPPROTO_TCP as u8 || value == libc::IPPROTO_UDP as u8)
+        && matches!(
+            event.reason,
+            value if value == FaultReason::EgressListener as u16
+                || value == FaultReason::IngressAssign as u16
+        )
+        && event.pad0 == 0
+        && event.pad1 == 0;
+    valid.then_some(FaultKey {
+        generation: event.generation,
+        family: event.family,
+        protocol: event.protocol,
+        reason: event.reason,
+        pad0: 0,
+    })
 }
 
 fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
@@ -2808,5 +2920,48 @@ mod tests {
         let empty = counter_hints(State::Active, &Counters::default());
         assert_eq!(empty.len(), 1);
         assert!(empty[0].starts_with("no selected traffic observed"));
+    }
+
+    #[test]
+    fn fault_records_are_validated_before_they_drive_recovery() {
+        let valid = FaultEvent {
+            generation: 7,
+            family: 4,
+            protocol: libc::IPPROTO_TCP as u8,
+            reason: FaultReason::EgressListener as u16,
+            pad0: 0,
+            seq: 0,
+            pad1: 0,
+        };
+        assert_eq!(
+            fault_key(&valid),
+            Some(FaultKey {
+                generation: 7,
+                family: 4,
+                protocol: libc::IPPROTO_TCP as u8,
+                reason: FaultReason::EgressListener as u16,
+                pad0: 0,
+            })
+        );
+
+        for malformed in [
+            FaultEvent {
+                generation: 0,
+                ..valid
+            },
+            FaultEvent { family: 5, ..valid },
+            FaultEvent {
+                protocol: libc::IPPROTO_ICMP as u8,
+                ..valid
+            },
+            FaultEvent {
+                reason: 99,
+                ..valid
+            },
+            FaultEvent { pad0: 1, ..valid },
+            FaultEvent { pad1: 1, ..valid },
+        ] {
+            assert_eq!(fault_key(&malformed), None);
+        }
     }
 }

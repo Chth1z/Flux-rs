@@ -166,6 +166,10 @@ pub struct Response {
     pub state: State,
     /// Current generation, 0 before the first activation.
     pub generation: u64,
+    /// Whole seconds remaining before the next crash-recovery attempt; zero
+    /// when no one-shot backoff is armed (blueprint §25).
+    #[serde(default)]
+    pub backoff_seconds: u64,
     /// Engine child status.
     pub engine: EngineStatus,
     /// Policy population counts.
@@ -243,6 +247,7 @@ mod tests {
             abi_magic: format!("{:#010X}", crate::abi::FLUX_ABI_MAGIC),
             state: State::Active,
             generation: 7,
+            backoff_seconds: 0,
             engine: EngineStatus {
                 running: true,
                 pid: Some(1234),

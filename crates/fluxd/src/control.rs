@@ -370,6 +370,7 @@ mod tests {
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),
             state: State::Inactive,
             generation: 0,
+            backoff_seconds: 0,
             engine: EngineStatus {
                 running: false,
                 pid: None,
