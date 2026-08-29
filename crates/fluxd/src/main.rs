@@ -59,13 +59,13 @@ COMMANDS:
     status     Ask the daemon for its state (--json for the raw response)
     check      Validate configuration and engine without changing anything
     reload     Ask the daemon to re-read configuration and converge
-    stop       Ask the daemon to detach and exit
+    stop       Ask the daemon to publish inactive, stop the engine, and exit
     enable     Remove the disable file (the daemon reacts via inotify)
     disable    Create the disable file (the daemon reacts via inotify)
     bugreport  Write a diagnostic zip (--with-logcat, --raw, -o <dir>)
     version    Print version and ABI magic
 
-The design contract is docs/blueprint.md.
+The 0.9.1 design contract is docs/blueprint.md plus docs/blueprint-0.9.1.md.
 "
 }
 

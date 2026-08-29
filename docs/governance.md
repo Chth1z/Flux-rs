@@ -1,6 +1,6 @@
 # 项目治理手册
 
-本文规定 Flux-rs 怎么被开发和维护。它约束的是**过程**，不是技术方案——技术合同在 `docs/blueprint.md`。
+本文规定 Flux-rs 怎么被开发和维护。它约束的是**过程**，不是技术方案——0.9.1 技术合同由冻结的 `docs/blueprint.md`（0.9.0 基线）与 `docs/blueprint-0.9.1.md`（增量修订）共同构成，冲突时后者优先。
 
 写这份手册的前提是一个具体分工：**日常技术决策由负责实现的人（当前是 AI agent）做，项目所有者只在下面 §1 列出的情形被打扰。** 这份手册的价值全部取决于 §1 那条线画得准不准；画得太保守会把所有者变成瓶颈，太激进会让不可逆的事在没人同意时发生。
 
@@ -11,7 +11,7 @@
 ### 1.1 我自己决定，不问
 
 - 任何**可逆**的技术选择：模块划分、命名、数据结构、算法、错误处理形态。
-- **推翻我自己此前写下的结论**。这在 0.9.0 设计期已发生四次（`skb->mark` 的 scrub 语义、`bpf_redirect_peer` 的可用性、重定向到 `lo` 的失败原因、cgroup 槽位是否常驻占用）。发现自己错了就地改，按 §3 的更正协议留痕，不需要请示。
+- **推翻我自己此前写下的结论**。0.9.0 设计期已有多次实例（`skb->mark` 的 scrub 语义、`bpf_redirect_peer` 的可用性、重定向到 `lo` 的失败原因、cgroup 槽位是否常驻占用）。发现自己错了就按 §3 的版本化更正协议留痕，不需要请示。
 - 只读的设备观测（`tools/phase0/observe.sh` 那一类）。
 - 本地 commit。
 
@@ -52,7 +52,7 @@
 
 ### 2.2 实测结论必须分层
 
-按 `blueprint.md` §16.3 的五层分类：AOSP 源码强制 / GKI 强制 / SoC 厂商 / OEM / 用户运行时。**把 OEM 层的观察当成普适事实，是这份设计最容易犯的错**，已经犯过一次（"egress pref 1 是我们的"）。
+按 `verification/phase0.md` §16.3 的五层分类：AOSP 源码强制 / GKI 强制 / SoC 厂商 / OEM / 用户运行时。**把 OEM 层的观察当成普适事实，是这份设计最容易犯的错**，已经犯过一次（"egress pref 1 是我们的"）。
 
 新机型跑完探针后，结论必须先归层再写进文档。
 
@@ -69,7 +69,7 @@
 
 ### 2.4 「无先例」要显式写下来
 
-查过同类项目、确认某个做法没人做过，**要在文档里写明**。宁可知道没有先例（于是自己承担风险、加倍验证），也不要以为有人解决过。已经这么标注过的：动态选 TC pref、执行存活验证、TCX 相对定位（`blueprint.md` §0.5.10）。
+查过同类项目、确认某个做法没人做过，**要在文档里写明**。宁可知道没有先例（于是自己承担风险、加倍验证），也不要以为有人解决过。动态选 TC pref、执行存活验证、TCX 相对定位的检索记录见 `evidence/review-log.md` §0.5；当前合同见 R091-05。
 
 ---
 
@@ -79,11 +79,12 @@
 
 发现此前的结论有误时：
 
-1. **就地改正**结论所在的位置，不要只在末尾加一条勘误。
-2. 在 `blueprint.md` §0.5 的对照表里加一行：**原说法 / 实际 / 处置**。
-3. 如果原来的**结论**仍然成立而只是**理由**错了，必须写明——并说清正确的理由。例：`skb->mark` 那条，结论「不用 mark 传信息」不变，但理由从「传不过去」换成「不需要 + 不愿占 fwmark 位」。
-4. 扫一遍所有引用该结论的地方。用 `rg` 搜关键词，不要靠记忆。
-5. commit message 说明推翻了什么、依据是什么。
+1. **未发布的当前读者文档就地改正**，不要在文末堆勘误。
+2. **已冻结的版本蓝图不改原文**；在下一份增量蓝图新增稳定修订编号，写清“覆盖什么、改成什么、为什么”。0.9.1 使用 `R091-*`。
+3. 在 `evidence/review-log.md` §0.6 的对照表里加一行：**原说法 / 实际 / 处置**。
+4. 如果原来的**结论**仍然成立而只是**理由**错了，必须写明——并说清正确的理由。例：`skb->mark` 那条，结论「不用 mark 传信息」不变，但理由从「传不过去」换成「不需要 + 不愿占 fwmark 位」。
+5. 扫一遍所有引用该结论的地方。用 `rg` 搜关键词，不要靠记忆。
+6. commit message 说明推翻了什么、依据是什么。
 
 **不要**为了显得一致而保留错误的论证。
 
@@ -93,13 +94,25 @@
 
 ### 4.1 每次 commit 之前
 
+**验证按运行平台分层；不能要求 Windows 编译 Linux/Android device harness，也不能用 Windows 的 host-safe 结果替代 Linux CI 与真机证据（R091-15）。**
+
+任意开发主机先跑：
+
 ```bash
 cargo fmt --all -- --check
+cargo test -p flux-core
+cargo test -p xtask
+cargo xtask doc-check
+```
+
+Windows 再跑 `cargo test -p fluxd --bin fluxd`。Linux CI 必须额外通过：
+
+```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-三者全绿才提交。`clippy` 的告警不允许用 `#[allow]` 绕过，除非在同一处写清为什么这条规则在这里不适用。
+Android-only Phase 3–8 suite 按对应 env flag/脚本在设备上执行，且必须通过 cleanup/residual check。适用门禁全绿才提交或合并。`clippy` 的告警不允许用 `#[allow]` 绕过，除非在同一处写清为什么这条规则在这里不适用。
 
 ### 4.2 改了 ABI 之后
 
@@ -115,7 +128,7 @@ cargo test --workspace
 
 ### 4.4 发布之前
 
-见 `blueprint.md` §20。核心是：Phase 0 十问全部有结论（通过或已记录为边界），两次打包 byte-identical，`fluxd` 每个 LOAD 段 `p_align >= 0x4000`。
+见 0.9.0 `blueprint.md` §20，并应用 R091-13 与本文未覆盖的 release gate。核心是：Phase 0 十问全部有结论（通过或已记录为边界），两次打包 byte-identical，`fluxd` 每个 LOAD 段 `p_align >= 0x4000`。
 
 ---
 
@@ -132,7 +145,7 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 | **需要改全局系统语义**（写 `all.rp_filter`、打开 `ip_forward`） | **停下，回 §1.2 找所有者**。这类改动的理由与 §8.4 拒绝写全局 sysctl 同源 |
 | **整条路线在某类设备上不可用** | **停下，回 §1.2**。这是产品能力边界的变化 |
 
-**禁止**用以下方式掩盖失败：token map、patch sing-box、加第二后端、加 heartbeat、放宽 fail-closed 语义。这些在 `blueprint.md` §19 已逐条拒绝，理由不因为 Phase 0 失败而改变。
+**禁止**用以下方式掩盖失败：token map、patch sing-box、加第二后端、加 heartbeat、放宽 fail-closed 语义。这些在 `decisions/rejected-and-deferred.md` §19 已逐条拒绝，理由不因为 Phase 0 失败而改变。
 
 ---
 
@@ -142,7 +155,8 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 | 文件 | 是什么 | 谁改 |
 |---|---|---|
-| `docs/blueprint.md` | **规范性技术合同**。冲突时以它为准 | 设计变更时 |
+| `docs/blueprint.md` | **冻结的 0.9.0 规范性基线**，只读保留 | 不再修改 |
+| `docs/blueprint-0.9.1.md` | **0.9.1 规范性增量**；与基线冲突时优先 | 0.9.1 设计变更时 |
 | `docs/architecture.md` | 面向新读者的导览 | 架构变化时 |
 | `docs/governance.md` | 本文，过程规范 | 过程变化时 |
 | `docs/ux.md` | 交互与体验设计 | 用户可见行为变化时 |
@@ -152,11 +166,12 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 ### 6.2 章节编号是稳定标识符
 
-`blueprint.md` 的 `§N.N` 编号被全仓库交叉引用（含 commit message 与代码注释）。**编号一旦发布就不再复用**：
+`blueprint.md` 的 `§N.N` 编号被全仓库交叉引用（含 commit message 与代码注释）。**编号一旦发布就不再复用，冻结版本的正文也不再改写**：
 
 - 插入新内容 → 用新的子编号（`§8.5.3`、`§8.5.4`），不要重排既有编号。
 - 某节作废 → 保留编号，内容改成「已废弃，见 §X」，不要删除留空。
 - 拆分文件时**编号跟着内容走，不重编**。因此 `§8.5.3` 无论在哪个文件里都指同一件事，`rg "§8\.5\.3"` 永远能找全。
+- 增量蓝图使用版本化稳定编号，例如 0.9.1 的 `R091-05`；引用旧章节被覆盖后的含义时写“0.9.0 §8.5，经 R091-05 修订”。
 
 ### 6.3 只写读者需要的，不写作者想说的
 
@@ -166,26 +181,21 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 ## 7 发布工程与社区流程
 
-这一节的内容来自对两个成熟同类项目的逐项阅读：[JingMatrix/Vector](https://github.com/JingMatrix/Vector)（12.2k star，3107 commit，支持 Android 8.1–17）与 [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk)（2.2k star，Rust daemon）。它们与 Flux-rs 的产品形态完全不同，但**发布与支持流程可以直接借用**，源码依据记在 `docs/evidence/review-log.md`。
+这一节的候选实践来自对两个成熟同类项目的逐项阅读：[JingMatrix/Vector](https://github.com/JingMatrix/Vector) 与 [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk)。它们与 Flux-rs 的产品形态不同，因此这里只采纳已经落地并符合 R091-12 的最小子集；其它做法保留为候选。源码依据记在 `docs/evidence/review-log.md`。
 
-### 7.1 立即采纳
+### 7.1 当前采纳
 
-| 实践 | 怎么做 | 为什么 |
+| 实践 | 当前做法 | 为什么 |
 |---|---|---|
-| **安装时逐文件 SHA-256 校验** | 打包时为每个文件生成 `.sha256` 旁文件，`customize.sh` 用 `sha256sum -c` 逐个验证后再落地 | 在重启**之前**抓住下载损坏。NeoZygisk `module/src/verify.sh:37` |
-| **安装时的管理器版本矩阵** | `customize.sh` 检测 Magisk/KernelSU/APatch 并检查各自最低版本；**最低版本常量集中定义一处**，同时注入 shell 与 Rust | 避免"装上了才发现管理器太老"。NeoZygisk 把常量放在 `build.gradle.kts:21-25` 并 `env!` 进 Rust |
-| **拒绝 recovery 安装** | 只允许从管理器 App 安装 | recovery 环境下拿不到管理器的环境变量，检测全部失效 |
-| **拒绝多 root 实现共存** | 在 KSU/APatch 上检测到 `magisk` 二进制则中止 | 两套 root 同时在场时行为不可预测 |
-| **构建标识刻进一切** | `module.prop`、`fluxd version`、诊断包文件名与**压缩包注释**都带 版本 + git commit + 是否 debug | Vector 把构建身份写进 zip 注释，文件名被改了也还在 |
-| **每次 CI 同时产出 debug 与 release 两个 zip** | debug 版日志更详细、带 backtrace | issue 模板要求"用最新 debug 构建复现"，前提是 debug 构建随时可得 |
-| **canary 作为 GitHub prerelease 发布，不只是 Actions artifact** | 保留最近 N 个 `canary-<versionCode>` tag | **Actions artifact 需要登录才能下载**。Vector 在 workflow 注释里明确指出这一点并改用 prerelease（`core.yml:207-211`）。NeoZygisk 没做这一步，与它自己的 issue 模板要求矛盾 |
-| **issue 模板强制字段** | root 实现与版本、已装模块列表、**确切版本号（不接受"最新"）**、Android 版本、勾选"已用最新 debug 构建复现"、附诊断包 | 没有诊断包就关闭 issue。省下的是双方的时间 |
-| **`panic = "abort"`** | 已在 `Cargo.toml` | root daemon 应当响亮地死，由外部重启，而不是带着损坏状态继续 |
-| **debug 符号单独产出** | 发布的二进制 strip，符号作为独立 artifact 上传 | 体积与可调试性兼得 |
+| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 R091-12 规定的 15 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
+| **归档级 SHA-256** | 发布物生成 `SHA256SUMS`；engine 资产另由 `engine.lock` 的 size + SHA-256 锁定 | 一条完整且可复现的校验路径，不生成包内逐文件 sidecar |
+| **最小安装检查** | `customize.sh` 检查 payload、arm64、5.15 courtesy floor，并识别 Magisk/KernelSU/APatch；真实能力留给 activation 操作验证 | 避免用管理器版本字符串猜测内核能力 |
+| **构建标识进入诊断面** | `fluxd version`、`bugreport` 与模块元数据提供版本、ABI 与构建信息 | 用户改名后仍能从运行产物确认身份 |
+| **`panic = "abort"`** | 已在 `Cargo.toml` | daemon 不带着可能损坏的内部状态继续运行 |
 
 ### 7.2 以后再说
 
-原生 log 抓取（若 shell `logcat` 在某些 ROM 上不可靠）、认证 Unix socket 上的富 CLI、翻译 CI 门、按管理器的 `adb install` 开发任务。
+逐文件 sidecar hash、管理器最低版本矩阵、debug/release 双 ZIP、canary prerelease、独立 debug 符号、原生 log 抓取（若 shell `logcat` 在某些 ROM 上不可靠）、认证 Unix socket 上的富 CLI、翻译 CI 门、按管理器的 `adb install` 开发任务。只有实际分发或支持问题出现时才把其中一项提升为合同。
 
 ### 7.3 明确不采纳
 
@@ -193,13 +203,13 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 |---|---|
 | **不固定的 Rust nightly** | NeoZygisk CI 用未固定的 nightly（`ci.yml:36`），可复现性风险。我们固定 stable + `Cargo.lock` |
 | **安装时禁用竞争模块** | Vector 会去 `touch` LSPosed 的 `disable`（`customize.sh`）。太激进。冲突应当**检测并报告**，不替用户处置 |
-| **只用 Actions artifact 分发 canary** | 见 §7.1 最后一条，用 prerelease |
+| **只用 Actions artifact 分发正式版本** | 正式发布物必须有公开、可校验的归档与 `SHA256SUMS`；canary 分发策略仍是延期项 |
 | **仅接受英文 issue** | Vector 的政策（README:71-75）适合它的社区规模，不适合现在 |
 | **随机化字符串以对抗检测** | 产品特定的隐蔽性需求，与本项目无关 |
 
 ### 7.4 诊断包是支持流程的核心
 
-Vector 的 `FileSystem.getLogs`（`Vector/daemon/.../FileSystem.kt:524-625`）是最值得抄的一条：一键生成包含全部排查信息的压缩包。Flux-rs 的对应物是 `fluxd bugreport`，内容清单见 `docs/ux.md` §6。
+Vector 的 `FileSystem.getLogs`（`Vector/daemon/.../FileSystem.kt:524-625`）是最值得抄的一条：一键生成包含全部排查信息的压缩包。Flux-rs 的对应物是 `fluxd bugreport`，内容清单见 `docs/ux.md` §4。
 
 **它必须默认脱敏**，且与 `tools/phase0/observe.sh` **共用同一套过滤规则**（§2.3）。两处各写一套脱敏，必然有一处会漏。
 

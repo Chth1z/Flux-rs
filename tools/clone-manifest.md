@@ -52,8 +52,8 @@
 | `chizi-sing-box-ebpf-cilium` | 打补丁路线的对照（D19）；`TC_ACT_UNSPEC` 在 TCX 上同样必要；**LPM trie 在 6.6.0–6.6.46 的崩溃**（D20） |
 | `dae`、`honk` | TC → veth → `sk_assign` 原语；也反证了 `TC_ACT_OK` 在 Android 会遮挡系统 filter |
 | `asteriskd`、`bpf2socks` | 加载器加固清单；TC 槽位冲突的"fail closed"对照；legacy map 定义的适用边界 |
-| `Vector`、`NeoZygisk` | 发布工程与社区流程（`governance.md` §7）：安装时 SHA-256、管理器版本矩阵、canary 作为 prerelease、诊断包 |
-| `Flux-original` | 订阅转换的语义（D22 之外的那一半）、节点精修的领域知识、配置文件风格 |
+| `Vector`、`NeoZygisk` | 发布工程与社区流程的研究样本；0.9.1 当前只采纳 `governance.md` §7.1 / R091-12 列出的最小路径，其余仍是候选 |
+| `Flux-original` | 订阅转换与节点精修的历史领域知识；0.9.1 不实现订阅，也不从旧仓库恢复该范围（R091-03） |
 | `kernel-src`、`gki` | §4 的内核机制清单与 config 核对 |
 | `mihomo`、`tun2socks`、`hev-socks5-tunnel` | 反例：确认它们是 TUN/用户态栈方案，**没有 eBPF 数据面**，不必在那里花时间 |
 

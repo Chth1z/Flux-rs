@@ -254,7 +254,7 @@ pub const TC_HANDLE_VERIFY: u32 = 0x3;
 /// SM-S9180 / Android 16, Samsung's `semUidBPF` already holds chain 0 /
 /// pref 1 / handle 0x1 / protocol all on `wlan0`'s clsact egress, and `tc`
 /// preferences start at 1, so there is no way to order ahead of it there.
-/// See `docs/blueprint.md` §8.5.3.
+/// See 0.9.0 `docs/blueprint.md` §8.5.3 as corrected by R091-05.
 pub const TC_PREF_PREFERRED: u16 = 2;
 
 /// The `tc` floor. Used only when no higher preference can satisfy the

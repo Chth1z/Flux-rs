@@ -7,6 +7,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Incremental 0.9.1 design contract (`docs/blueprint-0.9.1.md`) that leaves
+  the 0.9.0 blueprint content unchanged, records every known cross-document
+  conflict as a stable `R091-*` correction, and defines baseline-plus-delta
+  precedence without changing the workspace version or release status.
 - Design contract for 0.9.0 (`docs/blueprint.md`), the data-plane ABI
   (`bpf/include/flux_abi.h`) and its compile-time-checked Rust mirror
   (`crates/flux-core/src/abi.rs`).
@@ -52,6 +56,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   forbids and had already drifted (`updateJson`, `id`, `author`).
 
 ### Notes
+
+The current 0.9.1 work is a documentation/design correction layer. It is not a
+`v0.9.1` release and does not by itself change SemVer, the ABI magic, the config
+schema, or the control-socket encoding.
 
 Fresh history. The repository previously implemented a different architecture;
 `docs/blueprint.md` §0 records what changed and why, and §19 lists the rejected

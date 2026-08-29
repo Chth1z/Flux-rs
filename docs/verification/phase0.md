@@ -2,11 +2,13 @@
 
 > 原 blueprint.md 第 16 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
 >
-> 谁读这份：要上机跑测试的人；以及想知道某台设备实测出了什么的人。规范性合同仍是 `docs/blueprint.md`。
+> 谁读这份：要上机跑测试的人；以及想知道某台设备实测出了什么的人。本文是 0.9.0 设计期的历史测试记录，原始观察保留；0.9.1 当前合同由 `docs/blueprint.md` + `docs/blueprint-0.9.1.md` 给出，冲突时应用对应 `R091-*` 修订。
 
 ---
 
-# 第 16 部分：Phase 0 —— 编码与清库之前的最小证伪
+# 第 16 部分：Phase 0 —— 编码与清库之前的最小证伪（历史阶段，已完成）
+
+> 当前状态：Phase 1–8 与对应设备验证已经进入仓库，详见 `plan/implementation.md` §17.0。本节中的“先做”“待测”“停止进入编码”描述的是当时的验证门，不是当前待办；测试方法与原始结论仍作为回归证据使用。
 
 Phase 0 在临时目录（`/tmp` 或独立 worktree）完成，只含一个最小 BPF C、一个小 loader、一份 netns 脚本与官方 sing-box。**不预建 Flux 框架，产物不进最终仓库。**
 
@@ -56,7 +58,7 @@ v4/v6、connected 与 unconnected UDP 经 assign 后，sing-box 收到的 `IP_RE
 
 因此本项的实测清单是：
 
-0. **枚举 egress filter 基线**（本条是新增的，因为整个生态没人查过）：`tc filter show dev wlan0 egress`、`tc filter show dev rmnet_data0 egress`、以及 `v4-*` 存在时同样操作。`asteriskd` 只检查过 hotspot interface 的 **ingress**（`asteriskd_runtime.c:4994-4995`），所以"物理 interface 的 egress 上有什么"没有任何先例数据。记录已有 filter 的 pref / protocol / kind / program name。**这直接决定 §8.5 的 first-applicable 判定在真机上能否满足**；已知会出现 CLAT 翻译程序与 OEM 的 QoS/DSCP 程序。
+0. **枚举 egress filter 基线**（本条是新增的，因为整个生态没人查过）：`tc filter show dev wlan0 egress`、`tc filter show dev rmnet_data0 egress`、以及 `v4-*` 存在时同样操作。`asteriskd` 只检查过 hotspot interface 的 **ingress**（`asteriskd_runtime.c:4994-4995`），所以"物理 interface 的 egress 上有什么"没有任何先例数据。记录已有 filter 的 pref / protocol / kind / program name。**这为 §8.5 的相对排序与可达性验证提供基线**；已知会出现 CLAT 翻译程序与 OEM 的 QoS/DSCP 程序。历史上的 first-applicable 判定已由 R091-05 覆盖。
 1. `iptables -t filter -L -v -n` / `ip6tables` 全量抓一次基线；
 2. 跑一条捕获流量，再抓一次，逐链比对 drop/reject 计数增长；
 3. **单列 OEM 自有链**（`fw_*`、`oem_*`、`oplus_*`、`miui_*` 之类）的计数。
@@ -246,12 +248,12 @@ Phase 0 分两半：**观测半场**（只读，回答"设备实际是什么样"
 - `2 family × 2 protocol` 的 TCP/UDP 原目的**逐字节**一致，4 个 socket 全部完成 readiness 核验。
 - 任何 pre-redirect 的未入场失败保留原 skb（真实目的侧能看到该连接直连成功）；任何 post-boundary 失败明确 drop（真实目的侧看不到任何字节）。
 - 活跃 TCP decision 不被容量驱逐、first-decision-wins、不原地翻转、socket 关闭后释放。
-- 所有 capture filter 是 first applicable；egress "不接管" 全部用 `TC_ACT_UNSPEC`；AOSP CLAT 与后续 OEM filter 仍被执行。
+- 所有 capture filter 都通过身份、相对排序与 `flx_verify` 证明**可达**；不要求它在 dump 中排第一。egress "不接管" 全部用 `TC_ACT_UNSPEC`；AOSP CLAT 与后续 OEM filter 仍被执行（R091-05）。
 - frozen control leaf 经 pointer swap 只出现完整 old/new snapshot。
 - Android 系统 TC/RPDB/VPN/sysctl 对象无修改或覆盖（`all.rp_filter` 亦未被 Flux 写过）。
 - 全程无需 cgroup attach、sing-box patch、SOCKMAP、heartbeat 或第二后端。
 
-**任何一项不成立：停止进入清库与编码阶段**，修订本蓝图并重新请所有者确认。不得把 Phase 0 变成长期实验平台。
+**在当时，任何一项不成立都必须停止进入清库与编码阶段。** 现在若回归失败，按 `governance.md` §3 新增版本化修订并按影响决定是否请所有者确认；不得改写冻结蓝图，也不得把 Phase 0 变成长期实验平台。
 
 ---
 
@@ -590,7 +592,7 @@ NetdWrapper: NetdWrapper interface add, iface= flxrs0
 
 在此之前测过的都是**出向那一半**（捕获、UID 归属、验证器）。入向那一半——`bpf_sk_lookup_*` 能否找到官方 sing-box 的 tproxy listener、`bpf_sk_assign()` 是否真的成功——此前只有源码阅读支撑。现在有实测。
 
-工具：`tools/phase0/q2_probe.bpf.c` + `tools/phase0/q2-run-device.sh`。跑的是 **`engine.lock` 钉住的、未修改的官方二进制**（v1.13.19，archive 与 binary 两个 sha256 在推送前逐一核对通过），inbound 用的是 §9.1 规定的精确形状（只有 `type`/`tag`/`listen`/`listen_port`，两族同端口）。探针的 lookup **逐字复刻 `flux.bpf.c` 的 `listener_lookup()`**，包括合成的 remote tuple，所以结论可以迁移到产品而不是某个简化替身。
+工具：`tools/phase0/q2_probe.bpf.c` + `tools/phase0/q2-run-device.sh`。跑的是 **`engine.lock` 钉住的、未修改的官方二进制**（v1.13.19，archive 与 binary 两个 sha256 在推送前逐一核对通过），inbound 只含 `type`/`tag`/`listen`/`listen_port`。这次历史 harness 为隔离端口变量而让两族使用同一端口；0.9.1 产品合同改为 v4/v6 两个不同随机端口（R091-08）。探针的 lookup **逐字复刻 `flux.bpf.c` 的 `listener_lookup()`**，包括合成的 remote tuple，所以“每个 tuple 均可 lookup/assign”的结论仍可迁移到产品。
 
 不需要 fluxd：`bpf_sk_assign()` 只在 TC ingress 合法，所以探针挂在专用 veth 的 peer 上，它能看到的包只有 harness 自己产生的。探针每条路径都 `TC_ACT_SHOT`。
 

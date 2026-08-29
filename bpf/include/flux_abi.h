@@ -393,7 +393,9 @@ enum flux_counter {
 
 /* TC identity. The full ownership predicate additionally covers netns,
  * ifindex, ifname, parent/direction, kind == "bpf", direct-action, program
- * name, the program's map set, and the dump ORDER (first applicable).
+ * name, the program's map set, the identity snapshot of numerically smaller
+ * preferences, and the positive liveness result. The filter need not be first in dump order
+ * (docs/blueprint-0.9.1.md R091-05).
  */
 #define FLUX_TC_CHAIN 0
 #define FLUX_TC_HANDLE_EGRESS 0x1

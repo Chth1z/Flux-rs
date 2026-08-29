@@ -1,7 +1,9 @@
 # Architecture
 
-This is the short orientation. The binding document is
-[`blueprint.md`](blueprint.md); where the two disagree, the blueprint wins.
+This is the short 0.9.1 orientation. The binding contract is the frozen
+[`blueprint.md`](blueprint.md) baseline plus
+[`blueprint-0.9.1.md`](blueprint-0.9.1.md); the 0.9.1 delta wins where it
+explicitly amends the baseline.
 
 ## Shape
 
@@ -11,7 +13,7 @@ This is the short orientation. The binding document is
 └───────────────────────────┬──────────────────────────────────┘
                             │ connect() / sendmsg()
 ┌───────────────────────────▼──────────────────────────────────┐
-│ physical interface, TC egress, chain 0 pref 1, direct-action  │
+│ physical interface, TC egress, chain 0, per-iface dynamic pref│
 │   flx_cap_l2  (ARPHRD_ETHER)                                  │
 │   flx_cap_l3  (ARPHRD_RAWIP, CLAT tun) + skb_change_head(14)   │
 │                                                               │
@@ -36,7 +38,8 @@ This is the short orientation. The binding document is
 
 ## Why this shape and not another
 
-Two facts, both established from primary sources, remove every alternative:
+Two facts, both established from primary sources and device evidence, remove
+every alternative:
 
 1. **UDP's original destination cannot be recovered from a cgroup hook.** The
    `IP_RECVORIGDSTADDR` cmsg is produced by the kernel in `udp*_recvmsg` by
@@ -44,10 +47,11 @@ Two facts, both established from primary sources, remove every alternative:
    only rewrite the sockaddr handed back to userspace. So any design that keeps
    the real destination *and* leaves the engine unmodified must let the real
    headers reach the listener.
-2. **Android already owns the cgroup `SOCK_ADDR` slots.** On Android 15/16 the
-   root cgroup holds `inet4/6 connect`, `udp4/6 sendmsg` and `udp4/6 recvmsg`
-   with `flags=0`, and the kernel refuses descendant attachment under a
-   `flags=0` ancestor. Coexistence would mean displacing netd's hooks.
+2. **A one-time cgroup snapshot cannot establish a safe ownership seam.** The
+   clean Phase 0 snapshot had no root-cgroup `SOCK_ADDR` attachments even
+   though the AOSP programs were loaded; Android can attach them dynamically,
+   and a `flags=0` ancestor then prevents descendant coexistence. Flux therefore
+   never attaches cgroup BPF and never competes for these slots.
 
 `bpf_sk_assign()` satisfies both: it associates a socket with an skb and lets
 the kernel deliver locally, without touching a single L3 or L4 byte.
@@ -64,11 +68,15 @@ the kernel deliver locally, without touching a single L3 or L4 byte.
 testkit or backend-registry crate, and no trait abstraction layer for a single
 implementation.
 
-Two encapsulation boundaries are load-bearing, inherited from the previous
+Two internal seams are load-bearing, inherited from the previous
 repository's over-design review: raw netlink message construction lives only in
 `fluxd/src/netlink/`, and raw `bpf(2)` only in `fluxd/src/bpf/`. Callers see
 `create_veth`, `add_rule`, `attach_filter`, `publish_control` — never an
 `nlmsghdr`.
+
+The four deep modules are policy, dataplane, engine, and reactor. Their
+interfaces are defined in `blueprint-0.9.1.md` R091-14; no public trait is
+introduced for a single implementation.
 
 ## Failure semantics
 
@@ -76,7 +84,7 @@ The single most important rule in the system:
 
 | When | On failure |
 |---|---|
-| Before a socket has a CAPTURED decision | `TC_ACT_UNSPEC` — the flow goes direct |
+| Before a TCP socket has a CAPTURED decision, or before the current UDP datagram redirects | `TC_ACT_UNSPEC` — the flow/datagram goes direct |
 | After a socket has a CAPTURED decision | `TC_ACT_SHOT` — the packet is dropped |
 
 There is no third option. Falling back to the real destination after admission
@@ -94,12 +102,18 @@ sources: rtnetlink, inotify, pidfd, signalfd, the BPF fault ring buffer, the
 control socket, timerfd.
 
 Three top-level states — `Disabled`, `Inactive`, `Active`. The only way into
-`Active` is one `control_root` map-in-map pointer swap; the first action on
-leaving it is always publishing `active = 0`.
+`Active` is one `control_root` map-in-map pointer swap after engine readiness
+and at least one physical capture interface have both closed; the first action
+on leaving it is always publishing `active = 0`.
 
-One distinction that is easy to get wrong and expensive when wrong: **capture-side
-drift is routine, core drift is not.** netd deletes the `clsact` qdisc every
-time an interface joins or leaves a network, taking our filters with it. That
-must be repaired per-interface without touching `active`. Escalating it to a
-global transaction would blip every proxied flow on the device on every Wi-Fi
-reconnect. See `blueprint.md` §8.5.1 and §26.
+One distinction that is easy to get wrong and expensive when wrong:
+**capture-side drift is routine, core drift is not.** netd deletes the physical
+`clsact` qdisc when an interface leaves a network, taking our filters with it.
+Flux removes only that interface from coverage and waits for netd to recreate
+`clsact`; it then re-runs per-interface admission. While another capture
+interface remains active, global `active` is untouched; if the last active
+interface disappears, Flux publishes inactive but may keep the ready engine
+waiting. Flux never creates a physical-interface `clsact`. Escalating every
+single-interface drift to a global transaction would blip unrelated proxied
+flows on every Wi-Fi reconnect. See `blueprint.md` §8.5.1 as amended by
+R091-05 and R091-10.

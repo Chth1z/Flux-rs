@@ -2,7 +2,24 @@
 
 > 原 `blueprint.md` 第 17 部分。**章节编号未变**：本文里的 §17.x 就是全仓库引用的那个 §17.x（见 `docs/authoring.md` §1.1）。
 >
-> 谁读这份：要动手写代码的人（或模型），从头到尾按顺序读。规范性合同是 `docs/blueprint.md`；本文只管**顺序、边界与验收**，不重复讲机制。
+> 谁读这份：要动手写代码的人（或模型），从头到尾按顺序读。0.9.1 规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`；本文只管**当前进度、顺序、边界与验收**，不得反向创造产品要求。
+
+---
+
+## 17.0 当前实施状态（2026-08-29）
+
+**Phase 0–8 的实现与分阶段设备验证均已进入仓库；0.9.1 增量合同已经定稿，但对应版本提升仍处于 pre-release validation，尚未由本文授权发布 `v0.9.1`。** 下表是当前进度真相，后续 §17.2–§17.12 保留的是实施时的阶段顺序与回归清单，不应再被读成待办状态。
+
+| 范围 | 当前状态 | 主要证据 |
+|---|---|---|
+| Phase 0–2 | 已完成 | Phase 0 记录 + `de23445` 等集成修正 |
+| Phase 3 | 已完成并上机验证 | `b2b719e`、`9131a5c` |
+| Phase 4 | 已完成并验证 loader parity/cleanup | `a648cd4`、`08f8402` |
+| Phase 5 | 已完成并验证 packet loop/cleanup | `8b36e78`、`90afdd4` |
+| Phase 6 | 已完成并验证 capture semantics | `a36f05d`、`beef81d`、`3627d30` |
+| Phase 7 | 已完成并验证 self-healing | `63cbdff`、`d27d44d` |
+| Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 0.9.0 §20 与 R091-13/R091-15 门禁约束 |
+| 0.9.1 增量实施 | 文档合同已定稿；已知新增代码项尚未全部落地 | R091-05 要求在 `ifaces[]` 暴露可选 `pref`；完成实现与全部验收后才提升 workspace 版本 |
 
 ---
 
@@ -12,21 +29,23 @@
 
 **九条对每个阶段都成立的规则：**
 
-1. **阶段结束时仓库必须可 build、`cargo test --workspace` 全绿、CI 全绿。** 不允许"下个阶段再修"的破窗。
+1. **阶段结束时仓库必须可 build、R091-15 对当前平台适用的测试全绿、Linux CI 全绿。** 不允许"下个阶段再修"的破窗。
 2. **不为下一阶段预建抽象。** 这条是旧审计"24+ 无人居住的脚手架"（`blueprint.md` §18.4）的规则化闭环。需要一个 trait 时再抽，不要提前。
 3. **发现真实回归时，只为该不变量加一个聚焦测试**，不要顺手补一套。测试数量不是质量指标。
-4. **实测结果与蓝图冲突时**：按 `governance.md` §3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `evidence/review-log.md`，改掉蓝图，**不得静默偏离**。代码与文档不一致时，先改文档再改代码。
+4. **实测结果与蓝图冲突时**：按 `governance.md` §3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `evidence/review-log.md`，并在下一份增量蓝图新增修订；**冻结蓝图原文不改，也不得静默偏离**。代码与当前合同不一致时，先明确修订再改代码。
 5. **遇到 `governance.md` §1.2 列出的决策**（改全局系统语义、产品能力边界变化、引入新依赖、放宽失败语义）：**停下，问所有者**，不要自行决定。
 6. **改 ABI 走 `governance.md` §4.2**：`flux_abi.h` 是唯一真相源，`crates/flux-core/src/abi.rs` 是手工镜像，`FLUX_ABI_MAGIC` 必须 bump，`xtask abi-check` 必须通过。
 7. **设备测试遵守 `governance.md` §2.3**：每个改设备状态的脚本都要有覆盖全部退出路径的 cleanup，并在结束时打印残留检查。
-8. **`blueprint.md` §19 与 `decisions/rejected-and-deferred.md` 里被拒绝的方案不得复活。** 卡住时正确的动作是问，不是去拿一个已被逐条否决的办法。每个阶段的"禁止"小节列的就是该阶段最容易复活的那几条。
+8. **`decisions/rejected-and-deferred.md` §19 里被拒绝的方案不得复活。** 卡住时正确的动作是问，不是去拿一个已被逐条否决的办法。每个阶段的"禁止"小节列的就是该阶段最容易复活的那几条。
 9. **禁止把失败掩盖过去。** `governance.md` §5 点名的五种掩盖手段（token map、patch sing-box、加第二后端、加 heartbeat、放宽 fail-closed）在任何阶段都不允许。
 
 **关于"外推范围"**：所有实测结论都来自**一台** SM-S9180 / 5.15.211。`verification/phase0.md` §16.3 给了五层分类（AOSP 强制 / GKI / SoC 厂商 / OEM / 运行期）。把 OEM 层的观察当普适事实是这个项目最容易犯的错，写代码时尤其如此——**不要把任何单机观测值硬编码**。
 
 ---
 
-## 17.2 Phase 0 剩余问题的归属
+## 17.2 Phase 0 延后问题的归属（历史实施计划）
+
+**以下“剩余”只描述阶段开始时的安排；这些问题现已随 Phase 3–8 完成。当前状态只看 §17.0。**
 
 **已经答完的**（都在 `verification/phase0.md`）：
 
@@ -81,7 +100,7 @@
 
 ---
 
-## 17.4 阶段 1 — `flux-core` 纯逻辑
+## 17.4 阶段 1 — `flux-core` 纯逻辑（**已完成**）
 
 **交付物**：`flux-core` 的全部纯逻辑 + 单测；`xtask`（`abi-check`、`package`）；module staging；版本与 engine pin 校验。
 
@@ -108,7 +127,7 @@
 
 ---
 
-## 17.5 阶段 2 — `fluxd` 进程骨架与 engine 生命周期
+## 17.5 阶段 2 — `fluxd` 进程骨架与 engine 生命周期（**已完成**）
 
 **交付物**：目录 layout；`flock` 单实例；控制协议；CLI（`start`/`stop`/`status`/`check`/`bugreport`）；reactor 骨架；engine 候选生命周期（§9.4 的六步换代事务）。
 
@@ -133,9 +152,9 @@
 
 ---
 
-## 17.6 阶段 3 — netlink 与内核对象所有权
+## 17.6 阶段 3 — netlink 与内核对象所有权（**已完成**）
 
-**交付物**：veth 创建；route/RPDB；clsact/filter 挂载与卸载；interface admission；所有权谓词；`rp_filter` 前置检查。
+**交付物**：veth 创建；route/RPDB；自有 veth 的 clsact 生命周期；物理接口上的 filter 挂载与卸载；interface admission；所有权谓词；`rp_filter` 前置检查。
 
 **必读**：`blueprint.md` §8（网络对象与所有权，全节）、§3.3（接口分类）、§10.4（netlink 事件）、§12.8（为什么不 shell out 到 `ip`/`tc`）、`verification/phase0.md` §16.9。
 
@@ -159,7 +178,7 @@
 
 ---
 
-## 17.7 阶段 4 — BPF 加载器（只加载，不挂载）
+## 17.7 阶段 4 — BPF 加载器（只加载，不挂载，**已完成**）
 
 **交付物**：手写 ELF 解析、relocation、map 创建（12 张）、`SK_STORAGE` 的手写 BTF、ARRAY_OF_MAPS 内层 map、ringbuf；`fluxd check` 的 BPF 半。
 
@@ -184,7 +203,7 @@
 
 ---
 
-## 17.8 阶段 5 — 挂载、存活验证、skb 回送闭环
+## 17.8 阶段 5 — 挂载、存活验证、skb 回送闭环（**已完成**）
 
 **交付物**：`flx_verify` 存活验证流程（§8.5.4）；四个程序挂载；veth 回送路径打通。
 
@@ -209,7 +228,7 @@
 
 ---
 
-## 17.9 阶段 6 — 完整数据路径
+## 17.9 阶段 6 — 完整数据路径（**已完成**）
 
 **交付物**：§7.2–7.5 的决策算法全部落地；`bpf_sk_assign` 路径；counters；per-UID 统计（D23）。
 
@@ -236,7 +255,7 @@
 
 ---
 
-## 17.10 阶段 7 — 故障、换代与自愈
+## 17.10 阶段 7 — 故障、换代与自愈（**已完成**）
 
 **交付物**：`fault_events` ring buffer；fault latch；generation 换代与恢复；`status` 的完整故障矩阵。
 
@@ -260,16 +279,16 @@
 
 ---
 
-## 17.11 阶段 8 — 模块封装与发布
+## 17.11 阶段 8 — 模块封装与发布工程（**实现与设备验证已完成，版本发布未授权**）
 
-**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；`action.sh`；webroot；release artifact。
+**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；`action.sh`；精确 allowlist 的 release candidate artifact。0.9.1 不包含 `webroot` 或 Flux WebUI（R091-03、R091-12）。
 
 **必读**：`blueprint.md` §13（模块安装与构建）、`docs/ux.md`、`docs/introduction.md`、`governance.md` §7（发布工程与社区流程）。
 
 **退出条件**：
 
 1. 0.9.0 artifact / checksum / 文档三者一致。
-2. 三个管理器上安装、启动、`action.sh`、卸载全部闭环；卸载后**零残留**（复用阶段 3 的 Q8 检查）。
+2. 三个管理器上安装、启动、`action.sh`、卸载、管理器重启全部闭环；卸载脚本不 flush 内核对象，**重启后**非持久 Flux 对象归零（R091-09）。
 3. `docs/introduction.md` 描述的行为与实际一致——**包括那些"诚实的失败"**：流量统计翻倍、被委托的流量、OEM 冲突时保持 Direct。
 4. `bugreport` 的输出满足 `docs/ux.md` 的隐私约定（默认无 logcat；不泄露第三方包名之外的使用习惯，参见 §16.7.3）。
 

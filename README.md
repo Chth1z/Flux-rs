@@ -6,9 +6,11 @@ eBPF and an **unmodified** official
 VPN, alter packets' IP addresses or ports, or take over traffic from apps you
 did not select.
 
-> **Status:** the 0.9.0 implementation is in pre-release validation. A signed
-> `v0.9.0` release tag is created only after every gate in
-> `docs/blueprint.md` §20 passes. Do not treat an arbitrary Actions artifact or
+> **Status:** the 0.9.0 implementation is in pre-release validation. The 0.9.1
+> design is an incremental correction layer over the frozen 0.9.0 blueprint;
+> it does not by itself bump the workspace version or authorize a release. A
+> signed release tag is created only after every applicable gate in 0.9.0 §20
+> and the 0.9.1 delta passes. Do not treat an arbitrary Actions artifact or
 > third-party repack as a release.
 
 ## What it does
@@ -32,8 +34,10 @@ The failure boundary is deliberately exact:
 Flux does not attach to VPN/TUN devices, bridge or tethering traffic, cgroup
 hooks, or forwarded/LAN ingress. It does not modify netd fwmarks, replace AOSP
 BPF programs, flush system qdiscs/rules, inject broad SELinux policy, or ship a
-Flux WebUI. An OEM classifier that prevents Flux from being first-applicable
-causes that interface to remain Direct with a specific reason in `status`.
+Flux WebUI. Flux does not need to be the first classifier in a dump: each
+attachment must pass identity, ordering, and live reachability verification.
+An OEM chain that makes the Flux filter unreachable leaves only that interface
+Direct with a specific reason in `status`.
 
 ## Requirements
 
@@ -153,9 +157,11 @@ publishes the exact sing-box Corresponding Source archive pinned by
 
 ## Documentation and license
 
-`docs/blueprint.md` is the normative implementation contract;
-`docs/architecture.md` is the short engineering orientation. The data-plane ABI
-source of truth is `bpf/include/flux_abi.h`, mirrored and layout-tested in Rust.
+The normative 0.9.1 implementation contract is the frozen
+`docs/blueprint.md` baseline plus `docs/blueprint-0.9.1.md`; when they conflict,
+the delta wins. `docs/architecture.md` is the short engineering orientation.
+The data-plane ABI source of truth is `bpf/include/flux_abi.h`, mirrored and
+layout-tested in Rust.
 
 Flux-rs is GPL-3.0-only. The unmodified sing-box binary is
 GPL-3.0-or-later; see `THIRD_PARTY_NOTICES.md` and the release's corresponding

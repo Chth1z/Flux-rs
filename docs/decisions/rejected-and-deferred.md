@@ -2,7 +2,7 @@
 
 > 原 blueprint.md 第 19、21、22 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
 >
-> 谁读这份：有人提议「为什么不做 X」时，来查 X 是否已被评估过。规范性合同仍是 `docs/blueprint.md`。
+> 谁读这份：有人提议「为什么不做 X」时，来查 X 是否已被评估过。本文保留 0.9.0 的决策历史，并投影 0.9.1 的当前处置；规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`。
 
 ---
 
@@ -10,7 +10,7 @@
 
 | 方案 | 否决依据 |
 |---|---|
-| cgroup SOCK_ADDR + token 地址（旧仓库路线） | UDP 原目的的 cmsg 由内核在 recvmsg **之后**从 skb 生成，SOCK_ADDR hook 无法恢复 → 对官方 engine 是伪证明；且 Android 15/16 已 flags-0 独占 root cgroup 的 connect/sendmsg/recvmsg 槽位，后代 attach 被内核拒绝 |
+| cgroup SOCK_ADDR + token 地址（旧仓库路线） | UDP 原目的的 cmsg 由内核在 recvmsg **之后**从 skb 生成，SOCK_ADDR hook 无法恢复 → 对官方 engine 是伪证明；Phase 0 干净快照虽未见 attach，但系统可动态以 flags-0 attach，使生命周期共存不可保证（R091-06） |
 | child cgroup `SETSOCKOPT`/`POST_BIND` provenance | 同一 flags-0 祖先规则阻止；且引入 Android 版本分叉与 SELinux/OEM cgroup 权限不确定性 |
 | 抢占 netd 的 cgroup 槽位（CHIZI / bpf2socks 做法） | 会静默关掉 Android 自己的 connect hook；netd 重启即互相替换。产品不能建立在此之上 |
 | eBPF 分类 + iptables/nftables TPROXY | 静态 netfilter/mark/RPDB 对象不随 fd 消失，daemon `SIGKILL`/掉电后形成不可证明的黑洞窗口；且必须占用 Android packed fwmark |
@@ -46,6 +46,8 @@
 
 # 第 21 部分：需要项目所有者确认的事项
 
+> 本节记录 0.9.0 当时的确认过程。0.9.0 §18 的清库步骤已经完成且在 0.9.1 被列为禁止重放的历史操作（R091-13）；下面的“仍需授权”不能当作当前命令执行。
+
 确认本蓝图等于确认以下六条：
 
 1. 0.9.0 采用 **TC egress → 专用 veth → TC ingress `bpf_sk_assign` → 官方 sing-box TProxy** 作为唯一候选，并先做非破坏性 Phase 0。
@@ -57,7 +59,7 @@
 
 ## 21.1 确认项：全部已关闭（2026-08-25 定稿）
 
-**本节不再有待确认事项。** 保留原表作为记录，并在末尾补上定稿轮的六条。
+**本节不再有待确认事项。** 0.9.0 原始结论保留在冻结蓝图；下表投影这些项目在 0.9.1 的当前处置。
 
 编号用 `C`（confirmation）而不是 `Q`，是为了和 §16 的 Phase 0 证伪问题 `Q1–Q10` 区分开——两套编号此前共用 `Q` 前缀，引用时会歧义。
 
@@ -67,20 +69,20 @@
 | **C2** | 系统 DNS 处理 | 精准 per-app 捕获，零额外机制（D18）。`fchown` 已把归属放进 `sk_uid`。残余边界只有 Private DNS / `enforce_dns_uid` / mDNS 三条 |
 | **C3** | 内核基线 | `5.15`。首发 Android 12 设备不在支持范围 |
 | **C4** | Phase 0 设备 | SM-S9180（Android 16 / **5.15.211** / KernelSU）。它恰好就是基线内核，且实测发现**Android 版本与内核版本解耦**（升级机型），这本身成了 §16.3.5 的关键论据 |
-| **C5** | 控制协议编码 | SEQPACKET 上的单行 JSON。**同时确认它就是给未来 UI 预留的接口**，`fluxd` CLI 只是第一个客户端 |
+| **C5** | 控制协议编码 | SEQPACKET 上的单行 JSON。0.9.1 只有 CLI 一个真实客户端，不新增独立 `wire_version` 或未来 UI registry（R091-11） |
 | **C6** | 文档语言 | 中文为主、专有名词保留英文（`authoring.md` §6）。文档已按读者拆分（`docs/README.md`） |
 | **C7** | **是否给 sing-box 打补丁** | **不打**（D19）。永久使用官方未修改二进制 |
-| **C8** | WebUI | **搁置**。协议已预留，将来做是纯增量 |
-| **C9** | 开关机制 | **`disable` 文件 + inotify**，无 `action.sh` 按钮 |
-| **C10** | 代理控制面 | **clash_api + zashboard**，UI 下载归 sing-box |
-| **C11** | 订阅 | **做转换**（URI 列表 → outbound，落在 `flux-core`），不做跨配置格式翻译 |
+| **C8** | WebUI | 0.9.1 不包含 Flux WebUI，也不默认托管或下载第三方 UI（R091-03） |
+| **C9** | 开关机制 | `disable` 文件是唯一状态；包含 `action.sh`，它只调用现有 `enable`/`disable`，不保存第二份 toggle（R091-03） |
+| **C10** | 代理控制面 | 默认配置无 `clash_api`、zashboard 或远程内容；用户可在自有配置中启用回环 + secret 的 `clash_api`（R091-03） |
+| **C11** | 订阅 | 0.9.1 不做订阅、转换或自动替换用户配置；只有出现第二个真实配置来源时才设计 seam（R091-03、R091-14） |
 | **C12** | 诊断包是否含 `logcat` | **默认不含**，`--with-logcat` 显式开启并警告。理由：`logcat -b all` 含通知内容、Wi-Fi BSSID（可定位）、蜂窝小区、账号名、其它应用自己打的日志，且**无法脱敏**——那是几千个应用产生的无结构文本。Android 自己把 `READ_LOGS` 定为 signature 级权限正是因为这个 |
 
 ### 定稿状态
 
-**设计已定稿。** 本蓝图与 `docs/` 下各文件构成实现合同。
+**下面三行是 2026-08-25 定稿时的历史快照；当前进度以 `plan/implementation.md` §17.0 为准。**
 
-- Phase 0 的**观测半场**已完成（§16.2），**Q10 已通过**（§16.5.4），**Q1–Q9 待做且已授权**，工具链无障碍（WSL 编 BPF → `adb push` → 设备 `bpftool`）。
+- 当时 Phase 0 的**观测半场**已完成（§16.2），Q10 已通过；此后 Phase 1–8 与对应设备验证均已进入仓库，不再使用“Q1–Q9 待做”描述当前状态。
 - 已无任何已知的、能推翻主路线的技术未知项。
 - 清库重建**已执行**，不再需要第二次授权。
 
@@ -90,7 +92,7 @@
 
 # 第 22 部分：延期项与它们的 seam（"一次做到位"的自检）
 
-要求是"这次设计就尽量做到完美，而不是后续再升级"。这一节把每个不在 0.9.0 里的东西逐项过一遍，只允许两种结论：**收进 0.9.0**，或者 **给出它插入哪个已存在 seam、为什么现在不做不会导致返工**。凡是"以后再想"的都不合格。
+这一节保留 0.9.0 对延期项的评估。0.9.1 采用 R091-14 的更严格规则：**不为单一生产实现或假想未来客户端预建公开 seam**；下表的插入点只是重新评估时的方向，不是当前接口承诺。
 
 ## 22.1 已因本轮调研收进 0.9.0
 
@@ -107,13 +109,13 @@
 
 | 项 | 为什么现在不做 | 将来插进哪个 seam（不改动其它模块） |
 |---|---|---|
-| 远程 subscription | 它是**纯附加**的产品功能，不在数据面也不在任何 seam 上。引入它需要 HTTP/TLS 信任面、重试与节点合并，与 0.9.0 要证明的东西（数据面正确性）无关 | 新增 `fluxd subscribe` 子命令：抓取 → 校验 → **原子替换 `config/sing-box.json`** → 走既有的 §10.5 engine 候选事务。`fluxd` 其它模块一行不改 |
+| 远程 subscription | 引入 HTTP/TLS 信任面、重试、节点合并和第二配置来源；0.9.1 明确不做，也绝不自动替换用户配置 | 等第二个真实配置来源出现后，围绕“输入 → candidate → 用户确认/promotion”重新设计；当前不预建 `subscribe` 命令、trait 或 schema registry |
 | 热点 / tethering / LAN 下游代理 | 分类依据从"socket UID"变成"源 IP/MAC"，是一条**新的捕获入口**，但复用同一套 veth + assign 机制 | 新增第三个 entry `flx_cap_lan`，attach 在下游 interface 的 **ingress**（不是 egress），按源 CIDR/MAC 判定后走同一个 `handoff()`。`flux_control` 加一张源 LPM map。ABI magic 随之 bump |
 | 被动入站 TCP（把手机当服务端） | 需要反向的 listener 归属与 NAT 语义，且不是"透明代理"这个产品的问题 | 无既有 seam。若真要做，属新产品线，不是升级 |
 | 分片 UDP 的续传 | 极罕见（QUIC 置 DF 并做 PMTU；DNS 超 MTU 会退 TCP）。0.9.0 的处置是 **drop 而非泄漏**（§7.3），语义已经正确，只是可用性差一点 | 在 `flux_decision` 之外加一张 `{sk, ip_id} → 决策` 的小 map，只在首片命中时写入。热路径不受影响 |
 | 多代理核心 / 多后端 | 一次 seam 失败换来长期双实现维护（§19） | 无 seam，且刻意如此 |
-| WebUI / 自有 Clash 代理层 | sing-box 自带 Clash API 与 `observability`，重复造一层只增加攻击面 | 用户直接连 sing-box 的 `clash_api` |
-| 管理器 App | 控制协议已是版本化 JSON over SEQPACKET（§10.3），且命令幂等 | 加命令即可，协议不需要改造 |
+| WebUI / 自有 Clash 代理层 | 重复造一层只增加攻击面；0.9.1 默认配置也不启用 `clash_api` | 用户若需要，可自行配置回环监听、非空 secret 与任意外部 UI；Flux 不下载、不托管 |
+| 管理器 App | 当前只有 CLI 一个 adapter，没有真实兼容需求 | 出现第二客户端时先定义兼容窗口，再显式升级协议；不能假称当前 wire 已版本化 |
 | 16 KiB base page | 由固定 engine 资产的 `p_align` 决定，不是我们能选的（§3.8） | 官方资产达到 `p_align >= 0x4000` 后改 `engine.lock` 与一处 page-size 判定 |
 | **TCX attach（6.6+）** | 见下方专门说明——它现在是**优先级最高的延期项**，因为它同时消灭两整类失败 | 在 §12.5 的 attach 层加一个分支：探测到 `BPF_LINK_CREATE` 支持 `BPF_TCX_INGRESS`/`BPF_TCX_EGRESS` 就用 link，否则回落 clsact filter。所有权谓词换成 link id。四个 BPF 程序与全部 map **一行不改** |
 
@@ -150,7 +152,6 @@ nftables/iptables 后端、TUN 后端、cgroup attach、SOCKMAP/FD handoff、机
 
 一个延期项合格，当且仅当满足全部三条：① 它不在任何 packet 热路径上，或它在热路径上但只新增一个独立分支；② 它插入的 seam 在 0.9.0 里**已经存在且已被使用**（不是为它预留的空抽象）；③ 加入它不需要修改 `flux_abi.h` 之外的任何既有不变量（若需要改 ABI，则必须 bump `FLUX_ABI_MAGIC`，这是允许的）。
 
-**不满足这三条的东西必须现在就做完，或者永久放弃。** §22.2 里"热点代理"是唯一需要改 ABI 的项，已在表中标明。
+这三条是 0.9.0 当时的延期评估准则，不是要求 0.9.1 现在预建 seam。未来若重启任一延期项，必须按当时的真实需求另立增量修订；其中热点代理仍明确需要 ABI 变更。
 
 ---
-

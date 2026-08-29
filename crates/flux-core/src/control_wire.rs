@@ -1,12 +1,13 @@
 //! Control-protocol wire types.
 //!
-//! Implements blueprint §10.3 and §24. The transport is `SOCK_SEQPACKET` with a
-//! root-only peer check and one single-line JSON message per packet; this
-//! module owns only the encoding, so it is fully testable on any host
-//! (blueprint §15.2 test 7).
+//! Implements the 0.9.0 blueprint §10.3/§24 as corrected by R091-11. The
+//! transport is `SOCK_SEQPACKET` with a root-only peer check and one single-line
+//! JSON message per packet; this module owns only the encoding, so it is fully
+//! testable on any host (0.9.0 §15.2 test 7).
 //!
-//! This protocol is the product's public API, not just the CLI's private wire
-//! (`docs/ux.md` §5.1), so its JSON shape follows blueprint §10.3 exactly.
+//! The CLI is currently the only real adapter. The JSON shape stays stable to
+//! avoid gratuitous breakage, but 0.9.1 does not pretend that an independent
+//! wire-version or migration framework already exists.
 
 use std::collections::BTreeMap;
 
@@ -18,11 +19,15 @@ pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// Top-level daemon state (blueprint §10.1, §24.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum State {
-    /// The `disable` file is present; nothing is attached.
+    /// The `disable` file is present; control is inactive and the engine is
+    /// stopped. Owned kernel objects may remain until a later converge/reboot.
     Disabled,
-    /// Enabled but not attached, e.g. starting up or blocked by an error.
+    /// Enabled but control is inactive, e.g. starting up or blocked by an
+    /// error. This does not by itself prove that no owned objects exist.
     Inactive,
-    /// Attached and carrying traffic (`control active == 1`).
+    /// The engine generation is committed (`control active == 1`) and at least
+    /// one physical capture interface is active; per-interface status describes
+    /// the rest of the coverage.
     Active,
 }
 
@@ -40,11 +45,12 @@ pub enum Request {
     Check,
     /// Persist enabled and try to activate.
     Enable,
-    /// Persist disabled and detach.
+    /// Persist disabled, publish inactive, and stop the engine. It does not
+    /// promise synchronous TC/veth/rule/route/map teardown.
     Disable,
     /// Re-read configuration and converge.
     Reload,
-    /// Detach and exit zero.
+    /// Publish inactive, stop the engine, and exit zero without a broad flush.
     Stop,
 }
 
@@ -71,9 +77,11 @@ pub struct PolicyCounts {
     pub selected: u32,
     /// Draining UIDs.
     pub draining: u32,
-    /// IPv4 bypass entries, including fixed and self-address ones.
+    /// IPv4 LPM entries, including fixed and user `bypass_cidrs`, but not the
+    /// separate self-address HASH.
     pub bypass_v4: u32,
-    /// IPv6 bypass entries, including fixed and self-address ones.
+    /// IPv6 LPM entries, including fixed and user `bypass_cidrs`, but not the
+    /// separate self-address HASH.
     pub bypass_v6: u32,
     /// Dynamically injected device-own address entries.
     pub self_addresses: u32,
@@ -127,7 +135,9 @@ pub struct IfaceStatus {
     /// The attached program's 8-byte tag, when active.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prog_tag: Option<String>,
-    /// Whether our filter is first-applicable in the dump order.
+    /// Compatibility field: whether admission proved the filter reachable and
+    /// its numerically smaller-pref (preceding) snapshot has not drifted. It
+    /// does not mean that the filter is first in dump order (R091-05).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub first_applicable: Option<bool>,
     /// A stable reason token when excluded (blueprint §24.2).
