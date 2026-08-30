@@ -79,7 +79,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p flux-core && cargo test -p xtask
 cargo xtask doc-check
+cargo clippy -p fluxd --target aarch64-linux-android --all-targets
 ```
+
+最后一条覆盖 Linux-only 的数据面，主机门禁编译不到它。`abi-check` 与 `btf-check` 需要带 BPF 后端的 clang，Windows 开发机上没有，由 Linux CI 跑（§15.1）——跑不了就跳过并说明。
 
 加上 B2 那条纯函数测试必须存在且通过。
 

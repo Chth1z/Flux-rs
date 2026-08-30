@@ -2472,17 +2472,23 @@ impl Reactor {
         }
 
         let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
-        let bypass_v4 = fixed_v4
+        // Insert user policy first so an exact duplicate in the mechanism set
+        // is forced back to RESERVED rather than weakening the invariant.
+        let bypass_v4 = flux
+            .bypass_v4
             .iter()
-            .chain(flux.bypass_v4.iter())
             .copied()
-            .map(|cidr| cidr.to_lpm_key())
+            .map(flux_core::cidr::BypassEntry::policy)
+            .chain(fixed_v4.iter().copied())
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag))
             .collect();
-        let bypass_v6 = fixed_v6
+        let bypass_v6 = flux
+            .bypass_v6
             .iter()
-            .chain(flux.bypass_v6.iter())
             .copied()
-            .map(|cidr| cidr.to_lpm_key())
+            .map(flux_core::cidr::BypassEntry::policy)
+            .chain(fixed_v6.iter().copied())
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag))
             .collect();
 
         Ok(PolicyCandidate {

@@ -417,8 +417,11 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 	return 0;
 }
 
-static __always_inline int bypass_hit(const struct flux_pkt *p)
+static __always_inline int bypass_hit(const struct flux_pkt *p,
+				      const struct flux_control *c)
 {
+	__u8 tag = 0;
+
 	if (p->family == 4) {
 		__u32 exact;
 		__builtin_memcpy(&exact, p->daddr, 4);
@@ -427,16 +430,27 @@ static __always_inline int bypass_hit(const struct flux_pkt *p)
 		struct flux_lpm_v4_key k = {};
 		k.prefixlen = 32;
 		__builtin_memcpy(k.addr, p->daddr, 4);
-		return bpf_map_lookup_elem(&bypass_v4, &k) != NULL;
+		__u8 *found = bpf_map_lookup_elem(&bypass_v4, &k);
+		if (found)
+			tag = *found;
+	} else {
+		__u8 exact[16];
+		__builtin_memcpy(exact, p->daddr, 16);
+		if (bpf_map_lookup_elem(&self_addr_v6, exact))
+			return 1;
+		struct flux_lpm_v6_key k = {};
+		k.prefixlen = 128;
+		__builtin_memcpy(k.addr, p->daddr, 16);
+		__u8 *found = bpf_map_lookup_elem(&bypass_v6, &k);
+		if (found)
+			tag = *found;
 	}
-	__u8 exact[16];
-	__builtin_memcpy(exact, p->daddr, 16);
-	if (bpf_map_lookup_elem(&self_addr_v6, exact))
+
+	if (tag == FLUX_BYPASS_RESERVED)
 		return 1;
-	struct flux_lpm_v6_key k = {};
-	k.prefixlen = 128;
-	__builtin_memcpy(k.addr, p->daddr, 16);
-	return bpf_map_lookup_elem(&bypass_v6, &k) != NULL;
+	if (c && c->cidr_mode == FLUX_CIDR_WHITELIST)
+		return tag == 0;
+	return tag != 0;
 }
 
 // ------------------------------------------------------- listener liveness
@@ -623,9 +637,9 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (p.fragment) {
 		// The destination is known even without an L4 header, so the
 		// bypass decision is still exact.
-		if (bypass_hit(&p))
-			return TC_ACT_UNSPEC;
 		const struct flux_control *c = ctrl();
+		if (bypass_hit(&p, c))
+			return TC_ACT_UNSPEC;
 		if (*mode == FLUX_UID_SELECTED && c && c->active) {
 			// Never direct: a fragment of a datagram that would
 			// have been proxied must not reach the real
@@ -657,7 +671,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 		cand.mode = FLUX_DEC_DIRECT;
 		cand.generation = 0;
 		if (*mode == FLUX_UID_SELECTED && c && c->active &&
-		    !bypass_hit(&p) &&
+		    !bypass_hit(&p, c) &&
 		    listener_alive(skb, c, p.family, IPPROTO_TCP)) {
 			cand.mode = FLUX_DEC_CAPTURED;
 			cand.generation = c->generation;
@@ -709,7 +723,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	const struct flux_control *c = ctrl();
 	if (!c || !c->active)
 		return TC_ACT_UNSPEC;
-	if (bypass_hit(&p))
+	if (bypass_hit(&p, c))
 		return TC_ACT_UNSPEC;
 	if (!listener_alive(skb, c, p.family, IPPROTO_UDP))
 		return TC_ACT_UNSPEC;

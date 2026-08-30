@@ -122,12 +122,16 @@ fn main() {
     let mut desired = dataplane::DesiredPolicy::default();
     desired.selected_uids.insert(uid);
     let (fixed4, fixed6) = flux_core::config::FluxConfig::fixed_bypass();
-    desired
-        .bypass_v4
-        .extend(fixed4.iter().copied().map(|cidr| cidr.to_lpm_key()));
-    desired
-        .bypass_v6
-        .extend(fixed6.iter().copied().map(|cidr| cidr.to_lpm_key()));
+    desired.bypass_v4.extend(
+        fixed4
+            .iter()
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag)),
+    );
+    desired.bypass_v6.extend(
+        fixed6
+            .iter()
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag)),
+    );
     manager
         .apply_policy(&desired)
         .expect("install Phase 6 policy");
@@ -226,6 +230,7 @@ fn main() {
         flux_core::cidr::Ipv4Cidr::parse("203.0.113.77/32")
             .unwrap()
             .to_lpm_key(),
+        flux_core::abi::BypassTag::Policy,
     );
     manager.apply_policy(&bypassed).expect("add hot bypass");
     let bypass_app = UdpSocket::bind("0.0.0.0:0").expect("bind bypass probe");
@@ -484,12 +489,16 @@ fn package_name_rule_smoke(engine_binary: PathBuf, preferred_iface: &str) {
     let mut desired = dataplane::DesiredPolicy::default();
     desired.selected_uids.extend([matching_uid, rejected_uid]);
     let (fixed4, fixed6) = flux_core::config::FluxConfig::fixed_bypass();
-    desired
-        .bypass_v4
-        .extend(fixed4.iter().copied().map(|cidr| cidr.to_lpm_key()));
-    desired
-        .bypass_v6
-        .extend(fixed6.iter().copied().map(|cidr| cidr.to_lpm_key()));
+    desired.bypass_v4.extend(
+        fixed4
+            .iter()
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag)),
+    );
+    desired.bypass_v6.extend(
+        fixed6
+            .iter()
+            .map(|entry| (entry.cidr.to_lpm_key(), entry.tag)),
+    );
     manager
         .apply_policy(&desired)
         .expect("install package-rule UID policy");

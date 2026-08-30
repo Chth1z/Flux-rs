@@ -779,20 +779,28 @@ fn validate_fakeip_outside_fixed_bypass(
         if let Some(range) = fakeip.get("inet6_range").and_then(Value::as_str) {
             let parsed = Ipv6Cidr::parse(range)
                 .map_err(|e| format!("module/template.json fakeip inet6_range `{range}`: {e:?}"))?;
-            if let Some(hit) = bypass_v6.iter().find(|b| b.contains_prefix(&parsed)) {
+            if let Some(hit) = bypass_v6
+                .iter()
+                .find(|entry| entry.cidr.contains_prefix(&parsed))
+            {
                 return Err(format!(
                     "module/template.json fakeip inet6_range {range} lies inside the fixed \
-                     bypass {hit}; every fakeip address would be routed direct"
+                     bypass {}; every fakeip address would be routed direct",
+                    hit.cidr
                 ));
             }
         }
         if let Some(range) = fakeip.get("inet4_range").and_then(Value::as_str) {
             let parsed = Ipv4Cidr::parse(range)
                 .map_err(|e| format!("module/template.json fakeip inet4_range `{range}`: {e:?}"))?;
-            if let Some(hit) = bypass_v4.iter().find(|b| b.contains_prefix(&parsed)) {
+            if let Some(hit) = bypass_v4
+                .iter()
+                .find(|entry| entry.cidr.contains_prefix(&parsed))
+            {
                 return Err(format!(
                     "module/template.json fakeip inet4_range {range} lies inside the fixed \
-                     bypass {hit}; every fakeip address would be routed direct"
+                     bypass {}; every fakeip address would be routed direct",
+                    hit.cidr
                 ));
             }
         }

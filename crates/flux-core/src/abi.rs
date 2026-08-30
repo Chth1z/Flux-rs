@@ -14,6 +14,9 @@
 
 /// Bumped on ANY layout, map-set or semantic change. Unrelated to SemVer.
 ///
+/// * `0xF10C0904` tags bypass LPM values as mechanism-reserved or user policy
+///   and carries the CIDR list direction in the former control padding. The
+///   control size and every existing field offset remain unchanged.
 /// * `0xF10C0903` map set 9 to 12: local addresses move out of the bypass LPM
 ///   tries into exact HASH maps, a per-UID byte counter is added, and the
 ///   listener addresses move clear of sing-box's conventional fakeip range
@@ -22,7 +25,7 @@
 ///   [`Counter::SawPacket`] for the positive liveness check (blueprint §8.5.4).
 /// * `0xF10C0901` dropped `peer_mac` / `host_mac`; ingress forces
 ///   `PACKET_HOST` instead (blueprint D17).
-pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0903;
+pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0904;
 
 /// Guards against reading uninitialised or foreign socket storage.
 pub const FLUX_DECISION_MAGIC: u32 = 0xD3C1_5100;
@@ -295,6 +298,16 @@ pub enum DecisionMode {
     Captured = 2,
 }
 
+/// Direction applied to user policy entries in the bypass LPM tries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum CidrMode {
+    /// A policy hit goes direct; a miss is eligible for capture.
+    Blacklist = 0,
+    /// A policy hit is eligible for capture; a miss goes direct.
+    Whitelist = 1,
+}
+
 /// Per-app-socket first decision. Created once, never updated in place,
 /// released with the socket.
 ///
@@ -350,8 +363,8 @@ pub struct Control {
     pub probe_remote_v4: [u8; 4],
     /// Liveness probe remote port, network byte order.
     pub probe_remote_port: u16,
-    /// Must be zero.
-    pub pad0: [u8; 2],
+    /// A [`CidrMode`] discriminant, in host byte order.
+    pub cidr_mode: u16,
     /// Listener address, network byte order.
     pub listen_v6: [u8; 16],
     /// Liveness probe remote, network byte order.
@@ -388,6 +401,16 @@ pub struct UidStats {
 }
 
 // --------------------------------------------------------------------- bypass
+
+/// Value stored in the bypass LPM tries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum BypassTag {
+    /// Mechanism invariant, always direct regardless of [`CidrMode`].
+    Reserved = 1,
+    /// User policy, interpreted according to [`CidrMode`].
+    Policy = 2,
+}
 
 /// LPM trie key for the IPv4 bypass set. C: size 8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -547,6 +570,18 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
+    CidrMode::Blacklist as u16 == 0 && CidrMode::Whitelist as u16 == 1,
+    "CIDR mode discriminants must remain the BPF truth-table values"
+);
+
+const _: () = assert!(
+    BypassTag::Reserved as u8 != 0
+        && BypassTag::Policy as u8 != 0
+        && BypassTag::Reserved as u8 != BypassTag::Policy as u8,
+    "bypass tags must be distinct non-zero map values"
+);
+
+const _: () = assert!(
     LISTEN_PORT_MIN < LISTEN_PORT_MAX,
     "listener port draw range is empty"
 );
@@ -595,7 +630,7 @@ mod tests {
         assert_eq!(offset_of!(Control, listen_v4), 28);
         assert_eq!(offset_of!(Control, probe_remote_v4), 32);
         assert_eq!(offset_of!(Control, probe_remote_port), 36);
-        assert_eq!(offset_of!(Control, pad0), 38);
+        assert_eq!(offset_of!(Control, cidr_mode), 38);
         assert_eq!(offset_of!(Control, listen_v6), 40);
         assert_eq!(offset_of!(Control, probe_remote_v6), 56);
         assert_eq!(offset_of!(Control, selected_count), 72);
@@ -603,6 +638,14 @@ mod tests {
         assert_eq!(offset_of!(Control, bypass_v4_count), 80);
         assert_eq!(offset_of!(Control, bypass_v6_count), 84);
         assert_eq!(offset_of!(Control, pad1), 88);
+    }
+
+    #[test]
+    fn bypass_and_cidr_mode_values_match_the_header() {
+        assert_eq!(CidrMode::Blacklist as u16, 0);
+        assert_eq!(CidrMode::Whitelist as u16, 1);
+        assert_eq!(BypassTag::Reserved as u8, 1);
+        assert_eq!(BypassTag::Policy as u8, 2);
     }
 
     #[test]

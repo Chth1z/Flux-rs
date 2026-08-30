@@ -25,6 +25,9 @@
 /* ------------------------------------------------------------------ magic */
 
 /* Bump on ANY layout, map-set or semantic change. Not related to SemVer.
+ * 0xF10C0904: bypass LPM values distinguish mechanism-reserved prefixes from
+ *             user policy, and flux_control carries the CIDR list direction.
+ *             The control layout and every existing field offset stay fixed.
  * 0xF10C0903: map set 9 -> 12. Local addresses move from the bypass LPM tries
  *             into dedicated exact HASH maps (self_addr_v4/v6) and a per-UID
  *             byte counter is added (uid_stats). The listener addresses move
@@ -46,7 +49,7 @@
  * kernel/userspace data contract and do not require a bump, because no BPF
  * program reads them. Only struct layouts and the map set do.
  */
-#define FLUX_ABI_MAGIC 0xF10C0903u
+#define FLUX_ABI_MAGIC 0xF10C0904u
 
 /* Guards against reading uninitialised or foreign socket storage. */
 #define FLUX_DECISION_MAGIC 0xD3C15100u
@@ -168,6 +171,11 @@ struct flux_decision {
 
 /* ---------------------------------------------------------- control leaf */
 
+enum flux_cidr_mode {
+	FLUX_CIDR_BLACKLIST = 0,
+	FLUX_CIDR_WHITELIST = 1,
+};
+
 /* Immutable snapshot. Written once, BPF_MAP_FREEZE'd, then published by a
  * single bpf_map_update_elem on control_root (map-in-map pointer swap under
  * RCU). A BPF invocation MUST look control_root up exactly once and hold the
@@ -187,7 +195,7 @@ struct flux_control {
 	__u8 listen_v4[4];          /* 28  be, 198.51.100.1                      */
 	__u8 probe_remote_v4[4];    /* 32  be, 192.0.2.1                       */
 	__u16 probe_remote_port;    /* 36  be, 9                               */
-	__u8 pad0[2];               /* 38  MUST be 0                           */
+	__u16 cidr_mode;            /* 38  enum flux_cidr_mode, host order     */
 	__u8 listen_v6[16];         /* 40  be, 2001:db8:0:1::2                     */
 	__u8 probe_remote_v6[16];   /* 56  be, 2001:db8:ffff::1                */
 	__u32 selected_count;       /* 72  diagnostics only                    */
@@ -244,6 +252,9 @@ struct flux_control {
 #define FLUX_LISTEN_PORT_MAX 65535u
 
 /* ---------------------------------------------------------------- bypass */
+
+#define FLUX_BYPASS_RESERVED 1u /* mechanism invariant; always direct */
+#define FLUX_BYPASS_POLICY   2u /* user policy; subject to cidr_mode   */
 
 struct flux_lpm_v4_key {
 	__u32 prefixlen; /* 0 */

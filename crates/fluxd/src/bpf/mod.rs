@@ -27,7 +27,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use flux_core::abi::UidStats;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use flux_core::abi::{
-    Control, Counter, FaultKey, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS,
+    BypassTag, Control, Counter, FaultKey, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS,
 };
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -273,9 +273,9 @@ impl Runtime {
             .map_err(|error| LoadError::syscall("uid_policy_update", None, error))
     }
 
-    pub fn update_bypass_v4(&self, key: &LpmV4Key) -> Result<(), LoadError> {
+    pub fn update_bypass_v4(&self, key: &LpmV4Key, tag: BypassTag) -> Result<(), LoadError> {
         self.maps
-            .update_bypass_v4(key)
+            .update_bypass_v4(key, tag)
             .map_err(|error| LoadError::syscall("bypass_v4_update", None, error))
     }
 
@@ -285,9 +285,9 @@ impl Runtime {
             .map_err(|error| LoadError::syscall("bypass_v4_delete", None, error))
     }
 
-    pub fn update_bypass_v6(&self, key: &LpmV6Key) -> Result<(), LoadError> {
+    pub fn update_bypass_v6(&self, key: &LpmV6Key, tag: BypassTag) -> Result<(), LoadError> {
         self.maps
-            .update_bypass_v6(key)
+            .update_bypass_v6(key, tag)
             .map_err(|error| LoadError::syscall("bypass_v6_update", None, error))
     }
 

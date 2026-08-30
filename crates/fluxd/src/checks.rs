@@ -281,14 +281,22 @@ pub fn validate_fakeip_bypass(flux: &FluxConfig, user: &serde_json::Value) -> Re
     let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
 
     for fake in &fake_v4 {
-        for bypass in fixed_v4.iter().chain(flux.bypass_v4.iter()) {
+        for bypass in fixed_v4
+            .iter()
+            .map(|entry| &entry.cidr)
+            .chain(flux.bypass_v4.iter())
+        {
             if overlaps_v4(*fake, *bypass) {
                 return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
             }
         }
     }
     for fake in &fake_v6 {
-        for bypass in fixed_v6.iter().chain(flux.bypass_v6.iter()) {
+        for bypass in fixed_v6
+            .iter()
+            .map(|entry| &entry.cidr)
+            .chain(flux.bypass_v6.iter())
+        {
             if overlaps_v6(*fake, *bypass) {
                 return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
             }

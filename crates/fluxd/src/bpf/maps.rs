@@ -314,16 +314,16 @@ impl MapSet {
         sys::update_map(fd, &uid.to_ne_bytes(), &[mode], 0)
     }
 
-    pub fn update_bypass_v4(&self, key: &LpmV4Key) -> io::Result<()> {
-        self.update_one(abi::MAP_BYPASS_V4, as_bytes(key), &[1])
+    pub fn update_bypass_v4(&self, key: &LpmV4Key, tag: abi::BypassTag) -> io::Result<()> {
+        self.update_one(abi::MAP_BYPASS_V4, as_bytes(key), &[tag as u8])
     }
 
     pub fn delete_bypass_v4(&self, key: &LpmV4Key) -> io::Result<()> {
         self.delete_one(abi::MAP_BYPASS_V4, as_bytes(key))
     }
 
-    pub fn update_bypass_v6(&self, key: &LpmV6Key) -> io::Result<()> {
-        self.update_one(abi::MAP_BYPASS_V6, as_bytes(key), &[1])
+    pub fn update_bypass_v6(&self, key: &LpmV6Key, tag: abi::BypassTag) -> io::Result<()> {
+        self.update_one(abi::MAP_BYPASS_V6, as_bytes(key), &[tag as u8])
     }
 
     pub fn delete_bypass_v6(&self, key: &LpmV6Key) -> io::Result<()> {

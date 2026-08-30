@@ -39,8 +39,8 @@ const IFA_F_STABLE_PRIVACY: u32 = 0x800;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DesiredPolicy {
     pub selected_uids: BTreeSet<u32>,
-    pub bypass_v4: BTreeSet<LpmV4Key>,
-    pub bypass_v6: BTreeSet<LpmV6Key>,
+    pub bypass_v4: BTreeMap<LpmV4Key, abi::BypassTag>,
+    pub bypass_v6: BTreeMap<LpmV6Key, abi::BypassTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,8 +114,8 @@ pub struct Manager {
     attached: Vec<OwnedFilter>,
     attachment: Option<AttachmentState>,
     uid_modes: BTreeMap<u32, u8>,
-    bypass_v4: BTreeSet<LpmV4Key>,
-    bypass_v6: BTreeSet<LpmV6Key>,
+    bypass_v4: BTreeMap<LpmV4Key, abi::BypassTag>,
+    bypass_v6: BTreeMap<LpmV6Key, abi::BypassTag>,
     self_v4: BTreeSet<[u8; 4]>,
     self_v6: BTreeSet<[u8; 16]>,
     address_seen_v4: BTreeMap<[u8; 4], u64>,
@@ -192,8 +192,8 @@ impl Manager {
             attached: Vec::new(),
             attachment: None,
             uid_modes: BTreeMap::new(),
-            bypass_v4: BTreeSet::new(),
-            bypass_v6: BTreeSet::new(),
+            bypass_v4: BTreeMap::new(),
+            bypass_v6: BTreeMap::new(),
             self_v4: BTreeSet::new(),
             self_v6: BTreeSet::new(),
             address_seen_v4: BTreeMap::new(),
@@ -536,27 +536,27 @@ impl Manager {
                 .map_err(DataplaneError::bpf)?;
             self.uid_modes.insert(uid, abi::UidMode::Selected as u8);
         }
-        for key in desired
+        for (key, tag) in desired
             .bypass_v4
-            .difference(&self.bypass_v4)
-            .copied()
+            .iter()
+            .filter_map(|(key, tag)| (self.bypass_v4.get(key) != Some(tag)).then_some((*key, *tag)))
             .collect::<Vec<_>>()
         {
             self.runtime_ref()?
-                .update_bypass_v4(&key)
+                .update_bypass_v4(&key, tag)
                 .map_err(DataplaneError::bpf)?;
-            self.bypass_v4.insert(key);
+            self.bypass_v4.insert(key, tag);
         }
-        for key in desired
+        for (key, tag) in desired
             .bypass_v6
-            .difference(&self.bypass_v6)
-            .copied()
+            .iter()
+            .filter_map(|(key, tag)| (self.bypass_v6.get(key) != Some(tag)).then_some((*key, *tag)))
             .collect::<Vec<_>>()
         {
             self.runtime_ref()?
-                .update_bypass_v6(&key)
+                .update_bypass_v6(&key, tag)
                 .map_err(DataplaneError::bpf)?;
-            self.bypass_v6.insert(key);
+            self.bypass_v6.insert(key, tag);
         }
         for address in desired_self_v4
             .difference(&self.self_v4)
@@ -597,7 +597,8 @@ impl Manager {
         }
         for key in self
             .bypass_v4
-            .difference(&desired.bypass_v4)
+            .keys()
+            .filter(|key| !desired.bypass_v4.contains_key(*key))
             .copied()
             .collect::<Vec<_>>()
         {
@@ -608,7 +609,8 @@ impl Manager {
         }
         for key in self
             .bypass_v6
-            .difference(&desired.bypass_v6)
+            .keys()
+            .filter(|key| !desired.bypass_v6.contains_key(*key))
             .copied()
             .collect::<Vec<_>>()
         {
@@ -2480,7 +2482,7 @@ fn inactive_control(
         listen_v4,
         probe_remote_v4,
         probe_remote_port: abi::PROBE_REMOTE_PORT.to_be(),
-        pad0: [0; 2],
+        cidr_mode: abi::CidrMode::Blacklist as u16,
         listen_v6,
         probe_remote_v6,
         selected_count: 0,

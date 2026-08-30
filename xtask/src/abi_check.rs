@@ -75,7 +75,7 @@ fn struct_specs() -> Vec<StructSpec> {
                 listen_v4,
                 probe_remote_v4,
                 probe_remote_port,
-                pad0,
+                cidr_mode,
                 listen_v6,
                 probe_remote_v6,
                 selected_count,
@@ -106,6 +106,8 @@ fn numeric_defines() -> Vec<(&'static str, u64)> {
     vec![
         ("FLUX_ABI_MAGIC", u64::from(abi::FLUX_ABI_MAGIC)),
         ("FLUX_DECISION_MAGIC", u64::from(abi::FLUX_DECISION_MAGIC)),
+        ("FLUX_BYPASS_RESERVED", abi::BypassTag::Reserved as u64),
+        ("FLUX_BYPASS_POLICY", abi::BypassTag::Policy as u64),
         (
             "FLUX_UID_POLICY_MAX_ENTRIES",
             u64::from(abi::UID_POLICY_MAX_ENTRIES),
@@ -166,6 +168,8 @@ fn enum_members() -> Vec<(&'static str, u64)> {
         ("FLUX_UID_DRAINING", abi::UidMode::Draining as u64),
         ("FLUX_DEC_DIRECT", abi::DecisionMode::Direct as u64),
         ("FLUX_DEC_CAPTURED", abi::DecisionMode::Captured as u64),
+        ("FLUX_CIDR_BLACKLIST", abi::CidrMode::Blacklist as u64),
+        ("FLUX_CIDR_WHITELIST", abi::CidrMode::Whitelist as u64),
         (
             "FLUX_FAULT_EGRESS_LISTENER",
             abi::FaultReason::EgressListener as u64,

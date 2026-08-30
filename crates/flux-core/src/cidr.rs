@@ -10,7 +10,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 
-use crate::abi::{LpmV4Key, LpmV6Key, LPM_MAX_ENTRIES};
+use crate::abi::{BypassTag, LpmV4Key, LpmV6Key, LPM_MAX_ENTRIES};
 
 /// Prefixes that are permanently in the bypass set, whatever the user config
 /// says.
@@ -77,6 +77,38 @@ pub struct Ipv6Cidr {
     /// Prefix length in bits, `0..=128`.
     pub prefix_len: u8,
 }
+
+/// A bypass prefix together with the semantic tag stored as its LPM value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BypassEntry<C> {
+    /// Canonical prefix used as the LPM key.
+    pub cidr: C,
+    /// Whether this is an invariant or user policy.
+    pub tag: BypassTag,
+}
+
+impl<C> BypassEntry<C> {
+    /// Tags a mechanism-owned prefix that is always direct.
+    pub const fn reserved(cidr: C) -> Self {
+        Self {
+            cidr,
+            tag: BypassTag::Reserved,
+        }
+    }
+
+    /// Tags a user-owned prefix interpreted according to `cidr_mode`.
+    pub const fn policy(cidr: C) -> Self {
+        Self {
+            cidr,
+            tag: BypassTag::Policy,
+        }
+    }
+}
+
+/// Tagged IPv4 bypass prefix.
+pub type Ipv4Bypass = BypassEntry<Ipv4Cidr>;
+/// Tagged IPv6 bypass prefix.
+pub type Ipv6Bypass = BypassEntry<Ipv6Cidr>;
 
 fn split_prefix(text: &str) -> Result<(&str, u8), CidrError> {
     let (addr, len) = text
@@ -201,24 +233,32 @@ fn mask128(prefix_len: u8) -> u128 {
     }
 }
 
-/// The fixed IPv4 bypass prefixes, parsed once from [`FIXED_BYPASS_V4`].
-pub fn fixed_bypass_v4() -> &'static [Ipv4Cidr] {
-    static CELL: OnceLock<Vec<Ipv4Cidr>> = OnceLock::new();
+/// The fixed IPv4 bypass prefixes, parsed once and tagged as mechanism-owned.
+pub fn fixed_bypass_v4() -> &'static [Ipv4Bypass] {
+    static CELL: OnceLock<Vec<Ipv4Bypass>> = OnceLock::new();
     CELL.get_or_init(|| {
         FIXED_BYPASS_V4
             .iter()
-            .map(|s| Ipv4Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"))
+            .map(|s| {
+                BypassEntry::reserved(
+                    Ipv4Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"),
+                )
+            })
             .collect()
     })
 }
 
-/// The fixed IPv6 bypass prefixes, parsed once from [`FIXED_BYPASS_V6`].
-pub fn fixed_bypass_v6() -> &'static [Ipv6Cidr] {
-    static CELL: OnceLock<Vec<Ipv6Cidr>> = OnceLock::new();
+/// The fixed IPv6 bypass prefixes, parsed once and tagged as mechanism-owned.
+pub fn fixed_bypass_v6() -> &'static [Ipv6Bypass] {
+    static CELL: OnceLock<Vec<Ipv6Bypass>> = OnceLock::new();
     CELL.get_or_init(|| {
         FIXED_BYPASS_V6
             .iter()
-            .map(|s| Ipv6Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"))
+            .map(|s| {
+                BypassEntry::reserved(
+                    Ipv6Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"),
+                )
+            })
             .collect()
     })
 }
@@ -227,7 +267,7 @@ pub fn fixed_bypass_v6() -> &'static [Ipv6Cidr] {
 ///
 /// Does not include the device's own dynamic addresses: those are a runtime
 /// input from rtnetlink, not a compile-time constant (blueprint §11.2, D7/D20).
-pub fn fixed_bypass() -> (&'static [Ipv4Cidr], &'static [Ipv6Cidr]) {
+pub fn fixed_bypass() -> (&'static [Ipv4Bypass], &'static [Ipv6Bypass]) {
     (fixed_bypass_v4(), fixed_bypass_v6())
 }
 
@@ -325,14 +365,23 @@ mod tests {
         let (v4, v6) = fixed_bypass();
         assert_eq!(v4.len(), FIXED_BYPASS_V4.len());
         assert_eq!(v6.len(), FIXED_BYPASS_V6.len());
+        assert!(v4.iter().all(|entry| entry.tag == BypassTag::Reserved));
+        assert!(v6.iter().all(|entry| entry.tag == BypassTag::Reserved));
 
         // The listener is bypassed as an exact address, never a wider prefix
         // (blueprint D21): a /32 and a /128, not the old /15 and /32.
-        assert!(v4.contains(&Ipv4Cidr::parse("198.51.100.1/32").unwrap()));
-        assert!(v6.contains(&Ipv6Cidr::parse("2001:db8:0:1::2/128").unwrap()));
+        assert!(v4
+            .iter()
+            .any(|entry| entry.cidr == Ipv4Cidr::parse("198.51.100.1/32").unwrap()));
+        assert!(v6
+            .iter()
+            .any(|entry| entry.cidr == Ipv6Cidr::parse("2001:db8:0:1::2/128").unwrap()));
 
         // The old fakeip-colliding /15 must NOT be present (blueprint §9.0).
-        assert!(!v4.iter().any(|c| c.prefix_len == 15));
+        assert!(!v4.iter().any(|entry| entry.cidr.prefix_len == 15));
+
+        let user = BypassEntry::policy(Ipv4Cidr::parse("100.64.0.0/10").unwrap());
+        assert_eq!(user.tag, BypassTag::Policy);
     }
 
     #[test]

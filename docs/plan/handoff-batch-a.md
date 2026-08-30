@@ -31,7 +31,7 @@
 
 **结构大小与全部 offset 必须不变**——只有契约变了。`cargo xtask abi-check` 会用 clang 核对两侧；magic 不 bump 就是 GOV-4.2 违规。
 
-**这一项是整批里唯一动 ABI 的。** 做完先跑 `cargo xtask abi-check` 和 `btf-check`，绿了再往下。
+**这一项是整批里唯一动 ABI 的。** 做完先跑 `cargo clippy -p fluxd --target aarch64-linux-android --all-targets`，绿了再往下——ABI 改动的漏网调用点只会在这里现形。
 
 ## A2 — `first_applicable` 改名 `reachable`（§17.0.2 第 10 项）
 
@@ -65,18 +65,19 @@ listener 地址现在硬编码在 `crates/flux-core/src/abi.rs` 与 `crates/flux
 
 ## 验收
 
-改完按顺序跑，全绿才算完成：
+主机上能跑的全部，全绿才算完成：
 
 ```
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p flux-core && cargo test -p xtask
-cargo xtask abi-check
-cargo xtask btf-check
 cargo xtask doc-check
+cargo clippy -p fluxd --target aarch64-linux-android --all-targets
 ```
 
-`cargo clippy -p fluxd --target aarch64-linux-android --all-targets` 用来类型检查 Linux-only 的数据面。
+**最后一条不是可选的。** `fluxd` 的数据面是 Linux-only，主机门禁编译不到它——A1 改 ABI 时漏掉的调用点只有这一条会报出来。
+
+`cargo xtask abi-check` 与 `btf-check` **需要带 BPF 后端的 clang，Windows 开发机上没有**，由 Linux CI 跑（§15.1）。**跑不了就跳过并说明，不要因此停下**；但也不要声称它们通过了。
 
 **不要碰**：`docs/spec/**`（合同由我维护）、`docs/history/**`（只增不改）、§17.0.2 之外的任何行为。发现合同本身有问题就**停下来报告**，不要一边实现一边改合同。
 

@@ -12,7 +12,7 @@
 //! forbids pre-building for them).
 
 use crate::abi::{LPM_MAX_ENTRIES, UID_SELECTED_MAX};
-use crate::cidr::{fixed_bypass, CidrError, Ipv4Cidr, Ipv6Cidr};
+use crate::cidr::{fixed_bypass, CidrError, Ipv4Bypass, Ipv4Cidr, Ipv6Bypass, Ipv6Cidr};
 use crate::selector::{AppSelector, SelectorError};
 
 /// Largest accepted `flux.toml`, in bytes (blueprint §11.2).
@@ -115,7 +115,7 @@ impl FluxConfig {
     }
 
     /// The fixed safe bypass and listener prefixes (blueprint §11.2, D21).
-    pub fn fixed_bypass() -> (&'static [Ipv4Cidr], &'static [Ipv6Cidr]) {
+    pub fn fixed_bypass() -> (&'static [Ipv4Bypass], &'static [Ipv6Bypass]) {
         fixed_bypass()
     }
 }
