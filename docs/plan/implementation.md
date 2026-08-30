@@ -18,8 +18,8 @@
 | Phase 5 | 已完成并验证 packet loop/cleanup | `8b36e78`、`90afdd4` |
 | Phase 6 | 已完成并验证 capture semantics | `a36f05d`、`beef81d`、`3627d30` |
 | Phase 7 | 已完成并验证 self-healing | `63cbdff`、`d27d44d` |
-| Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 0.9.0 §20 与 R091-13/R091-15 门禁约束 |
-| 0.9.1 增量实施 | 文档合同已定稿；R091-05 的 status 缺口已补齐 | `ifaces[].pref` 已加入 wire 与人类输出；`first_applicable` 改为存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 R091-15 分层。完成 Linux CI 与设备回归后才提升 workspace 版本 |
+| Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 §20 与 §15.1 门禁约束 |
+| 0.9.1 增量实施 | 文档合同已定稿；§8.5 的 status 缺口已补齐 | `ifaces[].pref` 已加入 wire 与人类输出；`first_applicable` 改为存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 §15.1 分层。完成 Linux CI 与设备回归后才提升 workspace 版本 |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -27,12 +27,12 @@
 
 | # | 现状 | 违反 | 处置 |
 |---|---|---|---|
-| 1 | bypass LPM 混装机制保留网段与用户策略 | §1 | 用闲置的 `__u8` value 字节打 `RESERVED`/`POLICY` 标；热路径仍是一次 lookup（0.9.2 R092-11） |
-| 2 | 模板声明 listener 地址与端口 | §1 | 反转回注入：预填需要六道门禁，注入需要一道（0.9.2 R092-03） |
-| 3 | `first_applicable` 字段名与语义相反，靠四处文档解释 | §1、§4 | 改名 `reachable`，删掉解释段落（0.9.2 R092-10） |
+| 1 | bypass LPM 混装机制保留网段与用户策略 | §1 | 用闲置的 `__u8` value 字节打 `RESERVED`/`POLICY` 标；热路径仍是一次 lookup（§6.1.1） |
+| 2 | 模板声明 listener 地址与端口 | §1 | 反转回注入：预填需要六道门禁，注入需要一道（§9.1） |
+| 3 | `first_applicable` 字段名与语义相反，靠四处文档解释 | §1、§4 | 改名 `reachable`，删掉解释段落（§24） |
 | 4 | listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处 | §4 | 固定 bypass 从运行时参数派生，只留一个来源 |
 | 5 | `service.sh` 里的 daemon 重启退避循环 | §7 | 收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案） |
-| 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（0.9.2 R092-04） |
+| 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（§23） |
 | 7 | 0.9.1 留下的一批"必须/不得"式校验 | §1、§2 | 逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进 |
 
 ### 17.0.2 0.9.5 合同与当前实现的差距
@@ -49,8 +49,18 @@
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
 | 7 | 三个维度统一黑/白名单与 `@file` 引用 | `flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键 | §11.2 |
 | 8 | bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump** | loader 恒写 `1`，BPF 只判非空，magic 未变 | §6.1.1、§6.3 |
+| 9 | 运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json` | `layout.rs` 仍用旧名 | §28.1 |
+| 10 | wire 字段 `first_applicable` → `reachable`；排除原因 `not_first_applicable` → `identity_drift` | `control_wire.rs` 仍是旧名 | §24、§27.3.3 |
+| 11 | `clash_api` 的 secret / 监听地址不安全时**告警而非硬拒** | `checks.rs` 仍是 error | §23、§27.2.4 |
+| 12 | listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码 | 两处各写一遍 | §17.0.1 第 4 项 |
+| 13 | 物理 `clsact` 缺失时**排除并等 netd**，不自建 | 需核对 `dataplane` 当前行为 | §8.5 |
+| 14 | 订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试 | 未实现 | §29.3、§29.4 |
+| 15 | `config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代 | 未实现 | §29.6 |
+| 16 | 面向用户的文案按 §27 过一遍（`module.prop`、guide） | 未做 | §27.1.3 |
 
 第 8 项是本表里唯一改 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 必须 bump magic，并同步 `flux_abi.h` 与 `abi.rs` 两侧。
+
+**§17.0.1 的哲学返工清单与本表有重叠，但两张表的判据不同**：那张问"现状违反了哪条判据"，本表问"合同要求什么而代码还没有"。发布门禁（§20 第 14 条）只盯本表，所以任何合同要求都必须在这里有一行，否则它永远不会被实现。
 
 **`guide/` 跟合同走，不跟当前实现走。** 0.9.5 尚未发布，没有用户拿着这份指南去操作 0.9.1 的构建；发布门禁（§20）要求本表清空。
 
@@ -62,7 +72,7 @@
 
 **九条对每个阶段都成立的规则：**
 
-1. **阶段结束时仓库必须可 build、R091-15 对当前平台适用的测试全绿、Linux CI 全绿。** 不允许"下个阶段再修"的破窗。
+1. **阶段结束时仓库必须可 build、§15.1 对当前平台适用的测试全绿、Linux CI 全绿。** 不允许"下个阶段再修"的破窗。
 2. **不为下一阶段预建抽象。** 这条是旧审计"24+ 无人居住的脚手架"（`../spec/blueprint.md` §18.4）的规则化闭环。需要一个 trait 时再抽，不要提前。
 3. **发现真实回归时，只为该不变量加一个聚焦测试**，不要顺手补一套。测试数量不是质量指标。
 4. **实测结果与蓝图冲突时**：按 GOV-3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `../history/review-log.md`，并**就地改正 `../spec/blueprint.md`**（章节号不动，AUTH-7.2）；**不得静默偏离**。代码与当前合同不一致时，先改合同再改代码。
@@ -320,14 +330,14 @@
 
 ## 17.11 阶段 8 — 模块封装与发布工程（**实现与设备验证已完成，版本发布未授权**）
 
-**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；以管理器模块开关为唯一开关的 inotify 控制路径与 `module.prop` 状态显示；精确 allowlist 的 release candidate artifact。0.9.1 不包含 `action.sh`、`webroot` 或 Flux WebUI（R091-03、R091-04、R091-12）。
+**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；以管理器模块开关为唯一开关的 inotify 控制路径与 `module.prop` 状态显示；精确 allowlist 的 release candidate artifact。0.9.1 不包含 `action.sh`、`webroot` 或 Flux WebUI（§13.1）。
 
 **必读**：`../spec/blueprint.md` §13（模块安装与构建）、`docs/spec/interaction.md`、`docs/guide/introduction.md`、GOV-7（发布工程与社区流程）。
 
 **退出条件**：
 
 1. 0.9.0 artifact / checksum / 文档三者一致。
-2. 三个管理器上安装、启动、在管理器界面里开关模块（当场生效且 `module.prop` 描述随之更新）、卸载、管理器重启全部闭环；卸载脚本不 flush 内核对象，**重启后**非持久 Flux 对象归零（R091-09）。
+2. 三个管理器上安装、启动、在管理器界面里开关模块（当场生效且 `module.prop` 描述随之更新）、卸载、管理器重启全部闭环；卸载脚本不 flush 内核对象，**重启后**非持久 Flux 对象归零（§8.8）。
 3. `docs/guide/introduction.md` 描述的行为与实际一致——**包括那些"诚实的失败"**：流量统计翻倍、被委托的流量、OEM 冲突时保持 Direct。
 4. `bugreport` 的输出满足 `docs/spec/interaction.md` 的隐私约定（默认无 logcat；不泄露第三方包名之外的使用习惯，参见 §16.7.3）。
 

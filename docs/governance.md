@@ -69,7 +69,7 @@
 
 ### GOV-2.4 「无先例」要显式写下来
 
-查过同类项目、确认某个做法没人做过，**要在文档里写明**。宁可知道没有先例（于是自己承担风险、加倍验证），也不要以为有人解决过。动态选 TC pref、执行存活验证、TCX 相对定位的检索记录见 `history/review-log.md` §0.5；当前合同见 R091-05。
+查过同类项目、确认某个做法没人做过，**要在文档里写明**。宁可知道没有先例（于是自己承担风险、加倍验证），也不要以为有人解决过。动态选 TC pref、执行存活验证、TCX 相对定位的检索记录见 `history/review-log.md` §0.5；当前合同见 §8.5。
 
 ---
 
@@ -94,7 +94,7 @@
 
 ### GOV-4.1 每次 commit 之前
 
-**验证按运行平台分层；不能要求 Windows 编译 Linux/Android device harness，也不能用 Windows 的 host-safe 结果替代 Linux CI 与真机证据（R091-15）。**
+**验证按运行平台分层；不能要求 Windows 编译 Linux/Android device harness，也不能用 Windows 的 host-safe 结果替代 Linux CI 与真机证据（§15.1）。**
 
 任意开发主机先跑：
 
@@ -130,7 +130,7 @@ Android-only Phase 3–8 suite 按对应 env flag/脚本在设备上执行，且
 
 ### GOV-4.4 发布之前
 
-见 0.9.0 `spec/blueprint.md` §20，并应用 R091-13 与本文未覆盖的 release gate。核心是：Phase 0 十问全部有结论（通过或已记录为边界），两次打包 byte-identical，`fluxd` 每个 LOAD 段 `p_align >= 0x4000`。
+见 0.9.0 `spec/blueprint.md` §20，并应用本文未覆盖的 release gate。核心是：Phase 0 十问全部有结论（通过或已记录为边界），两次打包 byte-identical，`fluxd` 每个 LOAD 段 `p_align >= 0x4000`。
 
 ---
 
@@ -189,13 +189,13 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 ## GOV-7 发布工程与社区流程
 
-这一节的候选实践来自对两个成熟同类项目的逐项阅读：[JingMatrix/Vector](https://github.com/JingMatrix/Vector) 与 [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk)。它们与 Flux-rs 的产品形态不同，因此这里只采纳已经落地并符合 R091-12 的最小子集；其它做法保留为候选。源码依据记在 `docs/history/review-log.md`。
+这一节的候选实践来自对两个成熟同类项目的逐项阅读：[JingMatrix/Vector](https://github.com/JingMatrix/Vector) 与 [JingMatrix/NeoZygisk](https://github.com/JingMatrix/NeoZygisk)。它们与 Flux-rs 的产品形态不同，因此这里只采纳已经落地并符合 §13 的最小子集；其它做法保留为候选。源码依据记在 `docs/history/review-log.md`。
 
 ### GOV-7.1 当前采纳
 
 | 实践 | 当前做法 | 为什么 |
 |---|---|---|
-| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 R091-12 规定的 15 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
+| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 §13.1 规定的 15 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
 | **归档级 SHA-256** | 发布物生成 `SHA256SUMS`；engine 资产另由 `engine.lock` 的 size + SHA-256 锁定 | 一条完整且可复现的校验路径，不生成包内逐文件 sidecar |
 | **最小安装检查** | `customize.sh` 检查 payload、arm64、5.15 courtesy floor，并识别 Magisk/KernelSU/APatch；真实能力留给 activation 操作验证 | 避免用管理器版本字符串猜测内核能力 |
 | **构建标识进入诊断面** | `fluxd version`、`bugreport` 与模块元数据提供版本、ABI 与构建信息 | 用户改名后仍能从运行产物确认身份 |
