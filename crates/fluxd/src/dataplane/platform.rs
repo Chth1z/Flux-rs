@@ -1501,6 +1501,9 @@ impl Manager {
             status.reason = Some(reason.to_string());
             status.prog_id = None;
             status.prog_tag = None;
+            // Every caller reaches here after an attach or liveness attempt,
+            // so reachability is decided and negative, not merely unknown.
+            status.first_applicable = Some(false);
         }
         if let Some(warning) = warning {
             self.status.warnings.push(warning);
@@ -1904,6 +1907,7 @@ impl Manager {
             status: "excluded".to_string(),
             prog_id: None,
             prog_tag: None,
+            pref: None,
             first_applicable: None,
             reason: None,
         };
@@ -1958,8 +1962,9 @@ impl Manager {
         let mut filters = match self.route.dump_filters(link.ifindex, netlink::TC_H_EGRESS) {
             Ok(filters) => filters,
             Err(_) => {
+                // A failed enumeration is not a reachability verdict, so
+                // `first_applicable` stays absent rather than claiming false.
                 status.reason = Some("tc_dump_failed".to_string());
-                status.first_applicable = Some(false);
                 return status;
             }
         };
@@ -1978,12 +1983,14 @@ impl Manager {
                     status.status = "active".to_string();
                     status.prog_id = Some(owned.identity.prog_id);
                     status.prog_tag = Some(hex_tag(owned.identity.prog_tag));
+                    status.pref = Some(owned.identity.priority);
                     status.first_applicable = Some(true);
                     return status;
                 }
                 if self.detach_identity(&owned).is_err() {
                     status.entry = Some(entry.to_string());
                     status.reason = Some("not_first_applicable".to_string());
+                    status.pref = Some(owned.identity.priority);
                     status.first_applicable = Some(false);
                     return status;
                 }
@@ -1993,7 +2000,6 @@ impl Manager {
                     Err(_) => {
                         status.entry = Some(entry.to_string());
                         status.reason = Some("tc_dump_failed".to_string());
-                        status.first_applicable = Some(false);
                         return status;
                     }
                 };
@@ -2007,6 +2013,7 @@ impl Manager {
                 }) {
                     status.entry = Some(entry.to_string());
                     status.reason = Some("not_first_applicable".to_string());
+                    status.pref = Some(owned.identity.priority);
                     status.first_applicable = Some(false);
                     return status;
                 }
@@ -2027,12 +2034,11 @@ impl Manager {
 
         status.entry = Some(entry.to_string());
         status.status = "admitted".to_string();
-        status.first_applicable = Some(
-            filters
-                .iter()
-                .filter(|filter| filter.chain == 0)
-                .all(|filter| filter.priority >= pref),
-        );
+        status.pref = Some(pref);
+        // Reachability is decided by the flx_verify liveness probe, not by
+        // where we land in the dump. Leave the field absent until that probe
+        // concludes, so `admitted` never advertises an unverified verdict.
+        status.first_applicable = None;
         status
     }
 }

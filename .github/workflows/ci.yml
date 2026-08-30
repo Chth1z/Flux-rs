@@ -48,17 +48,26 @@ jobs:
       - name: Official sing-box template check
         run: cargo xtask template-check
 
-  # flux-core is contractually pure logic (implementation.md 17.4 exit
-  # criterion 1): no I/O, no unsafe, no async, no platform dependencies. A
-  # Windows run is the cheapest way to keep that promise honest.
+  # The host-safe half of the R091-15 gate matrix. flux-core is contractually
+  # pure logic (implementation.md 17.4 exit criterion 1): no I/O, no unsafe,
+  # no async, no platform dependencies. The fluxd BIN target is also host-safe
+  # because its Linux-only modules are cfg-gated; its integration tests are
+  # not, and deliberately are not run here. A Windows pass never substitutes
+  # for the Linux workspace gate or the on-device suite.
   windows:
-    name: flux-core on Windows
+    name: host-safe gate on Windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Test pure logic
         run: cargo test -p flux-core
+      - name: Test packaging logic
+        run: cargo test -p xtask
+      - name: Test the daemon binary target
+        run: cargo test -p fluxd --bin fluxd
+      - name: Doc check
+        run: cargo xtask doc-check
 
   bpf:
     name: bpf object
@@ -116,7 +125,7 @@ jobs:
       # the run that first exercised it found that every program carried an ELF
       # section name libbpf refuses (SEC("tc/cap_l2") and friends), so not one
       # of them could be loaded at all. Compiling had not noticed, because
-      # compiling never does. See docs/verification/phase0.md section 16.8.
+      # compiling never does. See docs/history/phase0.md section 16.8.
       #
       # bpftool builds maps from the BTF declarations, whereas fluxd builds them
       # explicitly in maps.rs (blueprint 12.2). So a pass here means the PROGRAM

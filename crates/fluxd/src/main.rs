@@ -65,7 +65,7 @@ COMMANDS:
     bugreport  Write a diagnostic zip (--with-logcat, --raw, -o <dir>)
     version    Print version and ABI magic
 
-The 0.9.1 design contract is docs/blueprint.md plus docs/blueprint-0.9.1.md.
+The 0.9.1 design contract is docs/spec/blueprint.md plus docs/spec/blueprint-0.9.1.md.
 "
 }
 
@@ -151,9 +151,39 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             _ => println!("engine:     not running"),
         }
         println!(
-            "policy:     {} apps selected, {} bypass v4, {} bypass v6",
-            response.policy.selected, response.policy.bypass_v4, response.policy.bypass_v6
+            "policy:     {} selected, {} draining, {} bypass v4, {} bypass v6, {} self addresses",
+            response.policy.selected,
+            response.policy.draining,
+            response.policy.bypass_v4,
+            response.policy.bypass_v6,
+            response.policy.self_addresses
         );
+        for iface in &response.ifaces {
+            println!("interface:  {}", describe_iface(iface));
+        }
+        let counters = &response.counters;
+        println!(
+            "traffic:    tcp {} captured / {} direct, udp {} captured; assigned {} tcp / {} udp",
+            counters.admit_tcp,
+            counters.direct_tcp,
+            counters.admit_udp,
+            counters.in_assign_tcp,
+            counters.in_assign_udp
+        );
+        let dropped = counters.drop_inactive
+            + counters.drop_stale_gen
+            + counters.drop_handoff
+            + counters.drop_udp_frag
+            + counters.drop_corrupt
+            + counters.in_drop_no_listener
+            + counters.in_drop_assign
+            + counters.in_drop_parse;
+        if dropped > 0 || counters.egress_listener_miss > 0 {
+            println!(
+                "drops:      {dropped} total, {} egress listener misses",
+                counters.egress_listener_miss
+            );
+        }
         match &response.last_error {
             Some(error) => println!("last error: {error}"),
             None => println!("last error: none"),
@@ -164,6 +194,28 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         for hint in &response.hints {
             println!("hint:       {hint}");
         }
+    }
+
+    /// One line per candidate interface. `first_applicable` is rendered as
+    /// reachability, which is what the field actually asserts (R091-05); the
+    /// wire name is kept only for compatibility.
+    fn describe_iface(iface: &flux_core::control_wire::IfaceStatus) -> String {
+        let mut detail = Vec::new();
+        if let Some(entry) = &iface.entry {
+            detail.push(entry.clone());
+        }
+        if let Some(pref) = iface.pref {
+            detail.push(format!("pref {pref}"));
+        }
+        match iface.first_applicable {
+            Some(true) => detail.push("reachable".to_string()),
+            Some(false) => detail.push("not reachable".to_string()),
+            None => detail.push("reachability unverified".to_string()),
+        }
+        if let Some(reason) = &iface.reason {
+            detail.push(reason.clone());
+        }
+        format!("{} {} ({})", iface.name, iface.status, detail.join(", "))
     }
 
     let layout = Layout::product();
@@ -275,7 +327,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         },
 
         // enable/disable are thin front-ends over the C9 disable file — the
-        // ONLY switch truth (docs/ux.md §1.3). The daemon notices via inotify;
+        // ONLY switch truth (docs/spec/interaction.md §27.1.3). The daemon notices via inotify;
         // when it is running we also ask over the socket for synchronous
         // feedback, but the file operation alone is already complete.
         "enable" => {

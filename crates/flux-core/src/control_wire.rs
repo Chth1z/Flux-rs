@@ -135,9 +135,14 @@ pub struct IfaceStatus {
     /// The attached program's 8-byte tag, when active.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prog_tag: Option<String>,
+    /// The TC preference this interface's capture filter occupies. Chosen per
+    /// interface, so two interfaces on one device may differ (R091-05).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub pref: Option<u16>,
     /// Compatibility field: whether admission proved the filter reachable and
     /// its numerically smaller-pref (preceding) snapshot has not drifted. It
-    /// does not mean that the filter is first in dump order (R091-05).
+    /// does not mean that the filter is first in dump order (R091-05). Absent
+    /// until reachability has actually been decided one way or the other.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub first_applicable: Option<bool>,
     /// A stable reason token when excluded (blueprint §24.2).
@@ -315,6 +320,7 @@ mod tests {
                     status: "active".to_string(),
                     prog_id: Some(118),
                     prog_tag: Some("a1b2c3d4e5f60718".to_string()),
+                    pref: Some(2),
                     first_applicable: Some(true),
                     reason: None,
                 },
@@ -326,6 +332,7 @@ mod tests {
                     status: "excluded".to_string(),
                     prog_id: None,
                     prog_tag: None,
+                    pref: None,
                     first_applicable: None,
                     reason: Some("clat_order_unverified".to_string()),
                 },

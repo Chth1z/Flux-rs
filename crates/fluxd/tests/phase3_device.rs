@@ -112,7 +112,15 @@ fn assert_ready(manager: &dataplane::Manager) {
                     iface.entry.is_some(),
                     "admitted interface lacks entry: {iface:?}"
                 );
-                assert_eq!(iface.first_applicable, Some(true), "{iface:?}");
+                // Phase 3 stops at ownership; the liveness probe that decides
+                // reachability lands in Phase 5. Admission must therefore
+                // publish the chosen preference and leave the verdict absent
+                // rather than guess from dump order (R091-05).
+                assert!(
+                    iface.pref.is_some_and(|pref| pref >= 2),
+                    "admitted interface lacks a dynamic preference: {iface:?}"
+                );
+                assert_eq!(iface.first_applicable, None, "{iface:?}");
             }
             "excluded" => {
                 assert!(
