@@ -114,19 +114,28 @@ manager's module description doubles as a live status readout, for example
 
 The two authority files are:
 
-- `/data/adb/flux-rs/config/flux.toml` — selected `userId:packageName` apps and
-  CIDR bypasses.
-- `/data/adb/flux-rs/config/sing-box.json` — the complete user-owned official
-  sing-box configuration. Flux only injects its two generated TProxy inbounds.
+- `/data/adb/flux-rs/config/flux.toml` — which apps, which destinations, which
+  interfaces and which Wi-Fi networks, each as a mode plus a list, along with
+  the subscription settings.
+- `/data/adb/flux-rs/config/template.json` — the sing-box configuration
+  template: DNS, routing rules, and the skeleton of the selector groups.
 
-The shipped bootstrap config follows the original Flux module's template, so
-both projects present the same shape: DNS splitting with fakeip, `clash_mode`
-rules, remote rule-sets and `PROXY` / `GLOBAL` selectors. It contains no
-servers, no subscription and no credentials — `PROXY` starts out pointing at
-`DIRECT` — and it declares no inbound of its own, because Flux injects two
-tproxy inbounds, and no `clash_api`, because a default must not open a control
-port. Flux never rewrites either user authority file, and reinstalling does not
-overwrite them.
+**You edit the template; Flux generates what the engine runs.** From the
+template plus the subscription it produces `run/sing-box.<generation>.json`,
+filling empty selector groups and appending the refined nodes. Everything else
+passes through byte for byte, so what you wrote is what runs — and a
+subscription update needs no manual merge.
+
+The shipped bootstrap template follows the original Flux module's, so both
+projects present the same shape: DNS splitting with fakeip, `clash_mode` rules,
+remote rule-sets and `PROXY` / `GLOBAL` selectors. It contains no servers, no
+subscription and no credentials — `PROXY` starts out pointing at `DIRECT` — and
+it declares no inbound of its own, because Flux injects two tproxy inbounds, and
+no `clash_api`, because a default must not open a control port.
+
+**Flux never writes to anything under `config/`.** Reinstalling does not
+overwrite it, and everything under `run/` can be deleted at any time and will be
+rebuilt.
 
 ```sh
 FLUXD=/data/adb/modules/flux_rs/bin/fluxd
@@ -147,7 +156,7 @@ and `--raw` disables address redaction with a warning.
 ## Build and verify
 
 The Rust toolchain, Cargo lockfile, Android NDK revision, engine asset, and BPF
-ABI are pinned. Packaging has one entry point and an exact 14-file allowlist.
+ABI are pinned. Packaging has one entry point and an exact 15-file allowlist.
 
 ```sh
 cargo test --workspace
@@ -168,10 +177,10 @@ publishes the exact sing-box Corresponding Source archive pinned by
 
 ## Documentation and license
 
-The normative 0.9.1 implementation contract is the frozen
-`docs/spec/blueprint.md` baseline plus `docs/history/blueprint-0.9.1.md`; when they conflict,
-the delta wins. `docs/guide/architecture.md` is the short engineering orientation.
-The data-plane ABI source of truth is `bpf/include/flux_abi.h`, mirrored and
+The implementation contract is `docs/spec/blueprint.md`, one document, complete
+on its own; **where it and the code disagree, the code is wrong.**
+`docs/guide/architecture.md` is the short engineering orientation. The
+data-plane ABI source of truth is `bpf/include/flux_abi.h`, mirrored and
 layout-tested in Rust.
 
 Flux-rs is GPL-3.0-only. The unmodified sing-box binary is

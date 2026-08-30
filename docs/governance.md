@@ -195,7 +195,7 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 | 实践 | 当前做法 | 为什么 |
 |---|---|---|
-| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 R091-12 规定的 14 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
+| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 R091-12 规定的 15 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
 | **归档级 SHA-256** | 发布物生成 `SHA256SUMS`；engine 资产另由 `engine.lock` 的 size + SHA-256 锁定 | 一条完整且可复现的校验路径，不生成包内逐文件 sidecar |
 | **最小安装检查** | `customize.sh` 检查 payload、arm64、5.15 courtesy floor，并识别 Magisk/KernelSU/APatch；真实能力留给 activation 操作验证 | 避免用管理器版本字符串猜测内核能力 |
 | **构建标识进入诊断面** | `fluxd version`、`bugreport` 与模块元数据提供版本、ABI 与构建信息 | 用户改名后仍能从运行产物确认身份 |

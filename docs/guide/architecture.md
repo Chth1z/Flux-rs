@@ -4,11 +4,10 @@ A short orientation for implementers: why the system has this shape, not how to
 operate it. The binding contract is [`../spec/blueprint.md`](../spec/blueprint.md),
 and where this document disagrees with it, this one is wrong.
 
-Until the 0.9.5 fold completes, two incremental layers still sit on top of the
-baseline — [`../history/blueprint-0.9.1.md`](../history/blueprint-0.9.1.md) and
-[`../history/blueprint-0.9.2.md`](../history/blueprint-0.9.2.md) — and the later layer
-wins where it explicitly amends an earlier one. That arrangement is being
-retired, not extended (`../authoring.md` AUTH-7.2).
+There are no incremental layers. The two that once sat on the baseline are
+folded in and frozen as records under [`../history/`](../history/); the mapping
+from each retired `R09x` number to the section carrying it is at the top of the
+blueprint (`../authoring.md` AUTH-7.2).
 
 ## Shape
 
@@ -80,7 +79,7 @@ repository's over-design review: raw netlink message construction lives only in
 `nlmsghdr`.
 
 The four deep modules are policy, dataplane, engine, and reactor. Their
-interfaces are defined in `../history/blueprint-0.9.1.md` R091-14; no public trait is
+interfaces are defined in blueprint §5; no public trait is
 introduced for a single implementation.
 
 ## Failure semantics
@@ -121,4 +120,4 @@ interface disappears, Flux publishes inactive but may keep the ready engine
 waiting. Flux never creates a physical-interface `clsact`. Escalating every
 single-interface drift to a global transaction would blip unrelated proxied
 flows on every Wi-Fi reconnect. See `../spec/blueprint.md` §8.5.1 as amended by
-R091-05 and R091-10.
+§8.5 and §10.1.

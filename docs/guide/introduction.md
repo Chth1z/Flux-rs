@@ -66,7 +66,7 @@ state:      Active
 generation: 7
 manager:    KernelSU 12118 (lkm)
 engine:     running (pid 4821, 4/4 sockets verified)
-            config run/effective-sing-box.7.json
+            config run/sing-box.7.json
 policy:     3 selected, 0 draining, 12 bypass v4, 6 bypass v6, 4 self addresses
 interface:  rmnet_data0 active (flx_cap_l3, pref 2, reachable)
 interface:  wlan0 excluded (flx_cap_l2, pref 2, not reachable, tc_chain_shadowed)
@@ -128,7 +128,7 @@ warning:    wlan0: tx increased while flx_verify did not; lower-pref filters: pr
 
 上面这些是**长期不做**的，理由是结构性的，不随版本改变。
 
-**还没做、但计划要做**的是另一回事：Flux 自己的 WebUI、开箱即用的代理控制面板、订阅链接的自动转换。它们在路线上，当前状态以 [`../history/rejected-and-deferred.md`](../history/rejected-and-deferred.md) §21.0 的登记为准。在真正开工那一版之前**不为它们预建空接口**——延期不等于现在留脚手架。
+**还没做、但计划要做**的是另一回事：Flux 自己的 WebUI 与开箱即用的代理控制面板。订阅转换**已经在做**（见 [`how-to.md`](how-to.md)）。当前状态以 [`../history/rejected-and-deferred.md`](../history/rejected-and-deferred.md) §21.0 的登记为准。在真正开工那一版之前**不为它们预建空接口**——延期不等于现在留脚手架。
 
 ---
 
