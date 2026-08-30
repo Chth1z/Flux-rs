@@ -1,4 +1,4 @@
-//! `cargo xtask doc-check` — the seven mechanical documentation checks of
+//! `cargo xtask doc-check` — the mechanical documentation checks of
 //! `docs/plan/implementation.md` §17.4 (exit criterion 6).
 //!
 //! Each one has caught a real defect before it was automated, which is why it
@@ -35,6 +35,8 @@ pub fn run() -> Result<(), String> {
     check_overturns(&root, &mut failures)?;
     let commands = check_xtask_commands(&root, &mut failures)?;
     println!("doc-check: commands — {commands} `cargo xtask` citations resolved");
+    let agents = check_agents_budget(&root, &mut failures)?;
+    println!("doc-check: routing — AGENTS.md is {agents} lines, budget 80");
 
     if failures.is_empty() {
         Ok(())
@@ -548,6 +550,31 @@ fn check_links(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
         files.len()
     );
     Ok(())
+}
+
+/// `AGENTS.md` is loaded at the start of every session, so its length is a
+/// standing cost on every turn of every session forever.
+///
+/// `../authoring.md` AUTH-0.5 caps it at 80 lines. That rule used to be
+/// restated in a paragraph at the top of `AGENTS.md` itself, which meant
+/// spending the most expensive tokens in the repository to explain that those
+/// tokens are expensive — and only the rare session that edits the file could
+/// use the reminder. A gate costs nothing per session and cannot be skipped by
+/// an author who did not read the first paragraph.
+///
+/// The "routing only, no knowledge" half of AUTH-0.5 is not checkable here and
+/// stays a matter of review.
+fn check_agents_budget(root: &Path, failures: &mut Vec<String>) -> Result<usize, String> {
+    const LIMIT: usize = 80;
+    let path = root.join("AGENTS.md");
+    let lines = util::read_text(&path)?.lines().count();
+    if lines > LIMIT {
+        failures.push(format!(
+            "AGENTS.md: {lines} lines exceeds the {LIMIT}-line budget (authoring.md AUTH-0.5); \
+             move knowledge into docs/ and leave a pointer"
+        ));
+    }
+    Ok(lines)
 }
 
 /// Every `cargo xtask <sub>` named in a document or a workflow must be a task

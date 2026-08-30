@@ -1,9 +1,5 @@
 # AGENTS.md
 
-Routing only. Knowledge lives in `docs/`; this file says where to look and what
-you cannot infer from the code. Every line here is paid on every turn of every
-session, so it stays under 80 lines (`docs/authoring.md` AUTH-0.5).
-
 ## What this is
 
 A Magisk/KernelSU/APatch module that proxies **the traffic of apps you picked**

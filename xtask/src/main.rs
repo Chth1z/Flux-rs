@@ -54,7 +54,7 @@ TASKS:
     abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
     btf-check      clang .BTF flux_decision layout vs the hand-written blob
     template-check pinned official sing-box validates the shipped default template
-    doc-check      the seven mechanical documentation checks (implementation.md \u{a7}17.4)
+    doc-check      the mechanical documentation checks (implementation.md \u{a7}17.4)
     fidelity A B   what a re-issue of a document dropped: citations, cross-refs,
                    identifiers, constants
     build-bpf      compile bpf/flux.bpf.c with clang
