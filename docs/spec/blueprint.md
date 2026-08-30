@@ -1811,10 +1811,25 @@ or `goto` makes chain 0 unreachable; the post-attach dump does not satisfy the
 ownership predicate; every preference below `FLUX_TC_PREF_CLAT_MAX` is taken on a
 `v4-*`; **or liveness verification finds us shadowed**.
 
-**`clsact` rule.** Flux MAY create a `clsact` where none exists but MUST NEVER
-delete one: after a crash there is no way to prove who created it originally, and
-removing it breaks tethering and CLAT as collateral. Flux deletes only its own
-exactly-matched filters, and MUST NOT flush a qdisc or a chain.
+**`clsact` ownership.** A physical interface's `clsact` belongs to netd. Flux
+**MUST NOT create, replace or delete it.**
+
+- A physical interface with no `clsact` is excluded as `netd_clsact_missing`.
+  Admission runs again when netd's `RTM_NEWQDISC` arrives.
+- A physical `clsact` carrying a shared block, non-empty options, or unknown or
+  duplicated attributes is foreign, and the interface is excluded.
+- **Only `flxrs1`'s `clsact` is created by Flux**, and its lifetime is the veth
+  pair's.
+
+The temptation is to create the missing qdisc and proceed, and it has to be
+refused for two independent reasons. After a crash there is no way to prove who
+created it, so it can never be safely deleted again; and netd deletes and
+recreates it as a matter of routine (§8.5.1), so racing to create it means
+contending with the component that owns it. Waiting costs a window in which that
+interface is Direct — which §2.2.3(5) already publishes.
+
+Flux deletes only its own exactly-matched filters, and MUST NOT flush a qdisc or
+a chain.
 
 ### 8.5.1 netd deletes `clsact` routinely — design for it, not around it
 
@@ -1840,12 +1855,14 @@ AOSP documents the constraint itself at `ConnectivityService.java:12231-12240`: 
    a system_server crash takes our filter with it.** This is not a rare fault; it
    is daily life.
 2. The reactor MUST therefore subscribe to `RTM_NEWQDISC` and `RTM_DELQDISC` and
-   treat a vanished qdisc as an **expected event**: redo step 9 of §8.7 — the
-   egress attach — for that one interface, recreating the clsact first if
-   necessary, **without reporting an error, without entering `Inactive`, and
-   without touching `active`**. §26 lists this separately as **capture-side
-   drift**, distinct from **core drift** which does require `active=0`. Conflating
-   the two is forbidden; invariant 4 of §26 explains what it costs.
+   treat a vanished qdisc as an **expected event**: exclude that interface as
+   `netd_clsact_missing` and **wait for netd's `RTM_NEWQDISC`**, then redo step 9
+   of §8.7 — the egress attach — for that one interface, **without reporting an
+   error, without entering `Inactive`, and without touching `active`**. Flux does
+   not create the qdisc itself (§8.5). §26 lists this separately as
+   **capture-side drift**, distinct from **core drift** which does require
+   `active=0`. Conflating the two is forbidden; invariant 4 of §26 explains what
+   it costs.
 3. **Do not expect to be the only creator.** AOSP uses
    `tcQdiscReplaceDevClsact` with `NLM_F_CREATE | NLM_F_REPLACE`
    (`aosp-netd/server/TcUtils.h:28-37`). Flux uses `NLM_F_EXCL` and reads
@@ -2259,7 +2276,18 @@ tcmsg {
   TCA_KIND = "clsact"
 ```
 
-`EEXIST` **is not an error.** Record that this clsact was not created by us and **never delete it** (§8.5). Then dump once to confirm it carries neither `TCA_INGRESS_BLOCK` (13) nor `TCA_EGRESS_BLOCK` (14) and that `TCA_OPTIONS` is empty; otherwise it is foreign and the interface is excluded.
+**This message is issued for `flxrs1` only.** A physical interface's `clsact` is
+netd's, and Flux never creates it (§8.5); there, the same `tcmsg` is used with
+`RTM_GETQDISC` to inspect rather than with `RTM_NEWQDISC` to create.
+
+On `flxrs1`, `EEXIST` means residue from a previous run, which the cold-start
+rebuild of §8.7 step 2 removes.
+
+On a physical interface the dump MUST confirm the `clsact` carries neither
+`TCA_INGRESS_BLOCK` (13) nor `TCA_EGRESS_BLOCK` (14) and that `TCA_OPTIONS` is
+empty; otherwise it is foreign and the interface is excluded. Absence of the
+qdisc is not a failure to repair but `netd_clsact_missing`, and the interface
+waits for netd.
 
 ### 8.9.5 BPF filter
 
@@ -2901,7 +2929,7 @@ Issuing netlink and `bpf(2)` from `fluxd`'s own process sidesteps the `netutils_
 
 Through rtnetlink, never the `tc` binary:
 
-- **`clsact`:** `RTM_NEWQDISC` with `NLM_F_EXCL|NLM_F_CREATE`, `tcm_parent = TC_H_CLSACT`, `tcm_handle = TC_H_MAKE(TC_H_CLSACT, 0)`, `TCA_KIND = "clsact"`. `EEXIST` counts as success and records "not created by us" (§8.9.4).
+- **`clsact`, on `flxrs1` only:** `RTM_NEWQDISC` with `NLM_F_EXCL|NLM_F_CREATE`, `tcm_parent = TC_H_CLSACT`, `tcm_handle = TC_H_MAKE(TC_H_CLSACT, 0)`, `TCA_KIND = "clsact"`. A physical interface's `clsact` is never created (§8.5); on `flxrs1`, `EEXIST` means residue from a previous run and is handled by the cold-start rebuild of §8.7 step 2.
 - **Filter:** `RTM_NEWTFILTER` with `NLM_F_EXCL|NLM_F_CREATE`, `tcm_parent = TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS|TC_H_MIN_INGRESS)`, `tcm_info = TC_H_MAKE(prio << 16, protocol)` where the preference is selected per interface (§8.5.3), `tcm_handle` of `0x1`, `0x2` or `0x3`, `TCA_KIND = "bpf"`, and `TCA_BPF_FD`, `TCA_BPF_NAME` and `TCA_BPF_FLAGS = TCA_BPF_FLAG_ACT_DIRECT` inside the options.
 - **Ownership check:** dump with `RTM_GETTFILTER` and compare every item of the §8.5 predicate. **Dump order establishes the ordering constraint, not reachability** — reachability comes from `flx_verify` (§8.5.4), and treating dump position as proof was the claim R091-05 overturned.
 - **Deletion:** `RTM_DELTFILTER`, carrying the exact `prio`, `protocol`, `handle` and `kind` (§8.9.5).
@@ -3259,7 +3287,7 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
 | rtnetlink: new interface | ignore | re-evaluate admission and activate if otherwise ready | debounce, admit, attach; a failure excludes only that interface |
 | rtnetlink: interface gone | ignore | update the candidate set | remove from the active set; if it becomes empty, go Inactive |
 | rtnetlink: address change | ignore | update the desired self-address set | update the self-address maps additively, **leaving `active` untouched** |
-| rtnetlink: **capture-side** drift — a physical interface's `clsact` or our egress filter was deleted | ignore | reconverge | **leave `active` untouched**: debounce, recreate the clsact on that interface if needed, re-attach the egress filter. A failure removes only that interface from the active set |
+| rtnetlink: **capture-side** drift — a physical interface's `clsact` or our egress filter was deleted | ignore | reconverge | **leave `active` untouched**: debounce, then re-attach the egress filter. If the `clsact` is gone, exclude the interface as `netd_clsact_missing` and wait for netd's `RTM_NEWQDISC` — Flux does not create it (§8.5). A failure removes only that interface from the active set |
 | rtnetlink: **core** drift — `flxrs0`/`flxrs1`, the ingress filter, the rule or the local route was deleted or altered | ignore | reconverge | **publish `active=0` first**, reconverge by the predicate, and set `active=1` only on success |
 | rtnetlink: `ENOBUFS` or overrun | ignore | full re-dump | full re-dump (§10.4.1 rule 2) |
 | inotify: `flux.toml` changed | update the validation result only | attempt activation again | policy transaction, add then subtract |
