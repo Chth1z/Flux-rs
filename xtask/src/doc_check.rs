@@ -406,6 +406,26 @@ fn defined_decisions(lines: &[&str], prefix: &str, skip_from: usize, skip_to: us
     defined
 }
 
+/// Every run of ASCII digits in `text`, in order.
+fn integers_in(text: &str) -> Vec<u64> {
+    let mut found = Vec::new();
+    let mut digits = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else if !digits.is_empty() {
+            if let Ok(n) = digits.parse() {
+                found.push(n);
+            }
+            digits.clear();
+        }
+    }
+    if let Ok(n) = digits.parse() {
+        found.push(n);
+    }
+    found
+}
+
 /// `D7` or `D1–D6` (any dash) into the numbers it covers.
 fn parse_id_range(cell: &str, prefix: &str) -> Option<Vec<u32>> {
     let cell = cell.trim_matches('*').trim();
@@ -825,28 +845,28 @@ fn check_overturns(root: &Path, failures: &mut Vec<String>) -> Result<(), String
     // The blueprint's claim.
     let blueprint_path = root.join("docs/spec/blueprint.md");
     let blueprint = util::read_text(&blueprint_path)?;
-    let Some(claim_at) = blueprint.find("共推翻自己") else {
-        failures.push("blueprint.md: the overturn-total claim (`共推翻自己…次`) is gone".into());
+    const CLAIM: &str = "overturned itself";
+    let Some(claim_at) = blueprint.find(CLAIM) else {
+        failures.push(format!(
+            "blueprint.md: the overturn-total claim (`{CLAIM} N times — M before …`) is gone"
+        ));
         return Ok(());
     };
-    let claim_tail = &blueprint[claim_at + "共推翻自己".len()..];
+    let claim_tail = &blueprint[claim_at + CLAIM.len()..];
     let claim_line = blueprint[..claim_at].lines().count();
 
-    let total = claim_tail
-        .trim_start_matches(['*', ' '])
-        .split('次')
-        .next()
-        .and_then(parse_count);
-    let claimed_before = count_before(claim_tail, "次在实测前");
-    let claimed_added = claim_tail
-        .find("实测前，")
-        .and_then(|at| count_after(&claim_tail[at..], "实测前，", '次'));
-    let (Some(total), Some(claimed_before), Some(claimed_added)) =
-        (total, claimed_before, claimed_added)
-    else {
+    // `**8 times** — 5 before measurement, 3 during the …`: the first three
+    // integers of the sentence, in that order. Reading them positionally rather
+    // than by surrounding words keeps the check from breaking every time the
+    // sentence is reworded, which is how it broke when this document was
+    // re-issued in English.
+    let sentence = claim_tail.split(['.', '\u{3002}']).next().unwrap_or("");
+    let numbers = integers_in(sentence);
+    let [total, claimed_before, claimed_added] = numbers[..] else {
         failures.push(format!(
-            "blueprint.md:{claim_line}: cannot parse the overturn claim \
-             (`共推翻自己N次——M次在实测前，K次在…`)"
+            "blueprint.md:{claim_line}: the overturn claim must contain exactly three \
+             numbers (total, before measurement, during measurement); found {}",
+            numbers.len()
         ));
         return Ok(());
     };
@@ -919,15 +939,6 @@ fn count_after(text: &str, marker: &str, terminator: char) -> Option<u64> {
     parse_count(after.split(terminator).next()?)
 }
 
-/// The numeral whose last character sits immediately before `marker`.
-/// E.g. `count_before("——五次在实测前，…", "次在实测前")` is 5.
-fn count_before(text: &str, marker: &str) -> Option<u64> {
-    let before = &text[..text.find(marker)?];
-    let is_numeral = |c: &char| c.is_ascii_digit() || "零一二三四五六七八九十".contains(*c);
-    let run: String = before.chars().rev().take_while(is_numeral).collect();
-    parse_count(&run.chars().rev().collect::<String>())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,17 +961,23 @@ mod tests {
         assert_eq!(count_after(heading, "推翻了", '条'), Some(3));
         let body = "实测前的五条分布在：§0.2 一条…";
         assert_eq!(count_after(body, "实测前的", '条'), Some(5));
-        let claim = "**八次**——五次在实测前，三次在 2026-08-25 的实测中";
-        assert_eq!(
-            claim
-                .trim_start_matches(['*', ' '])
-                .split('次')
-                .next()
-                .and_then(parse_count),
-            Some(8)
-        );
-        assert_eq!(count_before(claim, "次在实测前"), Some(5));
-        assert_eq!(count_after(claim, "实测前，", '次'), Some(3));
+    }
+
+    #[test]
+    fn the_overturn_claim_reads_positionally() {
+        // Read as the first three integers of the sentence, so that rewording
+        // it does not break the check — which is exactly what happened when the
+        // blueprint was re-issued in English.
+        let claim = " **8 times** — 5 before measurement, 3 during the measurement round";
+        assert_eq!(integers_in(claim), vec![8, 5, 3]);
+    }
+
+    #[test]
+    fn a_stray_number_in_the_claim_is_visible() {
+        // `Phase 0` used to sit in this sentence and silently became a fourth
+        // number; the check must notice rather than mis-assign the positions.
+        let claim = " **8 times** — 5 before, 3 during the Phase 0 round";
+        assert_ne!(integers_in(claim).len(), 3);
     }
 
     #[test]

@@ -1,40 +1,80 @@
-# Flux-rs 0.9.0 终极设计蓝图与开发指南
+# Flux-rs Design Blueprint
 
-- 文档编号：`FLUX-BP-0.9.0-FINAL`
-- **状态：已定稿**（2026-08-25，Asia/Hong_Kong）。全部开放项已关闭，见 `../history/rejected-and-deferred.md` §21.1。
-- 性质：**唯一实现合同**。与 `docs/` 下任何其它文件冲突时以本文为准。
-- 读者：实现者（人或模型）。本文假设读者不了解旧仓库，也不需要读旧文档。
-- ABI 真相源：`bpf/include/flux_abi.h`（`FLUX_ABI_MAGIC = 0xF10C0903`）；数据面骨架：`bpf/flux.bpf.c`。
-- 本文只是文档集的一部分，按读者拆分。导航与「章节编号 → 文件」映射见 `docs/README.md`。
+- Specifies: **0.9.5**. This is the single normative blueprint and it is edited
+  in place; there are no incremental layers (`../authoring.md` AUTH-7.2).
+- Nature: **the implementation contract.** Where this document and the code
+  disagree, the code is wrong. Where this document and `../philosophy.md`
+  disagree, this document is wrong.
+- Audience: implementers, human or model. It assumes no knowledge of the
+  previous repository and requires no earlier document.
+- ABI source of truth: `bpf/include/flux_abi.h`
+  (`FLUX_ABI_MAGIC = 0xF10C0903`); data-plane skeleton: `bpf/flux.bpf.c`.
+- Section numbers are global and never reused. `§N → file` mapping and the
+  identifier rules are in `../index.md`; current progress is in
+  `../plan/implementation.md`, never here.
 
-## 定稿时的证据状态
+## How strong is each claim
 
-写这一段是为了让实现者一眼看出**哪些能当前提用、哪些还要自己验**。
+Two independent dimensions. An assertion carries one word from each column, and
+prose that carries neither does not belong in this document (`../authoring.md`
+AUTH-2).
 
-| | 状态 |
+| Obligation | Meaning |
 |---|---|
-| Phase 0 **观测半场** | ✅ 已完成（`../history/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
-| Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
-| Phase 0 **Q1**（SK_STORAGE first-decision） | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
-| Phase 0 **Q9**（per-app DNS，**D18 的赌注**） | ✅ **已通过**（§16.7）。明文 :53 上出现的是 `com.android.vending`（UID 10265）等 app UID，netd 的 1051 出现**零次** |
-| Phase 0 **Q2**（listener 身份、lookup、**assign 成功**） | ✅ **已通过**（§16.10）。官方 v1.13.19 的 4 个 socket 全部 inode 核验通过；lookup 4/4 命中；**`bpf_sk_assign()` 返回 0**，§9.2 由源码结论升级为实测结论 |
-| **产品数据面过验证器** | ✅ **四个程序全部通过**（§16.8.5，基线 5.15.211）。`sk_storage`/`sk_assign` 引用配平、`skb_change_head`、ARRAY_OF_MAPS 内层查找、LPM trie 均被接受 |
-| Phase 0 **Q3–Q8** | ⬜ 待做，**且全部无法在实现之前做**——它们要测的是 §17 各阶段产出的代码。分配见 §17.2 |
-| 能推翻主路线的技术未知项 | **无** |
-| 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
+| **MUST / MUST NOT** | The contract. Violating it is an implementation defect. |
+| **SHOULD** | The default engineering choice; replaceable once the reason is recorded. |
 
-设计期共推翻自己**八次**——五次在实测前，三次在 2026-08-25 的 Phase 0 实测中（其中两条推翻的是我自己写下的结论）。全部留有「原说法 / 实际 / 处置」对照，逐条位置见 `../history/review-log.md` §0.6 开头。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
-
-## 术语强度
-
-| 词 | 含义 |
+| Evidence | Meaning |
 |---|---|
-| **必须 / 禁止** | 实现合同。违反即实现错误。 |
-| **建议** | 默认工程选择，可在记录理由后更换。 |
-| **已核验** | 我在本轮独立核对过一手内核源码 / 官方文档 / 官方配置，并在文中给出依据。 |
-| **待证** | 单项机制有依据，但**组合**必须由 Phase 0 在真机闭环证明。不得写成"已支持"。 |
+| **Verified** | Checked this round against first-party kernel source, official documentation or official configuration, with the citation given inline. |
+| **Measured** | Observed on a real device; the device, kernel version and date are named, and the raw output is in `../../tools/phase0/results/`. |
+| **Inferred** | Follows from stated premises, which are named. Never written as though measured. |
 
-代码块中的 C/Rust 是签名与算法骨架，用于消除歧义；实现者补全函数体、错误路径与测试。
+RFC 2119 supplies only the first column. The second exists because this project
+has twice reached a correct conclusion through a wrong argument, and a reader
+who cannot tell a verified claim from an inferred one cannot catch the next one.
+
+The design overturned itself **8 times** — 5 before measurement, 3 during the
+measurement round, two of those three against conclusions written by the same
+author who then disproved them. Every one is recorded as
+*claimed / actual / disposition* in `../history/review-log.md` §0.6. **A
+conclusion that is right for the wrong reason is more dangerous than one that
+is simply wrong**, because the next decision builds on the reason; that table
+is worth more than the conclusions it corrects.
+
+C and Rust in code blocks are signatures and algorithm skeletons meant to remove
+ambiguity. Implementers supply bodies, error paths and tests.
+
+## Where the previous revision numbers went
+
+0.9.5 folds the 0.9.0 baseline and the `R091-*` / `R092-*` incremental layers
+into this one document. **The section numbers did not move**; only the layering
+did. This table maps each retired revision to the section that now carries it,
+so that a commit message or comment naming an `R09x` number can still be
+resolved.
+
+`R09x` identifiers are retired: none will be issued again, and code cites `§`
+instead, because a section number survives a re-issue and a version-scoped one
+does not (`../governance.md` GOV-6.2).
+
+| Retired | Now carried by |
+|---|---|
+| R091-01 failure semantics · R091-02 cost of unselected traffic | §2.2, §14.1 |
+| R091-03 scope · R092-08 webroot | §1.2, §1.3, §13.1, §28 |
+| R091-04 paths and schema · R092-02 allow/deny lists and `@file` | §11.1, §11.2 |
+| R091-05 preference and reachability · R092-10 renamed `reachable` | §8.5, §8.6, §24 |
+| R091-06 cgroup facts | §3.2 |
+| R091-07 capacity and the 6.6 LPM defect · R092-11 RESERVED/POLICY split | §1.6, §6.1, §7.3 |
+| R091-08 listener addresses and ports · R092-03 injected inbounds | §9.0, §9.1, §9.6 |
+| R091-09 disable/stop/uninstall · R091-10 top-level state | §8.8, §10.1, §26 |
+| R091-11 control interface and CLI · R092-06 event sources | §10.3, §10.4, §10.6 |
+| R091-12 packaging and installation | §13.1, §13.2 |
+| R091-13 status/plan/history layering | `../plan/implementation.md`, `../history/` |
+| R091-14 deep modules and seams | §5 |
+| R091-15 verification by platform · R092-04 hard and soft gates | §15.1, §23 |
+| R092-01, R092-05 subscription and config generation | §28 |
+| R092-07 SSID-conditional activation | §29 |
+| R092-09 user-facing wording | §27, `../guide/` |
 
 ---
 
@@ -2078,6 +2118,22 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 2. **policy 事务不改变顶层状态**（§10.5，D5）。只有 engine generation 切换、**核心**拓扑漂移、engine 退出才会离开 `Active`。
 3. **事务期间到达的事件不丢弃、不递归**：记入待处理集合，当前事务结束后由一次收敛统一消化。禁止在事务内部重入 reactor。
 4. **捕获侧漂移必须局部处理，禁止升级为全局事务。** 上表把捕获侧与核心漂移分成两行，理由见 §8.5.1：netd 在每次 interface 加入/离开网络时删 `clsact`，system_server 崩溃后 netd 重启还会清空**所有** interface 的 clsact。如果对这类事件也走"publish `active=0` → 重收敛 → `active=1`"，那么**每一次 Wi-Fi 重连都会让全设备的代理流量瞬断一次**。正确处置是只重挂那个 interface 上的 filter，`active` 全程不动，其它 interface 不受影响。这是本状态机里最容易写错、代价也最直观的一处。
+
+---
+
+# 第 28 部分：订阅与配置生成
+
+> **本部分是 0.9.5 新开的编号**，折叠 R092-01、R092-05 与 R092-08。C11（订阅）已由所有者于 2026-08-30 从延期转入本版范围；C8（Flux 自建 WebUI）与 C10（开箱即用控制面）**仍然延期**，见 `../history/rejected-and-deferred.md` §21.0。
+
+**留空待写。** 本部分将规定：模板 + 订阅原文 → 生成 `sing-box.<gen>.json` 的流水线、`fluxd subscribe` 的合同、缓存与原子替换、以及 `webroot` 重定向外壳的边界。
+
+---
+
+# 第 29 部分：条件激活
+
+> **本部分是 0.9.5 新开的编号**，折叠 R092-07。
+
+**留空待写。** 本部分将规定：以 SSID 等网络条件驱动激活/停用的机制，其事件来源（nl80211）、去抖、以及它与 §26 顶层状态机的关系。
 
 ---
 
