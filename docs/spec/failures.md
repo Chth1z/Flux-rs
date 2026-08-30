@@ -1,130 +1,130 @@
-# 失败矩阵与 status 规格
+# Failure Matrix and `status` Specification
 
-> 原 blueprint.md 第 23、24 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 AUTH-1.1）。
+> Former Parts 23 and 24 of blueprint.md. **Section numbers are unchanged**: every §N.x here is the same §N.x cited throughout the repository (see AUTH-1.1).
 >
-> 谁读这份：拿着一个错误码来查含义的人。本文投影 0.9.1；规范性合同是冻结的 `docs/spec/blueprint.md` 加 `docs/spec/blueprint-0.9.1.md`，冲突时后者优先。
+> Audience: anyone looking up the meaning of an error code. This document projects 0.9.1; the normative contract is the frozen `docs/spec/blueprint.md` plus `docs/spec/blueprint-0.9.1.md`, with the latter taking precedence in a conflict.
 
 ---
 
-# 第 23 部分：失败矩阵
+# Part 23: Failure Matrix
 
-每一个可能失败的点，逐一写出**怎么检测、做什么、用户看到什么**。规则：任何一行的"动作"列都不允许出现"记录后继续"这种含糊说法（§15.4(1) 状态诚实性）。
+Every possible failure point specifies **how it is detected, what action is taken, and what the user sees**. Rule: the "Action" column of every row MUST NOT contain an ambiguous phrase such as "log and continue" (§15.4(1) state honesty).
 
-## 23.1 启动期（尚未 active，全程 Direct）
+## 23.1 Startup: not yet active, Direct throughout
 
-| 失败点 | 检测 | 动作 | 用户可见 |
+| Failure point | Detection | Action | User-visible result |
 |---|---|---|---|
-| 第二个实例 | `flock(LOCK_EX\|LOCK_NB)` 失败 | 立即 `exit(1)`，**不碰任何对象、不 unlink socket** | 第二次调用报"already running" |
-| page size ≠ 4096 | `sysconf(_SC_PAGESIZE)` | 停在 `Inactive`，**不启动 engine、不建任何对象** | `status.last_error = "unsupported_page_size:16384"` |
-| netns 不是初始 netns | `/proc/self/ns/net` 与 `/proc/1/ns/net` 的 inode 比对 | `Inactive` | `"netns_mismatch"` |
-| 运行目录权限不对 | `fstatat` 检查 mode/uid | `Inactive`，**不自动 chmod**（可能是用户刻意改的） | `"runtime_dir_mode:0755 expected 0700"` |
-| `all.rp_filter != 0` | 读 `/proc/sys/...` | `Inactive`（§8.4，**不写全局 sysctl**） | `"rp_filter_conflict:all=1"` + 人工处置说明 |
-| veth 同名对象存在但 alias 不符 | `RTM_GETLINK` + `IFLA_IFALIAS` | `Inactive`，**绝不删除他人对象** | `"veth_conflict:flxrs0 alias mismatch"` |
-| MTU 65535 被拒 | `RTM_NEWLINK` 的 ACK | `Inactive`，**不降级猜小值** | `"veth_mtu_rejected"` |
-| RPDB priority 100 已被占用 | `RTM_GETRULE` dump | `Inactive`，**不换动态值**（cleanup 必须可证明） | `"rule_conflict:priority 100 occupied"` |
-| table 20260 已有未知路由 | `RTM_GETROUTE` dump 且 `rtm_protocol != 202` | `Inactive` | `"route_table_conflict:20260"` |
-| BTF 加载失败 | `BPF_BTF_LOAD` errno | `Inactive` | `"btf_load:EINVAL"` |
-| SK_STORAGE map 创建失败 | `BPF_MAP_CREATE` errno | `Inactive` | `"map_create:tcp_decision:EINVAL"` |
-| program verifier 拒绝 | `BPF_PROG_LOAD` errno | `Inactive`，**把 verifier log 前 N 行写进日志与 status**（§12.7 第 11 条） | `"prog_load:flx_cap_l2:EACCES"` + log 摘要 |
-| BPF load/attach 被 SELinux 拒 | `EPERM`/`EACCES` | `Inactive`，**不注入 sepolicy**（§1.3 非目标） | `"bpf_denied:check root manager policy"` |
-| `packages.list` 不可读 | `open` errno | 保持当前策略；冷启动则 `Inactive` | `"packages_list_unreadable"`（`fluxd check` 里带 `: <errno>`） |
-| 配置里的 package 不存在 | 解析后查表 miss | 整个候选配置失败，**不部分应用** | `"selector_invalid"` + detail 指出是哪一条 |
-| `appId` 越界 | 范围检查 | 同上 | `"selector_invalid"` + detail |
-| engine binary 缺失（module 未装全 / 测试环境） | `stat` engine 路径 | `Inactive`，不进入 §9.4 事务 | `"engine_binary_missing:<path>"` |
-| `config/sing-box.json` 缺失或不可读 | `open` errno | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
-| 用户 sing-box.json 解析失败（非 UTF-8、JSONC 语法错） | `parse_jsonc` | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_invalid"` + 具体原因进 warnings |
-| 用户 sing-box.json 校验失败（自带 inbound、保留 tag、非对象） | `flux-core` 的 `build_effective` | 同上 | `"flux_config_invalid"` + 具体原因进 warnings |
-| `sing-box check` 失败 | 子进程退出码 + stderr | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_check_failed"` + stderr 前若干行 |
-| engine 起不来 | pidfd 立即可读 | backoff 重试（1/2/4/8/30 s） | `"engine_exited:code=1"` |
-| 4 个 socket 未在 deadline 内出现 | SOCK_DIAG 退避重查超时 | 停止 candidate，`Inactive` | `"engine_not_ready:2/4 sockets"` |
-| socket inode 与 candidate pid 不符 | `/proc/<pid>/fd` 交叉核验 | 停止 candidate，`Inactive` | `"engine_socket_owner_mismatch"` |
-| `clsact` 带 shared block | dump 见 `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK` | **排除该 interface**，其余继续 | 该 interface `excluded(clsact_shared_block)` |
-| 无可用 pref（`v4-*` 上 1–3 全被占） | dump + §8.5.3 | 排除该 interface | `excluded(tc_no_usable_pref)` |
-| 取到 pref 但被前面的 filter 遮挡 | §8.5.4 存活验证：tx 在涨而 `SAW_PACKET` 不涨 | 排除该 interface，点名遮挡者 | `excluded(tc_chain_shadowed)` |
-| 存活验证窗口内无流量 | tx 也不涨 | 退避重试；到上限仍无流量则允许激活并标注 | `warn(tc_verify_no_traffic)` |
-| Flux filter 无法证明可达 | 身份/相对排序检查 + `flx_verify` 正向存活验证 | 排除该 interface；不得仅因它不是 dump 第一项而排除 | tx 增长但 probe 不涨：`excluded(tc_chain_shadowed)`；identity/前置快照漂移沿用兼容 token `excluded(not_first_applicable)`，其名字不再按字面解释 |
-| candidate interface 超过 64 | 计数 | **整个新 topology 不 promote**，保持当前/Direct，不按名字截断 | `"too_many_interfaces:71"` |
+| Second instance | `flock(LOCK_EX\|LOCK_NB)` fails | Immediately `exit(1)`; **touch no object and do not unlink the socket** | Second invocation reports "already running" |
+| page size ≠ 4096 | `sysconf(_SC_PAGESIZE)` | Remain `Inactive`; **do not start the engine or create any object** | `status.last_error = "unsupported_page_size:16384"` |
+| netns is not the initial netns | Compare the inodes of `/proc/self/ns/net` and `/proc/1/ns/net` | `Inactive` | `"netns_mismatch"` |
+| Runtime directory permissions are wrong | `fstatat` checks mode/uid | `Inactive`; **do not chmod automatically** (the user may have changed it deliberately) | `"runtime_dir_mode:0755 expected 0700"` |
+| `all.rp_filter != 0` | Read `/proc/sys/...` | `Inactive` (§8.4; **do not write a global sysctl**) | `"rp_filter_conflict:all=1"` + manual remediation instructions |
+| A veth with the same name exists but its alias does not match | `RTM_GETLINK` + `IFLA_IFALIAS` | `Inactive`; **MUST NOT delete another owner's object** | `"veth_conflict:flxrs0 alias mismatch"` |
+| MTU 65535 is rejected | ACK from `RTM_NEWLINK` | `Inactive`; **do not fall back by guessing a smaller value** | `"veth_mtu_rejected"` |
+| RPDB priority 100 is occupied | `RTM_GETRULE` dump | `Inactive`; **do not substitute a dynamic value** (cleanup MUST remain provable) | `"rule_conflict:priority 100 occupied"` |
+| table 20260 contains an unknown route | `RTM_GETROUTE` dump where `rtm_protocol != 202` | `Inactive` | `"route_table_conflict:20260"` |
+| BTF load fails | errno from `BPF_BTF_LOAD` | `Inactive` | `"btf_load:EINVAL"` |
+| SK_STORAGE map creation fails | errno from `BPF_MAP_CREATE` | `Inactive` | `"map_create:tcp_decision:EINVAL"` |
+| Program verifier rejects a program | errno from `BPF_PROG_LOAD` | `Inactive`; **write the first N lines of the verifier log to both the log and status** (§12.7 item 11) | `"prog_load:flx_cap_l2:EACCES"` + log summary |
+| SELinux denies BPF load/attach | `EPERM`/`EACCES` | `Inactive`; **do not inject sepolicy** (§1.3 non-goal) | `"bpf_denied:check root manager policy"` |
+| `packages.list` is unreadable | errno from `open` | Retain the current policy; on cold start, `Inactive` | `"packages_list_unreadable"` (`fluxd check` appends `: <errno>`) |
+| A configured package does not exist | Table lookup misses after parsing | Reject the entire candidate configuration; **do not apply it partially** | `"selector_invalid"` + detail identifying the entry |
+| `appId` is out of range | Range check | Same as above | `"selector_invalid"` + detail |
+| Engine binary is missing (incomplete module installation / test environment) | `stat` the engine path | `Inactive`; do not enter the §9.4 transaction | `"engine_binary_missing:<path>"` |
+| `config/sing-box.json` is missing or unreadable | errno from `open` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
+| The user's sing-box.json fails to parse (non-UTF-8, invalid JSONC syntax) | `parse_jsonc` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_invalid"` + specific reason in warnings |
+| The user's sing-box.json fails validation (contains an inbound, uses a reserved tag, or is not an object) | `build_effective` in `flux-core` | Same as above | `"flux_config_invalid"` + specific reason in warnings |
+| `sing-box check` fails | Child exit code + stderr | Cold start: `Inactive`; hot update: retain the current generation | `"engine_check_failed"` + first several lines of stderr |
+| Engine fails to start | pidfd becomes readable immediately | Retry with backoff (1/2/4/8/30 s) | `"engine_exited:code=1"` |
+| The 4 sockets do not appear before the deadline | Timed-out SOCK_DIAG rechecks with backoff | Stop the candidate; `Inactive` | `"engine_not_ready:2/4 sockets"` |
+| Socket inode does not belong to the candidate pid | Cross-check `/proc/<pid>/fd` | Stop the candidate; `Inactive` | `"engine_socket_owner_mismatch"` |
+| `clsact` has a shared block | Dump contains `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK` | **Exclude that interface**; continue with the others | That interface is `excluded(clsact_shared_block)` |
+| No usable pref (1–3 are all occupied on `v4-*`) | Dump + §8.5.3 | Exclude that interface | `excluded(tc_no_usable_pref)` |
+| The acquired pref is shadowed by an earlier filter | §8.5.4 liveness verification: tx increases but `SAW_PACKET` does not | Exclude that interface and identify the shadowing filter | `excluded(tc_chain_shadowed)` |
+| No traffic during the liveness verification window | tx does not increase either | Retry with backoff; if there is still no traffic at the limit, permit activation and annotate it | `warn(tc_verify_no_traffic)` |
+| Flux filter reachability cannot be proven | Identity/relative-order checks + positive `flx_verify` liveness verification | Exclude that interface; MUST NOT exclude it merely because it is not the first dump entry | tx increases but the probe does not: `excluded(tc_chain_shadowed)`; identity/preceding-snapshot drift retains the compatibility token `excluded(not_first_applicable)`, whose name is no longer interpreted literally |
+| More than 64 candidate interfaces | Count | **Do not promote the entire new topology**; retain the current topology/Direct, and do not truncate by name | `"too_many_interfaces:71"` |
 
-## 23.2 运行期（已 active）
+## 23.2 Runtime: already active
 
-| 失败点 | 检测 | 动作 | 数据面后果 |
+| Failure point | Detection | Action | Data-plane consequence |
 |---|---|---|---|
-| engine 进程退出 | pidfd 可读 | publish `active=0` → backoff 重启 → 新 generation | 新流 Direct（listener lookup miss）；已入场 TCP drop |
-| engine 单个 listener 关闭（进程还活着） | BPF `fault_events` 的 `EGRESS_LISTENER` | publish `active=0` → 重启整个 generation | 同上。**这是 fault ringbuf 存在的唯一理由** |
-| engine event-loop 活锁（listener 在、进程在） | **不可检测**（§2.2.3(3)） | 无 | 该期间新流仍被捕获并卡住。**已公开的残余风险** |
-| ingress `bpf_sk_assign` 反复失败 | `counters[IN_DROP_ASSIGN] > 0` 且 `admit_* > 0` | `status` 给出**具体假设**："engine listener may have SO_REUSEPORT — kernels < 6.5 reject assign（§9.2）" | 已入场流 drop |
-| **netd 删掉某物理 interface 的 `clsact`**（连带删掉我们的 egress filter） | `RTM_DELQDISC` / `RTM_DELTFILTER` | 以 `netd_clsact_missing` 排除并等待 netd 重建；收到 `RTM_NEWQDISC` 后重新 admission，Flux 从不创建物理 `clsact`。其它 active coverage 尚在时不动全局 `active`；这是最后一条时按 R091-10 publish inactive | capture-side drift；窗口内该 interface 上的选中流量走 Direct |
-| 自有**核心**对象（`flxrs0/1`、ingress filter、rule、local route）被外力删除 | rtnetlink 事件 + 按需 dump | 先 publish `active=0`，再按 §8.5 谓词重新收敛 | 收敛期间新流 Direct |
-| 未知对象抢占了我们的 identity | dump 比对失败 | 保持 `Inactive` 并报告，**不覆盖、不删除** | Direct |
-| interface 消失 | `RTM_DELLINK` | 内核已连带删除其 filter；从 active 集移除。若这是最后一个 active capture interface，先 publish `active=0` 并进入 `Inactive`；否则保持 `Active` | 该 interface 上的流回 Android 路径（R091-10） |
-| interface 出现 | `RTM_NEWLINK` + admission | debounce 后 attach；若此前因零 coverage 为 `Inactive`，admission + readiness 闭环后重新 publish `active=1` | 窗口内 Direct（R091-10） |
-| netlink socket 溢出 | `ENOBUFS` / `NLMSG_OVERRUN` | **丢弃批次，全量重新 dump**（§10.4.1 第 2 条） | 无（控制面内部） |
-| map 更新失败（策略热更新中） | `bpf_map_update_elem` errno | 记录错误并**重新入队一次完整收敛**，不做快照回滚（§10.5） | 窗口内新流看到混合策略（良性） |
-| `uid_policy` 超过 4096 或同时 `SELECTED` 超过 1024 | 分别计数 | 热更新被拒，保持当前策略 | 无变化 |
-| 任一 bypass LPM 超过 65536 | 按地址族计数；本机地址不计入 LPM | **拒绝激活并报告**，不静默丢弃 | Direct |
-| 任一 self-address HASH 超过 256 | 按地址族精确地址计数 | **拒绝激活并报告**，不静默丢弃 | Direct |
-| 控制 socket 收到非 root 请求 | `SO_PEERCRED.uid != 0` | 关闭连接 | 客户端 EOF |
-| 控制请求超过 64 KiB | 读取长度 | 关闭连接 | 同上 |
-| decision storage 分配失败 | `bpf_sk_storage_get` 两次都 NULL | 当前包 `TC_ACT_UNSPEC`（无粘性） | 该 SYN 直连；后续 SYN 可重新决策（§2.2.1 末条） |
-| `flux_decision.magic` 或 `reserved` 损坏 | 每次读取时校验 | `TC_ACT_SHOT` + `counters[DROP_CORRUPT]` | 该 socket 后续包全 drop（不泄漏） |
-| control snapshot ABI magic 不符 | 每次 `ctrl()` 校验 | egress: 已入场 SHOT / 未入场 UNSPEC；ingress: SHOT | 见 §2.2 |
-| 内核 < 6.5 上 assign 了刚被 unhash 的 listener | **不可检测** | 无 | 泄漏一次 socket 引用。窗口被 §9.4 的顺序压到"engine 崩溃 → pidfd 唤醒"之间的数百微秒。**已知并接受**（§9.2） |
+| Engine process exits | pidfd is readable | publish `active=0` → restart with backoff → new generation | New flows are Direct (listener lookup miss); admitted TCP is dropped |
+| One engine listener closes while the process remains alive | `EGRESS_LISTENER` in BPF `fault_events` | publish `active=0` → restart the entire generation | Same as above. **This is the sole reason the fault ringbuf exists** |
+| Engine event-loop livelock (listener and process both remain present) | **Undetectable** (§2.2.3(3)) | None | New flows continue to be captured and stall during this period. **Published residual risk** |
+| ingress `bpf_sk_assign` repeatedly fails | `counters[IN_DROP_ASSIGN] > 0` and `admit_* > 0` | `status` gives a **specific hypothesis**: "engine listener may have SO_REUSEPORT — kernels < 6.5 reject assign (§9.2)" | Admitted flows are dropped |
+| **netd deletes `clsact` from a physical interface** (which also deletes our egress filter) | `RTM_DELQDISC` / `RTM_DELTFILTER` | Exclude it as `netd_clsact_missing` and wait for netd to recreate it; after `RTM_NEWQDISC`, run admission again. Flux never creates physical `clsact`. While other active coverage remains, leave global `active` unchanged; if this was the last one, publish inactive per R091-10 | Capture-side drift; selected traffic on this interface is Direct during the window |
+| An owned **core** object (`flxrs0/1`, ingress filter, rule, local route) is deleted externally | rtnetlink event + on-demand dump | First publish `active=0`, then reconverge under the §8.5 predicates | New flows are Direct during convergence |
+| An unknown object occupies our identity | Dump comparison fails | Remain `Inactive` and report it; **do not overwrite or delete the object** | Direct |
+| Interface disappears | `RTM_DELLINK` | The kernel has also deleted its filter; remove it from the active set. If this was the last active capture interface, first publish `active=0` and enter `Inactive`; otherwise remain `Active` | Flows on that interface return to the Android path (R091-10) |
+| Interface appears | `RTM_NEWLINK` + admission | Attach after debounce; if zero coverage previously caused `Inactive`, publish `active=1` again after the admission + readiness loop closes | Direct during the window (R091-10) |
+| Netlink socket overflows | `ENOBUFS` / `NLMSG_OVERRUN` | **Discard the batch and perform a complete new dump** (§10.4.1 item 2) | None (control-plane internal) |
+| Map update fails during a policy hot update | errno from `bpf_map_update_elem` | Record the error and **enqueue one complete convergence again**; do not roll back a snapshot (§10.5) | New flows may observe a mixed policy during the window (benign) |
+| `uid_policy` exceeds 4096 or more than 1024 entries are simultaneously `SELECTED` | Count each separately | Reject the hot update and retain the current policy | No change |
+| Any bypass LPM exceeds 65536 | Count by address family; local addresses do not count toward the LPM | **Reject activation and report it**; do not silently discard entries | Direct |
+| Any self-address HASH exceeds 256 | Count exact addresses by address family | **Reject activation and report it**; do not silently discard entries | Direct |
+| Control socket receives a non-root request | `SO_PEERCRED.uid != 0` | Close the connection | Client EOF |
+| Control request exceeds 64 KiB | Read length | Close the connection | Same as above |
+| Decision storage allocation fails | Both calls to `bpf_sk_storage_get` return NULL | Current packet gets `TC_ACT_UNSPEC` (no stickiness) | This SYN goes Direct; later SYNs may be evaluated again (§2.2.1 final item) |
+| `flux_decision.magic` or `reserved` is corrupt | Validate on every read | `TC_ACT_SHOT` + `counters[DROP_CORRUPT]` | All later packets on this socket are dropped (no leak) |
+| Control snapshot ABI magic does not match | Validate on every `ctrl()` call | egress: admitted SHOT / unadmitted UNSPEC; ingress: SHOT | See §2.2 |
+| On a kernel < 6.5, assign targets a listener that has just been unhashed | **Undetectable** | None | One socket reference leaks. The §9.4 ordering narrows the window to the hundreds of microseconds between "engine crash → pidfd wakeup." **Known and accepted** (§9.2) |
 
-## 23.3 停止与崩溃
+## 23.3 Stop and crash
 
-| 场景 | 行为 | 遗留 |
+| Scenario | Behavior | Residue |
 |---|---|---|
-| `fluxd stop` | publish `active=0` → `SIGTERM` engine → 短 deadline → `SIGKILL` → pidfd 确认 → 正常退出(0) | veth/BPF/TC 对象**保留**（下次启动删除重建）；service.sh 因退出码 0 不重启 |
-| 在管理器里关掉模块 | 管理器创建 `/data/adb/modules/flux_rs/disable`；inotify 唤醒 daemon，之后同下一行 | 同下一行；无需重启 |
-| `fluxd disable` | 创建同一个 `disable`，publish `active=0`，停止 engine；daemon 继续运行等命令 | 同上；“已停用”不表示同 boot 已拆除网络对象 |
-| `SIGTERM` / `SIGINT` | 同 `stop` | 同上 |
-| `fluxd` 被 `SIGKILL` | engine 因 `PDEATHSIG=SIGKILL` 被内核终止 → listener 消失 → **新流因 listener lookup miss 而 Direct**；已入场 TCP 的包 redirect 后在 ingress drop | TC filter + veth + rule + route 全部残留。**这是 fail-open 的关键路径**：残留的 capture 程序不会形成黑洞，因为它每次都要先查 listener |
-| `service.sh` 重启 fluxd | §8.7 步骤 2 删除全部精确自有残留后重建 | 归零 |
-| 设备重启 | 全部非持久内核对象自然消失 | 无 |
-| 模块卸载 | `uninstall.sh` 同步请求 `fluxd stop`，然后只删 `/data/adb/flux-rs` | 内核对象等重启清除；**不 flush 任何系统对象** |
+| `fluxd stop` | publish `active=0` → `SIGTERM` engine → short deadline → `SIGKILL` → confirm via pidfd → exit normally (0) | veth/BPF/TC objects **remain** (deleted and recreated on the next start); service.sh does not restart after exit code 0 |
+| Disable the module in the manager | The manager creates `/data/adb/modules/flux_rs/disable`; inotify wakes the daemon, which then behaves as in the next row | Same as the next row; no reboot required |
+| `fluxd disable` | Create the same `disable`, publish `active=0`, and stop the engine; the daemon continues running and waiting for commands | Same as above; "disabled" does not mean network objects have been removed during the same boot |
+| `SIGTERM` / `SIGINT` | Same as `stop` | Same as above |
+| `fluxd` receives `SIGKILL` | The kernel terminates the engine because of `PDEATHSIG=SIGKILL` → listener disappears → **new flows are Direct because listener lookup misses**; admitted TCP packets are dropped at ingress after redirect | TC filters + veth + rule + route all remain. **This is the critical fail-open path**: the remaining capture program cannot form a black hole because it first looks up the listener on every invocation |
+| `service.sh` restarts fluxd | §8.7 step 2 deletes every precisely owned residual object before rebuilding | None |
+| Device reboots | All non-persistent kernel objects disappear naturally | None |
+| Module is uninstalled | `uninstall.sh` synchronously requests `fluxd stop`, then deletes only `/data/adb/flux-rs` | Kernel objects remain until reboot; **MUST NOT flush any system object** |
 
-**一条贯穿全表的不变量**：`Inactive` 只证明 `control.active=0`、新流不再 admission，不证明 TC/veth/rule/route/map 已删除。`status` 只有在报告“已清理”或“无残留”之前，才必须有一次**新的实际枚举**（TC dump、`RTM_GETRULE`、`RTM_GETROUTE`、`BPF_OBJ_GET_INFO_BY_FD`）证明对象确实不在；无法证明时不得作出 cleanup 声明，并附第一个具体错误。
+**Invariant across the entire table**: `Inactive` proves only that `control.active=0` and new flows are no longer admitted; it does not prove that TC/veth/rule/route/map objects have been deleted. Before `status` reports "cleaned" or "no residue," it MUST have a **fresh actual enumeration** (TC dump, `RTM_GETRULE`, `RTM_GETROUTE`, `BPF_OBJ_GET_INFO_BY_FD`) proving that the objects are absent. If that cannot be proven, it MUST NOT make a cleanup claim and MUST include the first concrete error.
 
 ---
 
-# 第 24 部分：`status` 输出与错误码规格
+# Part 24: `status` Output and Error Code Specification
 
-`status` 是这个产品唯一的诊断出口（没有 WebUI、没有周期日志、没有 telemetry）。它必须足以回答"为什么没生效"，否则 §14.2 的"零可观测性"缺陷就回来了。
+`status` is this product's only diagnostic surface (there is no WebUI, periodic logging, or telemetry). It MUST be sufficient to answer "why did it not take effect"; otherwise the "zero observability" defect from §14.2 returns.
 
-## 24.1 字段规格
+## 24.1 Field specification
 
 ```jsonc
 {
   "ok": true,
-  "version": "0.9.0",                // 唯一来源是 workspace manifest，随发布 bump
+  "version": "0.9.0",                // Sole source is the workspace manifest; bump with each release
   "abi_magic": "0xF10C0903",
   "state": "Disabled" | "Inactive" | "Active",
-  "root_manager": "KernelSU",         // 探测到的管理器；未知时为 null
+  "root_manager": "KernelSU",         // Detected manager; null when unknown
   "generation": 7,
-  "backoff_seconds": null,            // engine 正在退避重试时是剩余秒数
+  "backoff_seconds": null,            // Remaining seconds while the engine is backing off before a retry
   "engine": {
     "running": true, "pid": 1234,
-    "sockets_verified": 4,            // 期望 4；少于 4 说明 readiness 未闭环
+    "sockets_verified": 4,            // Expect 4; fewer than 4 means readiness has not closed
     "effective_config": "run/effective-sing-box.7.json"
   },
   "policy": {
     "selected": 3, "draining": 1,
-    "bypass_v4": 12, "bypass_v6": 6,  // 固定项 + 用户 bypass_cidrs；不含本机地址
-    "self_addresses": 4               // 两张精确 HASH 中的动态本机地址总数
+    "bypass_v4": 12, "bypass_v6": 6,  // Fixed entries + user bypass_cidrs; excludes local addresses
+    "self_addresses": 4               // Total dynamic local addresses in the two exact HASH maps
   },
   "ifaces": [
     { "name": "wlan0", "ifindex": 24, "arphrd": "ether",
       "entry": "flx_cap_l2", "status": "active",
       "prog_id": 118, "prog_tag": "a1b2c3d4e5f60718",
-      "pref": 2,                       // 该接口实际占用的 preference，逐接口选择
-      "first_applicable": true },      // 兼容字段：已验证可达，不表示 dump 排第一
+      "pref": 2,                       // Preference actually occupied on this interface; selected per interface
+      "first_applicable": true },      // Compatibility field: reachability verified; does not mean first in the dump
     { "name": "rmnet_data0", "ifindex": 30, "arphrd": "rawip",
       "entry": "flx_cap_l3", "status": "admitted",
-      "pref": 2, "…": null },          // 无 first_applicable：存活验证尚未出结论
+      "pref": 2, "…": null },          // No first_applicable: liveness verification is not yet conclusive
     { "name": "v4-rmnet_data0", "ifindex": 31, "arphrd": "none",
       "status": "excluded", "reason": "clat_order_unverified" }
   ],
-  "counters": {                        // §6.1 的 PERCPU_ARRAY 求和
+  "counters": {                        // Sum of the PERCPU_ARRAY from §6.1
     "admit_tcp": 41, "direct_tcp": 190, "admit_udp": 388,
     "drop_inactive": 0, "drop_stale_gen": 0, "drop_handoff": 0,
     "drop_udp_frag": 0, "drop_corrupt": 0, "decision_alloc_fail": 0,
@@ -135,58 +135,58 @@
     "in_drop_parse": 0, "in_drop_snapshot": 0
   },
   "sysctl": { "all.rp_filter": 0, "flxrs1.rp_filter": 0, "flxrs1.accept_local": 1 },
-  "warnings": [ /* 见 24.3 */ ],
-  "hints":    [ /* 见 24.4 */ ],
+  "warnings": [ /* See 24.3 */ ],
+  "hints":    [ /* See 24.4 */ ],
   "last_error": null
 }
 ```
 
-`/data/adb/modules/flux_rs/disable` 存在表示 desired state 是 disabled——那是管理器自己的模块开关，`fluxd` 用 inotify 监听它。engine 尚在终止或收敛仍忙时，顶层可以短暂为 `Inactive` 并给出 pending warning；完成后才是 `Disabled`。这三个状态都不单独承诺 cleanup。
+The presence of `/data/adb/modules/flux_rs/disable` means the desired state is disabled—that is the manager's own module switch, and `fluxd` watches it with inotify. While the engine is still terminating or convergence remains busy, the top-level state MAY briefly be `Inactive` with a pending warning; it becomes `Disabled` only after completion. None of these three states alone promises cleanup.
 
-同一份状态会被 `fluxd` 渲染成一行写进 `module.prop` 的 `description=`，供管理器列表显示；那只是**投影**，权威仍然是这里的 JSON。
+`fluxd` also renders the same state as one line in `module.prop` under `description=` for display in the manager's module list; that is only a **projection**, and the JSON here remains authoritative.
 
-## 24.2 错误码命名规则
+## 24.2 Error code naming rules
 
-`last_error` 与 `ifaces[].reason` 一律用 `snake_case` 的**稳定标识符**，可选 `:` 后跟具体值。**禁止**把自由文本放进这两个字段（自由文本进 `warnings`）。已定义的集合就是 §23 两张表里出现的那些值；新增必须同时更新 §23。
+`last_error` and `ifaces[].reason` MUST always use **stable identifiers** in `snake_case`, optionally followed by `:` and a concrete value. These two fields **MUST NOT** contain free text (free text belongs in `warnings`). The defined set is exactly the values present in the two §23 tables; any addition MUST update §23 at the same time.
 
-分四类前缀便于分流：
+Four prefix classes support routing:
 
-| 前缀 | 含义 | 例 |
+| Prefix | Meaning | Example |
 |---|---|---|
-| `unsupported_*` | 设备能力不足，重试无用 | `unsupported_page_size:16384` |
-| `*_conflict` | 有他人对象占位，需人工介入 | `rule_conflict:priority 100 occupied` |
-| `*_failed` / `<syscall>:<errno>` | 操作失败，可能可重试 | `prog_load:flx_cap_l2:EACCES` |
-| `excluded(<reason>)` | 单个 interface 被排除，其余仍工作 | `excluded(tc_chain_shadowed)` |
+| `unsupported_*` | Device capability is insufficient; retrying is useless | `unsupported_page_size:16384` |
+| `*_conflict` | Another owner's object occupies the slot; manual intervention is required | `rule_conflict:priority 100 occupied` |
+| `*_failed` / `<syscall>:<errno>` | Operation failed and may be retryable | `prog_load:flx_cap_l2:EACCES` |
+| `excluded(<reason>)` | One interface is excluded while the others continue working | `excluded(tc_chain_shadowed)` |
 
-`not_first_applicable` 是 0.9.0 已公开的兼容 token。0.9.1 保留编码但收窄含义为“attachment identity 或已验证的前置 filter 快照不再成立”；人类文案统一说“不可达/需重新验证”，不能据字段名声称 Flux 必须排在 dump 第一项。
+`not_first_applicable` is a compatibility token published in 0.9.0. Version 0.9.1 retains the encoding but narrows its meaning to "the attachment identity or a verified preceding-filter snapshot no longer holds"; human-facing text consistently says "unreachable/reverification required" and MUST NOT use the field name to claim that Flux has to be the first dump entry.
 
-`ifaces[].first_applicable` 三态且缺省有意义：字段缺席表示尚未得出结论（`flx_verify` 未出结果，或 `tc_dump_failed` 这类根本没看到的情形），`true` 表示可达性已验证，`false` 表示明确判定不可达（遮挡、身份漂移或 attach 失败）。**不要把缺席读成 `false`。**
+`ifaces[].first_applicable` is tri-state, and omission is meaningful: an absent field means no conclusion has been reached (`flx_verify` has no result yet, or the interface was never observed because of a condition such as `tc_dump_failed`); `true` means reachability has been verified; `false` means it was definitively found unreachable (shadowing, identity drift, or attach failure). **MUST NOT interpret absence as `false`.**
 
-## 24.3 必须产生的 warning
+## 24.3 Warnings that MUST be produced
 
-| 条件 | warning |
+| Condition | Warning |
 |---|---|
-| 选中的包声明了 `BIND_VPN_SERVICE`（best-effort 检测） | `"0:com.foo declares BIND_VPN_SERVICE; its outer socket will be captured"` |
-| 选中的 UID 有其它 shared-UID 兄弟包 | `"uid 10231 also covers: com.bar, com.baz"` |
-| 用户 JSON 缺少 :53 处理 | `"no hijack-dns rule; selected apps' DNS will be forwarded verbatim and domain rules will not apply"`（§1.3.4） |
-| 系统 Private DNS 非 `off` | `"system private DNS is on; name resolution bypasses Flux"`（§1.3.3 边界①） |
-| 捕获到的 :53 流量 `sk_uid == 1051` | `"enforce_dns_uid appears enabled; system DNS is not per-app attributable on this device"`（边界②） |
-| 用户设了 outbound `routing_mark` / `bind_interface` | `"user-set outbound routing_mark/bind_interface: Android network consequences are yours"` |
-| `clsact` 非我创建 | `"clsact on wlan0 pre-existed; it will never be deleted by Flux"` |
+| A selected package declares `BIND_VPN_SERVICE` (best-effort detection) | `"0:com.foo declares BIND_VPN_SERVICE; its outer socket will be captured"` |
+| A selected UID has other shared-UID sibling packages | `"uid 10231 also covers: com.bar, com.baz"` |
+| User JSON lacks :53 handling | `"no hijack-dns rule; selected apps' DNS will be forwarded verbatim and domain rules will not apply"` (§1.3.4) |
+| System Private DNS is not `off` | `"system private DNS is on; name resolution bypasses Flux"` (§1.3.3 boundary ①) |
+| Captured :53 traffic has `sk_uid == 1051` | `"enforce_dns_uid appears enabled; system DNS is not per-app attributable on this device"` (boundary ②) |
+| The user set outbound `routing_mark` / `bind_interface` | `"user-set outbound routing_mark/bind_interface: Android network consequences are yours"` |
+| Flux did not create `clsact` | `"clsact on wlan0 pre-existed; it will never be deleted by Flux"` |
 
-## 24.4 必须产生的 hint（把 counter 组合翻译成假设）
+## 24.4 Hints that MUST be produced: turning counter combinations into hypotheses
 
-零观测性的反面不是"打印更多数字"，而是**替用户做第一层推理**：
+The opposite of zero observability is not "print more numbers"; it is to **perform the first layer of reasoning for the user**:
 
-| counter 组合 | hint |
+| Counter combination | Hint |
 |---|---|
-| `admit_* > 0` 且 `in_drop_assign > 0` | `"assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"` |
-| `admit_* > 0` 且 `in_drop_no_listener > 0` | `"packets reached the veth but no listener was found; engine may be restarting"` |
-| `egress_listener_miss > 0` 且 `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
-| `direct_tcp > 0` 且 `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"` |
-| 全部 counter 为 0 且 `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
+| `admit_* > 0` and `in_drop_assign > 0` | `"assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"` |
+| `admit_* > 0` and `in_drop_no_listener > 0` | `"packets reached the veth but no listener was found; engine may be restarting"` |
+| `egress_listener_miss > 0` and `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
+| `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"` |
+| All counters are 0 and `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
 | `drop_udp_frag > 0` | `"fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
-| `in_pass_established` 远大于 `in_assign_tcp` | 正常（每条连接一次 assign、多次 pass）。**不产生 hint**，此行只为避免误报 |
+| `in_pass_established` is much greater than `in_assign_tcp` | Normal (one assign and many passes per connection). **Produce no hint**; this row exists only to prevent a false positive |
 
 ---
 

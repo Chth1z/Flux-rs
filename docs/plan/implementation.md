@@ -48,6 +48,9 @@
 | 5 | `webroot/index.html` 进 allowlist | allowlist 当前 14 项，无 webroot | §28.8、§13.1 |
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
 | 7 | 三个维度统一黑/白名单与 `@file` 引用 | `flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键 | §11.2 |
+| 8 | bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump** | loader 恒写 `1`，BPF 只判非空，magic 未变 | §6.1.1、§6.3 |
+
+第 8 项是本表里唯一改 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 必须 bump magic，并同步 `flux_abi.h` 与 `abi.rs` 两侧。
 
 **`guide/` 跟合同走，不跟当前实现走。** 0.9.5 尚未发布，没有用户拿着这份指南去操作 0.9.1 的构建；发布门禁（§20）要求本表清空。
 

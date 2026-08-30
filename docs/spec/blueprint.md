@@ -78,116 +78,234 @@ does not (`../governance.md` GOV-6.2).
 
 ---
 
-# 第 0 部分：独立复核与本文的修正
+# Part 0: Independent review and the corrections it produced
 
-> **已移出本文** → `docs/history/review-log.md`。章节编号未变。含全部「原说法 / 实际 / 处置」更正对照。
-# 第 1 部分：产品合同
+> **Moved out of this document** → `../history/review-log.md`. The section number is unchanged. It holds every claimed / actual / disposition correction.
+# Part 1: The product contract
 
-## 1.1 身份（唯一值）
+## 1.1 Identity
 
-| 项 | 值 |
+| Item | Value |
 |---|---|
-| 产品 / 仓库 | `Flux-rs` |
-| 首发版本 | `0.9.0`；git tag `v0.9.0`；`versionCode=9000` |
-| root module id | `flux_rs`（管理器安装到 `/data/adb/modules/flux_rs`） |
-| 产品状态根 | `/data/adb/flux-rs`，`root:root 0700` |
-| ABI / target | `arm64-v8a` / `aarch64-linux-android`，API 31 |
-| 构建 API level | `aarch64-linux-android` API 31（编译目标，非运行门禁） |
-| 内核基线 | **5.15**（所有者 2026-08-25 决定）。真实门禁是运行时 load/attach/行为成功，禁止按版本字符串放行。实际后果：首发 Android 12 设备（GKI 最高 5.10）不在支持范围，可支持设备基本等于 Android 13 及更新的首发机型 |
-| base page | 只支持 `4096`；其它值 Inactive/Direct |
-| root 管理器 | Magisk / KernelSU / APatch 共同模块信封 |
-| 引擎 | 官方 sing-box，版本由 `engine.lock` 权威（首发 `1.13.19`），零 patch |
-| 许可证 | Flux-rs 自有代码 `GPL-3.0-only`；第三方按原许可证 |
-| 数据面 ABI | `FLUX_ABI_MAGIC`（见 `bpf/include/flux_abi.h`），与 SemVer 无关 |
+| Product / repository | `Flux-rs` |
+| Version | the workspace manifest is the only source; `versionCode` and the module artifact name are derived from it (§13.4). Never restate a literal version here |
+| root module id | `flux_rs`, installed by the manager to `/data/adb/modules/flux_rs` |
+| Product state root | `/data/adb/flux-rs`, `root:root 0700` |
+| ABI / target | `arm64-v8a` / `aarch64-linux-android`, API 31 |
+| Build API level | `aarch64-linux-android` API 31 — a compile target, not a runtime gate |
+| Kernel baseline | **5.15** (owner, 2026-08-25). The real gate is a successful load, attach and behaviour at run time; admitting a device by version string is forbidden. Consequence: devices that shipped with Android 12 (GKI 5.10 at most) are out of scope, so the supportable set is roughly devices that shipped with Android 13 or later |
+| Base page | `4096` only; any other value means Inactive/Direct |
+| Root manager | one module envelope shared by Magisk, KernelSU and APatch |
+| Engine | official sing-box, version pinned by `engine.lock`, zero patches |
+| Licence | Flux-rs's own code is `GPL-3.0-only`; third parties keep theirs |
+| Data-plane ABI | `FLUX_ABI_MAGIC` (`bpf/include/flux_abi.h`), unrelated to SemVer |
 
-## 1.2 0.9.0 必须做
+## 1.2 What Flux MUST do
 
-1. 把 `userId:packageName` 精确解析为 UID，公开 shared UID 合并语义。
-2. 捕获选中 UID **主动发起**的本机 IPv4/IPv6 TCP client flow（在首个 `SYN && !ACK` 上做一次不可变决策）与该 UID 发出的 IPv4/IPv6 UDP datagram。
-3. 在 eBPF 内执行固定安全 bypass、本机自有地址 bypass 与用户 CIDR bypass。不解析域名。
-4. **精准 per-app DNS**：被选中 app 的明文 DNS（含经系统解析器发出的那部分）随其它流量一起进入 engine，未选中 app 的 DNS 不受影响。机制与边界见 §1.3。
-5. 保留原始 L3/L4 header，把 packet 交给官方 sing-box TProxy inbound。
-6. 管理 sing-box 的 `check`、启动、候选切换、退出与崩溃恢复。
-7. 由 rtnetlink / inotify / pidfd / signalfd / BPF ringbuf / 控制 socket / timerfd 驱动状态变化，**无周期轮询**。
-8. 对未知设备布局、能力不足、对象冲突、未支持路径保持 Direct，并在 `status` 给出逐项原因。
-9. 生成单一干净 module ZIP，供三管理器安装。
+1. Resolve `userId:packageName` to a UID exactly, and state the shared-UID
+   merge semantics openly.
+2. Capture IPv4/IPv6 TCP client flows **initiated by** a selected UID — one
+   immutable decision on the first `SYN && !ACK` — and IPv4/IPv6 UDP datagrams
+   sent by that UID.
+3. Apply the fixed safety bypass, the device's own addresses, and the user's
+   CIDR bypass inside eBPF. Resolve no domain names.
+4. **Per-app DNS, precisely.** A selected app's plaintext DNS — including the
+   part the system resolver sends on its behalf — enters the engine with the
+   rest of its traffic, and an unselected app's DNS is untouched. Mechanism and
+   boundaries in §1.3.
+5. Preserve the original L3/L4 headers and hand the packet to the official
+   sing-box TProxy inbound.
+6. Manage the engine's `check`, start, candidate switch, exit and crash
+   recovery.
+7. Drive every state change from rtnetlink, inotify, pidfd, signalfd, the BPF
+   ringbuf, the control socket and timerfd. **No periodic polling** (§29.3
+   records the one deliberate exception and why it is not polling).
+8. Stay Direct on unknown device layouts, missing capabilities, object
+   conflicts and unsupported paths, and give the per-item reason in `status`.
+9. Produce a single clean module ZIP that installs under all three managers.
+10. Generate the engine configuration from a user-owned template and an
+    optional subscription (§28), never by editing a user-owned file.
 
-## 1.3 0.9.0 禁止做（非目标）
+## 1.3 Non-goals
 
-热点 / tethering / LAN ingress / bridge / forwarded traffic；被动入站 TCP 服务端代理；ICMP/ICMPv6/ESP/IPv6 jumbogram；VPN TUN 嵌套 / 接管 / 绕过；网关 / 旁路由 / 容器 / 多 netns；nftables / iptables / TPROXY mark 后端 / 运行时后端选择器；TUN 后端 / 用户态 TCP-IP 栈；**任何 cgroup BPF attach**（含 child `SETSOCKOPT`/`POST_BIND`）；SOCKMAP / `pidfd_getfd` listener handoff；eBPF 内域名/DNS/SNI/规则集/节点选择/连接质量学习；多代理核心 / 多模式 / 插件 / backend registry；WebUI / Flux 自有 Clash 代理层；远程 subscription；在线学习与统计驱动的策略自创；recovery 安装 / 32 位 / x86 / riscv；16 KiB base page；宽泛 SELinux patch；替换 AOSP BPF 程序 / 清空系统 qdisc/rule；旧 Flux 安装的检测/迁移/拒绝/清理；为未来版本预建 schema registry / migration framework / 兼容矩阵。
+Hotspot, tethering, LAN ingress, bridging and forwarded traffic; inbound TCP
+server proxying; ICMP, ICMPv6, ESP and IPv6 jumbograms; nesting inside,
+taking over, or bypassing a VPN TUN; gateway, side-router, container and
+multi-netns deployments; nftables, iptables, a TPROXY-mark backend or any
+runtime backend selector; a TUN backend or a userspace TCP/IP stack; **any
+cgroup BPF attach**, including the child `SETSOCKOPT` and `POST_BIND` slots;
+SOCKMAP or `pidfd_getfd` listener handoff; domain, DNS, SNI, rule-set, node
+selection or connection-quality learning inside eBPF; multiple proxy cores,
+modes, plugins or a backend registry; a Flux-built WebUI or a Flux-owned Clash
+proxy layer; policy invented from online learning or traffic statistics;
+recovery-mode installation, 32-bit, x86 or riscv; a 16 KiB base page; broad
+SELinux patches; replacing AOSP BPF programs or flushing system qdiscs and
+rules; detecting, migrating, rejecting or cleaning up an older Flux
+installation; pre-building a schema registry, migration framework or
+compatibility matrix for a future version.
 
-### 1.3.1 DNS：精准 per-app，机制是 AOSP 自己的 `fchown`
+**Subscription is no longer on this list.** It was excluded from 0.9.1 by
+R091-03 as a scope freeze rather than a permanent refusal, and the owner moved
+C11 into scope on 2026-08-30; it is specified in §28. A Flux-built WebUI (C8)
+and an out-of-the-box control plane (C10) remain excluded, and §28.8 draws the
+line between those and the twelve-line redirect that does ship.
 
-**关键事实（`clone/aosp-DnsResolver` 逐行核对）：Android 默认就把明文 DNS socket 的 owner 改成发起解析的那个 app。**
+### 1.3.1 Per-app DNS works because AOSP already calls `fchown`
 
-- `res_send.cpp:789` 与 `:1092`：`const uid_t uid = statp->enforce_dns_uid ? AID_DNS : statp->uid;`——`statp->uid` 是请求者 UID（由 `DnsProxyListener` 从 dnsproxyd 的 peer 凭据取得）。
-- `resolv_private.h:245-256`：`resolv_tag_socket()` 先调 netd 的 `tagSocket(sock, TAG_SYSTEM_DNS, uid, pid)`，**紧接着执行 `fchown(sock, uid, -1)`**。
-- `binder/android/net/ResolverOptionsParcel.aidl:48-57` 原文：
+**Verified against `clone/aosp-DnsResolver`, line by line: Android already
+changes the owner of a plaintext DNS socket to the app that asked for the
+resolution.**
 
-  > "The default behavior is that plaintext DNS queries are sent by **the application's UID using `fchown()`**. DoT are sent with an UID of AID_DNS. … **false: set application uid on DNS sockets (default)**"
+- `res_send.cpp:789` and `:1092` —
+  `const uid_t uid = statp->enforce_dns_uid ? AID_DNS : statp->uid;`, where
+  `statp->uid` is the requesting UID, taken by `DnsProxyListener` from the
+  dnsproxyd peer credentials.
+- `resolv_private.h:245-256` — `resolv_tag_socket()` calls netd's
+  `tagSocket(sock, TAG_SYSTEM_DNS, uid, pid)` and then **immediately performs
+  `fchown(sock, uid, -1)`**.
+- `binder/android/net/ResolverOptionsParcel.aidl:48-57`, verbatim:
 
-内核侧，`sk->sk_uid` 的定义本身就包含 `fchown`。Linux commit `86741ec25462`（"net: core: Add a UID field to struct sock"，作者 Lorenzo Colitti 是 Android 网络工程师，这个字段就是为这类归属需求加的）写明：the UID is set when userspace calls **`socket()`、`fchown()` 或 `accept()`**；实现是 `sockfs_setattr()` 在 `ATTR_UID` 时同步 `sock->sk->sk_uid`。而 `bpf_get_socket_uid()` 读的正是 `sk->sk_uid`（`net/core/filter.c` → `sock_net_uid()`）。
+  > "The default behavior is that plaintext DNS queries are sent by **the
+  > application's UID using `fchown()`**. DoT are sent with an UID of AID_DNS.
+  > … **false: set application uid on DNS sockets (default)**"
 
-**结论：TC egress 上 `bpf_get_socket_uid(skb)` 对 netd 发出的明文 DNS 包返回的是发起解析的那个 app 的 UID。** 于是 §7.3 的 `uid_policy` 查表**天然**覆盖系统 DNS——不需要端口特判、不需要读 AOSP 私有 map、不需要改 engine UID、不需要全设备劫持 :53。**这就是精准 per-app DNS 分流，零额外机制。**
+On the kernel side, the definition of `sk->sk_uid` includes `fchown` by
+construction. Linux commit `86741ec25462` ("net: core: Add a UID field to
+struct sock") states that the UID is set when userspace calls **`socket()`,
+`fchown()` or `accept()`**; the implementation is `sockfs_setattr()`
+synchronising `sock->sk->sk_uid` on `ATTR_UID`. Its author, Lorenzo Colitti, is
+an Android networking engineer, and the field exists for exactly this kind of
+attribution. `bpf_get_socket_uid()` reads that same field
+(`net/core/filter.c` → `sock_net_uid()`).
 
-注意最后一行的自环问题：**engine 自排除依然成立**。sing-box 以 root 运行，它自己的上游 DNS 查询是 uid 0，永远不在 `uid_policy`（§1.4 只接受 appId 10000–19999）。所以我们既捕获了 app 的系统 DNS，又不会吞掉 engine 的 DNS。全设备劫持 :53 的方案必须靠专用非 root UID 才能达到这个效果，我们免费获得。
+**Therefore `bpf_get_socket_uid(skb)` on TC egress returns the requesting app's
+UID for a plaintext DNS packet sent by netd.** The `uid_policy` lookup of §7.3
+covers system DNS **for free** — no port special case, no reading of a private
+AOSP map, no change to the engine's UID, no device-wide `:53` hijack. That is
+per-app DNS routing with zero additional mechanism.
 
-原先的判断表因此**整体作废**，正确的表是：
+Note what the last row of the table below means for self-capture: **the engine
+excludes itself structurally.** sing-box runs as root, its own upstream DNS
+queries carry uid 0, and uid 0 can never be in `uid_policy` because §1.4 admits
+only appIds 10000–19999. So Flux captures the app's system DNS without
+swallowing the engine's. A device-wide `:53` hijack needs a dedicated non-root
+UID to reach the same place; here it comes for nothing.
 
-| 谁发出的 DNS | TC egress 看到的 `sk_uid` | 是否被捕获 |
+| Who sent the DNS | `sk_uid` seen at TC egress | Captured |
 |---|---|---|
-| 选中 app 自己开 socket（Cronet、QUIC 内 DNS、直接 `sendto(:53)`） | 该 app | **是** |
-| 选中 app 调 `getaddrinfo()` → netd 发明文 UDP/TCP:53 | **该 app**（netd `fchown` 过） | **是** |
-| 未选中 app 的 DNS | 该 app（不在 `uid_policy`） | 否——这正是我们要的 |
-| Private DNS（DoT/DoH） | `AID_DNS`(1051) | 否，见 §1.3.3 |
-| sing-box 自己的上游 DNS | root(0) | 否——自环天然避免 |
+| Selected app's own socket (Cronet, QUIC-internal DNS, direct `sendto(:53)`) | that app | **yes** |
+| Selected app calls `getaddrinfo()`, netd sends plaintext UDP/TCP :53 | **that app**, via netd's `fchown` | **yes** |
+| An unselected app's DNS | that app, absent from `uid_policy` | no — which is the point |
+| Private DNS (DoT/DoH) | `AID_DNS` (1051) | no, see §1.3.3 |
+| sing-box's own upstream DNS | root (0) | no — self-capture is structurally impossible |
 
-**若改为全设备捕获系统 DNS**（§21.1 Q2 选项 B），代价是：① engine 必须换成专用非 root UID，否则捕获 uid-0 的 :53 会把 engine 自己的上游 DNS 也吞进去形成死循环（或者必须强制用户的 `dns` 只用 DoH/DoT 并加一个校验器）；② DNS 变成全设备行为，**未被选中**的 app 的 DNS 也会走代理，于是出现"DNS 走代理、流量走直连"的反向错配；③ 还得处理 **Private DNS**——`clone/box4magisk/box/scripts/box.service:50-58` 在运行期间直接 `settings put global private_dns_mode off` 并在停止时恢复，因为 DoT 走 853 端口、不是 :53，劫持 53 根本抓不到它。也就是说选项 B 的完整形态包含"替用户关掉系统的加密 DNS"。这三点必须一起接受，不能只要好处。
+**Capturing system DNS device-wide instead** — option B of Q2 in
+`../history/rejected-and-deferred.md` §21.1 — costs three things that must be
+accepted together:
 
-### 1.3.2 为什么 iptables/TPROXY 派做不到，而我们做得到
+1. the engine would need a dedicated non-root UID, because capturing uid-0 `:53`
+   would swallow the engine's own upstream DNS into a loop — the alternative
+   being to force the user's `dns` to DoH/DoT only, plus a validator to enforce
+   it;
+2. DNS would become a device-wide behaviour, so **unselected** apps' DNS would
+   also traverse the proxy, producing the inverted mismatch of "DNS proxied,
+   traffic direct";
+3. Private DNS would have to be dealt with. `clone/box4magisk/box/scripts/box.service:50-58`
+   runs `settings put global private_dns_mode off` for the duration and restores
+   it on stop, because DoT uses port 853 rather than :53 and hijacking 53 cannot
+   see it. In other words the complete form of that option includes turning off
+   the user's encrypted DNS on their behalf.
 
-差别不在 Android，而在**两个机制读的是 `struct sock` 的不同字段**：
+### 1.3.2 Why the iptables/TPROXY family cannot do this
 
-| 机制 | 读的字段 | 看得到 netd 的 `fchown` 吗 |
+The difference is not Android. **The two mechanisms read different fields of
+`struct sock`:**
+
+| Mechanism | Field read | Sees netd's `fchown`? |
 |---|---|---|
-| `iptables -m owner --uid-owner`（`xt_owner`） | `skb->sk->sk_socket->file->f_cred->fsuid`——**打开该 socket 的进程的凭据** | **看不到**。`fchown` 改的是 inode owner 与 `sk_uid`，不改 `f_cred` |
-| **`bpf_get_socket_uid()`** | **`sk->sk_uid`** | **看得到**（commit `86741ec25462` 的语义） |
+| `iptables -m owner --uid-owner` (`xt_owner`) | `skb->sk->sk_socket->file->f_cred->fsuid` — **the credentials of the process that opened the socket** | **No.** `fchown` changes the inode owner and `sk_uid`, not `f_cred` |
+| **`bpf_get_socket_uid()`** | **`sk->sk_uid`** | **Yes**, by the semantics of commit `86741ec25462` |
 
-AOSP 自己的测试注释把这件事写死了（`clone/aosp-DnsResolver/tests/resolv_test_utils.h:48-49`）：
+AOSP's own test comments state it outright
+(`clone/aosp-DnsResolver/tests/resolv_test_utils.h:48-49`):
 
-> "netd calls `fchown()` on the DNS query sockets, and **`iptables -m owner` matches the UID of the socket creator, not the UID set by `fchown()`**."
+> "netd calls `fchown()` on the DNS query sockets, and **`iptables -m owner`
+> matches the UID of the socket creator, not the UID set by `fchown()`**."
 
-**这一句解释了整个生态的行为。** 那些 root 模块不是"选择"了全设备劫持 :53，而是被 `xt_owner` 逼的——它们的 per-app 匹配对 DNS 天生失效，只能退回端口劫持，于是不得不承担"未选中 app 的 DNS 也走代理"的反向错配，以及"必须替用户关掉 Private DNS"。下表是它们的实际做法；现在应当理解为**同一个约束下的不同妥协**，而不是可借鉴的设计：
+**That one sentence explains the whole ecosystem.** Those root modules did not
+*choose* a device-wide `:53` hijack; `xt_owner` left them no choice, because
+their per-app matching is structurally blind to DNS. Falling back to port
+hijacking is what forces them to accept the inverted mismatch — unselected apps'
+DNS proxied too — and to turn off the user's Private DNS. Read the table below
+as **different compromises under one constraint**, not as designs to borrow:
 
-| 项目 | per-app 选择 | DNS 处理 | 证据（`clone/` 内一手源码） |
+| Project | per-app selection | DNS handling | Evidence (first-party source under `clone/`) |
 |---|---|---|---|
-| AndroidTProxyShell | `APP_CHAIN` 里 `-m owner --uid-owner "$uid" -j ACCEPT/RETURN` | `DNS_HIJACK_PRE` / `DNS_HIJACK_OUT` 是**独立的链**；`redirect2` 模式对 `nat OUTPUT` 全局 `--dport 53 -j REDIRECT`，只在前面按 uid/gid 放行 core | `tproxy.sh:1226/1242`；`tproxy.sh:1342-1372` |
-| box_for_magisk（BFR） | `-m owner --uid-owner` / `--gid-owner`，**只在 OUTPUT 侧**；PREROUTING 完全无 owner 匹配。README 明说"Android iptables 不支持 PID 匹配，所以进程匹配靠 GID 间接实现"——身份能力比我们**更弱** | 端口 53 的处理在 `box.iptables:458-464`，**排在 app uid/gid 块（478+）之前**，即规则顺序上明确 **anti**-per-app；`CLASH_DNS_LOCAL:568` 只放行 core 后 REDIRECT 全部 UDP/53；`box.iptables:177-178` 还无条件 `ip6tables -A OUTPUT -p udp --dport 53 -j DROP` 封掉全部 IPv6 DNS | `box/scripts/box.iptables` |
-| box4magisk | `APP_PROXY_ENABLE` / `APP_PROXY_MODE` / `PROXY_APPS_LIST`，格式恰好也是 `userID:packageName` | 独立的全局开关 `DNS_HIJACK_ENABLE`（0 关 / 1 tproxy / 2 redirect）+ `DNS_PORT` | `box/scripts/tproxy.conf` |
-| CHIZI sing-box eBPF | cgroup hook 内 `uid_bypassed(config)` 做 include/exclude | 在 cgroup2 **root** attach（因此看得见 netd 的 socket）+ `dns_mode: hijack` 时 **`:53` 完全跳过 UID 判定**。等于放弃 DNS 的 per-app 语义 | `common/ebpf/native/cgroup.bpf.c:491-494` |
-| dae / honk | 进程名靠 cgroupv2 上的 `sock_create` / `connect4/6` / `sendmsg4/6` 维护 `COOKIE_PID_MAP` | 靠拦截 DNS 端口做域名关联；文档承认 UDP 状态难维护，需 `must_direct` 按端口整体放行 | `honk/crates/honk-ebpf/src/cgroup.rs`；dae `docs/en/how-it-works.md` |
+| AndroidTProxyShell | `-m owner --uid-owner "$uid" -j ACCEPT/RETURN` in `APP_CHAIN` | `DNS_HIJACK_PRE` / `DNS_HIJACK_OUT` are **separate chains**; `redirect2` mode applies a global `--dport 53 -j REDIRECT` on `nat OUTPUT`, letting the core through first | `tproxy.sh:1226/1242`; `tproxy.sh:1342-1372` |
+| box_for_magisk | `-m owner --uid-owner` / `--gid-owner`, **OUTPUT side only**; PREROUTING has no owner match at all. Its README says Android iptables cannot match PID, so process matching is done indirectly through GID — a **weaker** identity than ours | Port 53 handling at `box.iptables:458-464` sits **before** the app uid/gid block at 478+, making the rule order explicitly anti-per-app; `CLASH_DNS_LOCAL:568` REDIRECTs all UDP/53 after letting the core through; `box.iptables:177-178` additionally drops all IPv6 DNS unconditionally | `box/scripts/box.iptables` |
+| box4magisk | `APP_PROXY_ENABLE` / `APP_PROXY_MODE` / `PROXY_APPS_LIST`, in the same `userID:packageName` form | A separate global switch `DNS_HIJACK_ENABLE` (0 off / 1 tproxy / 2 redirect) plus `DNS_PORT` | `box/scripts/tproxy.conf` |
+| CHIZI sing-box eBPF | `uid_bypassed(config)` include/exclude inside the cgroup hook | Attaches at the cgroup2 **root**, so it can see netd's socket, and with `dns_mode: hijack` **skips the UID check entirely for `:53`** — abandoning per-app DNS semantics | `common/ebpf/native/cgroup.bpf.c:491-494` |
+| dae / honk | Process identity from `sock_create` / `connect4/6` / `sendmsg4/6` on cgroupv2, maintaining `COOKIE_PID_MAP` | Domain association by intercepting the DNS port; the documentation concedes UDP state is hard to maintain and needs `must_direct` to exempt whole ports | `honk/crates/honk-ebpf/src/cgroup.rs`; dae `docs/en/how-it-works.md` |
 
-**dae 与 CHIZI 的进程/系统-DNS 能力在 Android 上都不可移植到 TC 数据面**：前者拿进程身份、后者看见 netd 的 socket，都依赖 Android 已用 `flags=0` 独占的那几个 cgroup attach type（§0.1(2)、§0.5.2）。而 CHIZI 为避免自环用的是 **TGID**，那需要 cgroup hook 的进程上下文——TC egress 在 softirq 里没有这个上下文（§0.5.3）。
+**Neither dae's process identity nor CHIZI's view of netd ports to a TC data
+plane on Android.** Both depend on the cgroup attach types Android already holds
+exclusively with `flags=0` (§3.2, with the source review at
+`../history/review-log.md` §0.5.2). CHIZI avoids self-capture using the
+**TGID**, which requires the process context a cgroup hook has and TC egress,
+running in softirq, does not (§0.5.3).
 
-**netd 内部也确实知道请求者 UID**，并用它选网络：`DnsProxyListener` 取 `const uid_t uid = cli->getUid()`，`NetworkController::getNetworkForDns(netId, uid)` 按「显式选定网络 → 该 UID 的 VPN（若 VPN 提供 DNS server）→ 默认网络」决策。VpnService 因此从平台白拿 per-app DNS。**而 `fchown` 把同一份归属信息也放进了 packet 的 socket owner**，所以 eBPF 数据面同样拿得到——只是 netfilter 因为读错字段而拿不到。
+**netd does know the requesting UID internally** and uses it to pick a network:
+`DnsProxyListener` reads `const uid_t uid = cli->getUid()` and
+`NetworkController::getNetworkForDns(netId, uid)` decides between an explicitly
+selected network, that UID's VPN if it provides DNS servers, and the default.
+VpnService gets per-app DNS from the platform for free this way. **`fchown` puts
+the same attribution into the packet's socket owner**, so an eBPF data plane can
+reach it too — netfilter simply reads the wrong field.
 
-### 1.3.3 DNS 的三条残余边界（必须写进 README，不得含糊）
+### 1.3.3 Three residual DNS boundaries, to be stated plainly
 
-**① Private DNS（DoT / DoH strict mode）不被捕获，Flux 也不去关它。**
-AOSP 刻意把加密 DNS 归属给 `AID_DNS`(1051) 而不是 app：`DnsTlsSocket.cpp:82`、`DnsTlsTransport.cpp:107`、`PrivateDnsConfiguration.cpp:593` 三处都是 `resolv_tag_socket(fd, AID_DNS, NET_CONTEXT_INVALID_PID)`。它走 :853/:443、跨 app 复用长连接，天生不可 per-app 归属。
+**① Private DNS (DoT / DoH strict mode) is not captured, and Flux does not turn
+it off.** AOSP deliberately attributes encrypted DNS to `AID_DNS` (1051) rather
+than to the app: `DnsTlsSocket.cpp:82`, `DnsTlsTransport.cpp:107` and
+`PrivateDnsConfiguration.cpp:593` all call
+`resolv_tag_socket(fd, AID_DNS, NET_CONTEXT_INVALID_PID)`. It runs over :853 or
+:443 on long-lived connections shared across apps, so it is inherently not
+per-app attributable.
 
-后果：用户若开启系统 Private DNS，域名解析走 DoT 出去，不经过 Flux。这在**隐私上是好的**（本来就是加密的），但意味着 sing-box 看不到该解析、无法用自己的 DNS 决定目的 IP。`clone/box4magisk/box/scripts/box.service:50-58` 的做法是运行期间 `settings put global private_dns_mode off`；**0.9.0 拒绝这么做**——不擅自改用户的系统设置。正确做法是在 `status` 里检测并提示：若 `private_dns_mode` 非 `off`，告知"系统加密 DNS 已启用，域名解析不经过 Flux"，由用户自己决定。
+Consequence: with system Private DNS on, resolution leaves over DoT and does not
+pass through Flux. That is **good for privacy** — it was already encrypted — but
+it means sing-box cannot see the resolution and cannot use its own DNS to decide
+the destination IP. `clone/box4magisk/box/scripts/box.service:50-58` handles this
+by running `settings put global private_dns_mode off` for the duration.
+**Flux MUST NOT do that.** Changing a user's system settings on their behalf is
+not ours to do. The correct behaviour is to detect and report: when
+`private_dns_mode` is not `off`, `status` says that system encrypted DNS is on
+and that name resolution does not pass through Flux, and the user decides.
 
-**② `enforce_dns_uid` 会毁掉归属。**
-`ResolverOptionsParcel.aidl:48-57` 定义了一个可由 OEM / 网络配置打开的选项，打开后明文 DNS 也用 `AID_DNS`。AOSP 自己在注释里劝退它（"decreases battery life"、"data usage … attributed to the OS instead of to the requesting app"），所以罕见。检测方式很直接：捕获到的 :53 流量若 `sk_uid == 1051`，说明该设备开了这个开关。此时该设备的系统 DNS 退化为不可 per-app 捕获——**行为等于不捕获，不是错误**，`status` 报告即可。
+**② `enforce_dns_uid` destroys the attribution.**
+`ResolverOptionsParcel.aidl:48-57` defines an option an OEM or a network
+configuration may enable, after which plaintext DNS also uses `AID_DNS`. AOSP's
+own comments argue against it ("decreases battery life", "data usage … attributed
+to the OS instead of to the requesting app"), so it is rare. Detection is direct:
+captured :53 traffic carrying `sk_uid == 1051` means the device has it on. System
+DNS then degrades to not being per-app capturable — **the behaviour is
+non-capture, which is not an error** — and `status` reports it.
 
-**③ mDNS 不捕获。** `.local` 解析走 `224.0.0.251:5353` / `[FF02::FB]:5353`，落在固定 bypass 的 `224.0.0.0/4` 与 `ff00::/8` 里，直连。这是正确行为。
+**③ mDNS is not captured.** `.local` resolution goes to `224.0.0.251:5353` and
+`[FF02::FB]:5353`, which fall inside the fixed bypass prefixes `224.0.0.0/4` and
+`ff00::/8`, and is therefore direct. That is the correct behaviour.
 
-另有一处 `fchown` 站点 `getaddrinfo.cpp:1330` 带 `uid > 0 && uid != NET_CONTEXT_INVALID_UID` 的守卫；语义与上文一致，不改变结论。
+One further `fchown` site, `getaddrinfo.cpp:1330`, is guarded by
+`uid > 0 && uid != NET_CONTEXT_INVALID_UID`. Its semantics match the above and
+it changes no conclusion.
 
-### 1.3.4 用户 sing-box 配置必须处理 :53（默认配置要带）
+### 1.3.4 The engine config must handle :53, and the shipped default does
 
-既然被选中 app 的 DNS 会进入 tproxy inbound，用户的 `sing-box.json` **必须**告诉 sing-box 如何处理它，否则 sing-box 会把它当普通 UDP 转发到原始 DNS 服务器——功能上能用，但等于放弃了域名分流。标准做法是 `route.rules` 里的 `hijack-dns` action（`clone/AndroidTProxyShell/README.md` 的 sing-box 样例就是这个）：
+Because a selected app's DNS arrives at the tproxy inbound, the configuration
+MUST tell sing-box what to do with it. Otherwise sing-box forwards it as
+ordinary UDP to the original DNS server — functional, but it gives up domain
+routing entirely. The standard form is a `hijack-dns` action in `route.rules`,
+which is what the sing-box example in `clone/AndroidTProxyShell/README.md` uses:
 
 ```jsonc
 {
@@ -202,284 +320,558 @@ AOSP 刻意把加密 DNS 归属给 `AID_DNS`(1051) 而不是 app：`DnsTlsSocket
 }
 ```
 
-`hijack-dns` 把该 datagram 交给 sing-box 的 `dns` 模块，于是域名规则、`dns.rules`、fakeip（若用户配置）全部生效，**且只对被选中的 app 生效**。这是本设计相对全设备劫持方案的实质优势：DNS 分流范围与流量分流范围**严格一致**。
+`hijack-dns` hands the datagram to sing-box's `dns` module, so domain rules,
+`dns.rules` and fakeip all take effect — **and only for the selected apps**.
+This is the substantive advantage over a device-wide hijack: the scope of DNS
+routing and the scope of traffic routing are **exactly the same set**.
 
-Flux **不注入**这段——路由与 DNS 属 sing-box 的权威域（§9.6）。但：
+Flux MUST NOT inject these rules. Routing and DNS are sing-box's authority
+(§9.6). But:
 
-- 随模块分发的 `etc/default-sing-box.json` **必须**包含上面这两条 rule，作为可工作的起点；
-- `fluxd check` 在用户 JSON 缺少 `hijack-dns`（或等价的 :53 处理）时**给出警告**，不阻止启动；
-- README 必须说明这两条 rule 的作用。
+- the shipped `etc/default-template.json` MUST contain both rules, as a working
+  starting point (§27.2.3);
+- `fluxd check` MUST warn, and MUST NOT refuse to start, when the user's config
+  has no `hijack-dns` or equivalent :53 handling (§23);
+- `../guide/` must explain what the two rules do.
 
-### 1.3.5 分流精度的第二层：sing-box 侧的 `package_name` 规则可用
+### 1.3.5 The second layer of precision: `package_name` rules work in sing-box
 
-**观察（`clone/sing-box-official-1.13.19` 逐行核对）**：官方 Android 二进制**独立运行**（无 GUI/library platform interface）时会自己初始化 PackageManager：
+**Verified against `clone/sing-box-official-1.13.19`, line by line:** the
+official Android binary initialises a PackageManager of its own when running
+**standalone**, with no GUI or library platform interface:
 
 ```go
 // route/network.go:175-192
 if C.IsAndroid && r.platformInterface == nil {
-    packageManager, err := tun.NewPackageManager(...)   // 读 /data/system/packages.xml
+    packageManager, err := tun.NewPackageManager(...)   // reads /data/system/packages.xml
     ...
     r.packageManager = packageManager
 }
 ```
 
-于是 `route/router.go:130-146` 会构建 `process.NewSearcher{PackageManager: ...}`，在 Android 上落到 `common/process/searcher_android.go`：
+`route/router.go:130-146` therefore builds a `process.NewSearcher{PackageManager: ...}`, which on Android resolves to `common/process/searcher_android.go`:
 
 ```go
-_, uid, err := querySocketDiagOnce(family, protocol, source)   // NETLINK_SOCK_DIAG 查源 socket
+_, uid, err := querySocketDiagOnce(family, protocol, source)   // NETLINK_SOCK_DIAG on the source socket
 appID := uid % 100000
 packageNames = s.packageManager.PackagesByID(appID)
 ```
 
-因为我们**不改写源地址**，engine 看到的 source 就是 app 的真实 IP:port，SOCK_DIAG 查得到那个 socket。因此：
+Because **the source address is never rewritten**, the source the engine sees is
+the app's real IP:port and SOCK_DIAG finds that socket. Therefore:
 
-- 用户可以在 `route.rules` / `dns.rules` 里写 **`package_name`** 与 `process_name`，按 app 选不同 outbound、不同 DNS。
-- **对系统解析器发出的 DNS 同样成立**：inet_diag 的 `idiag_uid` 取自 `sock_i_uid(sk)`（inode owner），而 `fchown` 正是改这个字段——与 §1.3.1 的 `sk_uid` 链路同源。所以 app 的系统 DNS 在 engine 里也会被正确归属到该 app 的包名。
+- users can write **`package_name`** and `process_name` in `route.rules` and
+  `dns.rules`, choosing a different outbound or DNS per app;
+- **this holds for system-resolver DNS as well.** inet_diag's `idiag_uid` comes
+  from `sock_i_uid(sk)`, the inode owner, which is precisely the field `fchown`
+  writes — the same chain as `sk_uid` in §1.3.1. So an app's system DNS is
+  attributed to that app's package name inside the engine too.
 
-**两层精度因此是这样分工的**：
+The two layers of precision divide as follows:
 
-| 层 | 决定什么 | 依据 |
+| Layer | Decides | Basis |
 |---|---|---|
-| Flux（内核，TC） | **是否**捕获 | `uid_policy` 查 `bpf_get_socket_uid()` |
-| sing-box（用户态） | 捕获之后**怎么走**（outbound、DNS server、规则集） | SOCK_DIAG → appId → package name |
+| Flux, in-kernel at TC | **whether** to capture | `uid_policy` lookup on `bpf_get_socket_uid()` |
+| sing-box, in userspace | **where it goes** once captured: outbound, DNS server, rule-set | SOCK_DIAG → appId → package name |
 
-Flux 不注入任何 `package_name` 规则，也不替用户维护包名表——这属 sing-box 的权威域。但 README 应当说明这条能力存在，因为它是"精准分流"的第二半。
+Flux MUST NOT inject any `package_name` rule and MUST NOT maintain a package
+table on the user's behalf; that is sing-box's authority. `../guide/` should say
+the capability exists, because it is the second half of precise routing.
 
-**待证**：`tun.NewPackageManager` 在目标设备上能否成功读取包数据库（失败时 sing-box 只 warn 并继续，届时 `package_name` 规则静默不匹配）。Phase 0 Q9 顺带验证。
+**Unproven:** whether `tun.NewPackageManager` can read the package database on a
+given device. On failure sing-box only warns and continues, and `package_name`
+rules then silently match nothing.
 
-**用户 CIDR bypass 对 :53 同样生效。** 旧 cgroup 实现里有一段 `should_bypass_v4/v6` 在 `dport == 53` 时直接返回 0，即用户 bypass 永远豁免不了 53 端口（`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`）；CHIZI 的 `dns_mode: hijack` 更进一步，连 UID 判定都跳过（§0.5.3）。**0.9.0 都不采用。** 用户把 `192.168.0.0/16` 写进 `bypass_cidrs` 是在明确表达"局域网直连"，此时强行把 app 对路由器 `192.168.1.1:53` 的查询送进代理会打断本地名称解析，而且是用户无法关掉的隐藏行为。让显式配置说话；需要"DNS 永不 bypass"的用户不要把 DNS 服务器写进 bypass 即可。
+**The user's CIDR bypass applies to :53 as well.** The previous cgroup
+implementation had `should_bypass_v4/v6` return 0 whenever `dport == 53`, so a
+user bypass could never exempt port 53
+(`crates/flux-platform/src/bpf/prog/flx_sock_addr.c:261-292`); CHIZI's
+`dns_mode: hijack` goes further and skips the UID check outright. **Flux adopts
+neither.** Writing `192.168.0.0/16` into the bypass list is an explicit statement
+that the LAN goes direct; forcing an app's query to its router at
+`192.168.1.1:53` through the proxy anyway would break local name resolution, as
+hidden behaviour the user cannot turn off. Let the explicit configuration speak.
+A user who wants DNS never bypassed simply keeps the DNS server out of the
+bypass list.
 
-## 1.4 选择单位与身份边界
+## 1.4 Unit of selection, and the limits of identity
 
-- 配置单位 `userId:packageName`；内核执行单位 UID = `userId * 100000 + appId`。
-- **只接受 `appId ∈ [10000, 19999]`。** 其它一律配置错误。
-- shared UID 下所有 package/process 一并命中，无法逐包区分；`check`/`status` 必须显示同 UID 的全部 package。
-- isolated UID（90000+）、SDK sandbox UID、临时子 UID 不自动跟随。
-- **代发流量按代发者的 UID 归属，不按请求者。** DNS 是**例外**（AOSP 用 `fchown` 把归属还给了 app，见 §1.3.1），但其它代发路径没有这个待遇：`DownloadManager` 代下载、`MediaProvider`、跨 Binder 传递的 socket、以及系统服务代发的连接，都以**代发进程的 UID** 出现在 TC egress，因此**不会**被捕获。CHIZI 在自己的 README 里也把这条列为包名策略的边界。这是 UID 级捕获的固有属性，不是缺陷，但必须写进 README。
-- 用户若选中一个 VPN provider，其 outer socket 会被嵌套捕获。`check`/`status` 尽力告警，但不阻止。
+- The configuration unit is `userId:packageName`; the kernel enforcement unit is
+  `UID = userId * 100000 + appId`.
+- **Only `appId ∈ [10000, 19999]` is accepted.** Anything else is a
+  configuration error.
+- A shared UID selects every package and process under it, with no way to
+  distinguish them per packet. `check` and `status` MUST list every package
+  sharing the UID.
+- Isolated UIDs (90000+), SDK sandbox UIDs and temporary child UIDs do not
+  follow automatically.
+- **Traffic sent on an app's behalf is attributed to the sender, not the
+  requester.** DNS is the **exception**, because AOSP gives the attribution back
+  with `fchown` (§1.3.1); nothing else gets that treatment. A `DownloadManager`
+  download, `MediaProvider`, a socket passed across Binder, and connections made
+  by system services on an app's behalf all appear at TC egress with the
+  **sending process's UID**, and are therefore **not** captured. CHIZI lists the
+  same boundary for its package policy. This is an inherent property of UID-level
+  capture rather than a defect, and it MUST be stated to users.
+- Selecting a VPN provider captures its outer socket, nested. `check` and
+  `status` warn where they can, but do not refuse.
 
-## 1.5 信任与威胁边界
+## 1.5 Trust and threat boundary
 
-信任：设备 root、三个 root 管理器、模块目录、本地配置管理员、用户提供的 sing-box JSON（视为受信**代码级**配置；`sing-box check` 只验语法语义，不是沙箱）。
+Trusted: device root, the three root managers, the module directory, the local
+configuration administrator, and the user's sing-box JSON — treated as trusted
+**code-level** configuration, since `sing-box check` validates syntax and
+semantics rather than sandboxing anything.
 
-**不抵抗**：另一个恶意 root（可写 BPF map、改 TC/RPDB、注入 veth）；恶意本地进程扫描内部端口并在某个 listener 单独关闭的竞态里用 `IP_FREEBIND` 抢绑同 tuple。随机端口与 promote 时的 SOCK_DIAG/PID/inode 交叉核验只降低**非对抗**碰撞概率。把当前 seam 包装成对 hostile root/app 的安全隔离是伪安全。
+**Not defended against:** a second hostile root, which can write the BPF maps,
+change TC and the RPDB, or inject a veth; and a hostile local process that scans
+the internal ports and wins a race with `IP_FREEBIND` on the same tuple while one
+listener is briefly closed. Random ports and the SOCK_DIAG/PID/inode cross-check
+at promotion only reduce the probability of a **non-adversarial** collision.
+Presenting the current seam as security isolation against a hostile root or app
+would be false assurance.
 
 ---
 
-## 1.6 eBPF 能力边界：已评估的加速手段与容量
+## 1.6 What eBPF can and cannot buy here
 
-本节回答三个问题：分流够不够精准、eBPF 能不能做加速、能不能承载大规模 CIDR。它们是同一个问题的三面，所以放在一起。
+Three questions with one answer: how precise the routing is, whether eBPF can
+accelerate anything, and whether it can carry a large CIDR set.
 
-### 1.6.1 大规模 CIDR bypass：能，而且严格优于 ipset
+### 1.6.1 A large CIDR bypass is strictly better than ipset
 
-`BPF_MAP_TYPE_LPM_TRIE` 就是为这件事设计的。与旧版 Flux 的 `BYPASS_SET_BACKEND=zone|ipset` 相比：
+`BPF_MAP_TYPE_LPM_TRIE` exists for this. Against the older Flux's
+`BYPASS_SET_BACKEND=zone|ipset`:
 
-| | iptables 跳转树 | ipset `hash:net` | **`LPM_TRIE`** |
+| | iptables jump tree | ipset `hash:net` | **`LPM_TRIE`** |
 |---|---|---|---|
-| 到达匹配的代价 | 遍历链 | 遍历链到 `-m set` | **无**——我们的程序已经在跑，一次 helper 调用 |
-| 查找复杂度 | O(规则数) | O(1) 哈希，但需按前缀长度分桶重试 | O(前缀位数)，实际远小于 |
-| 万级 CIDR | 不可行 | 可行 | **可行** |
-| 内存 | 每条规则一个链项 | 预分配哈希表 | `LPM_TRIE` **内核强制 `BPF_F_NO_PREALLOC`**，按需分配 |
+| Cost of reaching the match | walk the chain | walk the chain to `-m set` | **none** — our program is already running; one helper call |
+| Lookup complexity | O(rules) | O(1) hash, but retried per prefix-length bucket | O(prefix bits), far less in practice |
+| Tens of thousands of CIDRs | not viable | viable | **viable** |
+| Memory | one chain entry per rule | preallocated hash table | the kernel **forces `BPF_F_NO_PREALLOC`**; allocated on demand |
 
-最后一行是关键：**`max_entries` 对 `LPM_TRIE` 只是上限，不是预分配量。** 把它设成 65536 在不用时代价为零。
+The last row is the one that matters: **`max_entries` is a ceiling for an
+`LPM_TRIE`, not an allocation.** Setting it to 65536 costs nothing while unused.
 
-**因此 `FLUX_LPM_MAX_ENTRIES` 从 128 提到 65536。** 参考量级：`chnroute` 的 IPv4 列表约 1 万条，完全在范围内。批量装载用 `BPF_MAP_UPDATE_BATCH`（5.6+，基线 5.15 具备），一次 syscall 灌入上千条。
+For scale, the `chnroute` IPv4 list is roughly ten thousand entries, well inside
+that. Bulk loading uses `BPF_MAP_UPDATE_BATCH` (5.6+, present on the 5.15
+baseline), which admits thousands of entries per syscall.
 
-### 1.6.2 但这不是"把路由策略搬进 Flux"
+### 1.6.2 This is not "move routing policy into Flux"
 
-§1.4 规定 Flux 只做 UID 粗分流，域名与规则归 sing-box。大 CIDR 集看似越界，**框架要摆正**：
+§1.4 confines Flux to coarse UID selection and leaves domains and rules to
+sing-box. A large CIDR set looks like a breach of that, so the framing has to be
+exact:
 
-它不是路由策略，而是**避免一次已知无用的用户态往返**。如果某个目的地无论如何都会被 sing-box 判为 direct，那么把它捕获、跨 veth、拷进用户态、再让 sing-box 发一遍，是纯粹的浪费。在 eBPF 里 bypass 掉，这些包**根本不离开原路**。
+it is not routing policy, it is **avoiding a userspace round trip already known
+to be useless**. If a destination would be judged direct by sing-box no matter
+what, then capturing it, crossing the veth, copying it into userspace and having
+sing-box send it again is pure waste. Bypassed in eBPF, those packets **never
+leave their original path**.
 
-收益是可量化的：一个在国内使用的用户，若代理浏览器，境内流量往往占多数——这部分省掉的是 veth 跳、用户态拷贝、以及第二条 TCP 连接。
+The saving is concrete: a user who proxies a browser but whose traffic is mostly
+domestic skips the veth hop, the userspace copy and a second TCP connection for
+the majority of it.
 
-**两条必须写清的语义边界**：
+**Two semantic boundaries MUST be stated:**
 
-1. **只能按目的 IP，不能按域名。** 它补充而不取代 sing-box 的域名规则。
-2. **bypass 的判定在 sing-box 之前，且是终局的。** 若某域名解析到一个被 bypass 的 IP，即使用户在 sing-box 里希望它走代理，**也不会被捕获**。这个优先级必须在文档和 `explain` 输出里说明，否则会成为"我配了规则为什么不生效"的困惑来源。
+1. **Destination IP only, never domain.** It supplements sing-box's domain rules
+   rather than replacing them.
+2. **The bypass decision precedes sing-box and is final.** If a domain resolves
+   to a bypassed IP, it is **not captured**, even when the user's sing-box
+   configuration wants it proxied. This ordering must be visible in the
+   documentation and in diagnostics, or it becomes the "why doesn't my rule
+   work" question.
 
-### 1.6.3 容量：实测暴露的缺陷
+### 1.6.3 Capacity, corrected by measurement
 
-一台真机（SM-S9180）的 `packages.list` 里，`[10000,19999]` 范围内有 **429 个 app**。而原先的 `FLUX_UID_SELECTED_MAX = 128`、`FLUX_UID_POLICY_MAX_ENTRIES = 512`。
+Measured on SM-S9180: `packages.list` holds **429 apps** in the
+`[10000, 19999]` range. The original constants were
+`FLUX_UID_SELECTED_MAX = 128` and `FLUX_UID_POLICY_MAX_ENTRIES = 512`.
 
-这意味着**"选中全部第三方应用"这个最自然的 auto 模式在设计上是做不到的**。更糟的是 `uid_policy` 的 512：按 ABI 规定，`FLUX_UID_DRAINING` 条目在一个 boot 内**永不删除**（删了会让已捕获 socket 的包泄漏到真实目的地），所以用户每改一次选择都会累积 draining 条目。429 选中 + 若干次改动 = 撑爆 512。
+So **selecting every third-party app — the most natural thing a user might
+ask for — was structurally impossible.** The 512 was worse than it looks: by the
+ABI, a `FLUX_UID_DRAINING` entry is **never removed within a boot**, because
+removing it would leak an already-captured socket's packets to the real
+destination. Every change to the selection therefore accumulates draining
+entries, and 429 selected plus a few edits exceeds 512.
 
-修正后的容量：
+The capacities are the ones below, and this table is the only place they are
+stated in prose; `bpf/include/flux_abi.h` is the source of truth (§6.1).
 
-| 常量 | 原 | 新 | 依据 |
-|---|---:|---:|---|
-| `FLUX_UID_SELECTED_MAX` | 128 | **1024** | 覆盖"装满 app 的设备上全选"，实测 429，留一倍余量 |
-| `FLUX_UID_POLICY_MAX_ENTRIES` | 512 | **4096** | 必须容纳 selected + 一个 boot 内累积的 draining。HASH 预分配 4096 × 约 64 B ≈ 256 KB，可接受 |
-| `FLUX_LPM_MAX_ENTRIES` | 128 | **65536** | §1.6.1。`NO_PREALLOC` 强制，未用不占 |
-| `FLUX_SELF_ADDR_MAX_ENTRIES` | 32 | **64** | §1.6.4 的 flag 过滤能压住 churn，但 IPv6 隐私地址仍会轮换 |
+| Object | Capacity | Basis |
+|---|---:|---|
+| `uid_policy` | 4096 | must hold selected plus a boot's accumulated draining. A preallocated HASH of 4096 × ~64 B ≈ 256 KB is acceptable |
+| Simultaneously `SELECTED` | 1024 | covers selecting everything on a full device; 429 measured, with room to double |
+| `bypass_v4` / `bypass_v6` | 65536 each | §1.6.1; `LPM_TRIE` with `NO_PREALLOC`, so unused capacity is free |
+| `self_addr_v4` / `self_addr_v6` | 256 each | exact HASH, see §1.6.3a |
+| `uid_stats` | 4096 | `PERCPU_HASH`, §1.6.6 |
 
-### 1.6.3a 一个必须先处理的内核缺陷：LPM trie 在 6.6.0–6.6.46 会崩
+Local addresses go only into the two self-address HASH maps and never into the
+LPM. The desired policy set is therefore computed as three separate things:
+`selected_uids`, the user and fixed LPM prefixes, and the dynamic self-address
+set.
 
-把 CIDR bypass 建在 `LPM_TRIE` 上之前，有一个**内核崩溃**风险要处理，来源是 CHIZI 的 sing-box eBPF 分支文档（它在 Android 上长期实测）：
+`uid_stats` is the second class of per-CPU state §7.1 permits. It updates only
+on already-captured packets and does not touch the hot path of an unselected
+UID.
 
-> Linux 6.6.0 至 6.6.46 存在 LPM trie UBSAN 内核崩溃风险。涉及 UID/包名筛选、`bypass_rule_set` 或 shared 来源 CIDR 时，sing-box 会在已知未修复内核上拒绝启动相关策略。请升级到 6.6.47+，或使用包含上游修复的厂商内核。
+### 1.6.3a The LPM trie crashes on 6.6.0–6.6.46
 
-**这直接命中我们**：`android15-6.6` 是 GKI 分支之一，落在产品支持范围内；而崩溃不是"功能失效"，是**设备重启**。
+Before building a CIDR bypass on `LPM_TRIE`, a **kernel crash** has to be dealt
+with. The source is CHIZI's sing-box eBPF branch documentation, which has long
+field exposure on Android:
 
-三条处置：
+> Linux 6.6.0 through 6.6.46 carry a risk of an LPM trie UBSAN kernel crash.
+> Where UID or package filtering, `bypass_rule_set` or shared-source CIDRs are
+> involved, sing-box refuses to start the affected policy on a known-unfixed
+> kernel. Upgrade to 6.6.47+, or use a vendor kernel carrying the upstream fix.
 
-1. **本机地址集改用精确 HASH，不用 LPM。** 这一条独立于缺陷也成立，而且是更好的设计：本机地址永远是全长前缀（`/32`、`/128`），用 LPM 做精确匹配本就是浪费。HASH 是 O(1)、删除干净（对 §1.6.4 的 IPv6 隐私地址轮换尤其重要）。CHIZI 也正是这么规避的——"使用精确 HASH map 保存本机地址，规避部分 Linux 6.6 LPM trie 崩溃问题"。
-   
-   因此 map 集从 9 张变 12 张（D23 的 uid_stats 也在其中）：`bypass_v4` / `bypass_v6` 保留 `LPM_TRIE` 供**前缀**用，新增 `self_addr_v4` / `self_addr_v6` 用 `HASH` 存本机地址。`FLUX_SELF_ADDR_MAX_ENTRIES` 随之取消——两者不再共用容量。
+**This lands on us directly.** `android15-6.6` is one of the GKI branches inside
+the supported range, and the failure is not degraded function — it is a **device
+reboot**.
 
-2. **大 CIDR 集仍需 LPM，因此必须版本门禁。** 内核在 6.6.0–6.6.46 区间且用户配了 `bypass.files` 时，**拒绝加载该策略并明确报告**，而不是照常加载然后等着崩。判定方式仍是运行时探测优先，但这一条**只能靠版本判断**——崩溃无法安全探测。这是全设计里唯一允许按版本 gate 的地方，理由要写在代码注释里。
+Three consequences:
 
-3. **固定 bypass 集（回环、私网、多播、listener）条目很少且全是短前缀**，风险面小，但为一致起见同样受第 2 条门禁保护。
+1. **Local addresses use an exact HASH, not the LPM.** This holds independently
+   of the defect and is the better design anyway: a local address is always a
+   full-length prefix (`/32`, `/128`), so using LPM for an exact match was always
+   waste. HASH is O(1) and deletes cleanly, which matters for the IPv6 privacy
+   address rotation of §1.6.4. CHIZI avoids the crash the same way — "exact HASH
+   maps for local addresses, avoiding some Linux 6.6 LPM trie crashes".
 
-### 1.6.4 本机地址 bypass 必须按 address flag 过滤
+   The map set is therefore 12 rather than 9: `bypass_v4` / `bypass_v6` keep
+   `LPM_TRIE` for **prefixes**, and `self_addr_v4` / `self_addr_v6` are added as
+   `HASH` for local addresses. The two no longer share a capacity.
 
-D7 规定把本机所有单播地址动态注入 bypass。**这个规定不完整**，旧版 Flux 的 `addrsyncd` 暴露了缺口——它的配置里有一项 `ignore_addr_flags`，可选值是 `temporary | optimistic | deprecated | tentative | dadfailed | stable_privacy | managetempaddr`。
+2. **A large CIDR set still needs the LPM, so a version gate is required.** When
+   `uname -r` falls in 6.6.0–6.6.46, Flux MUST stay `Inactive` before creating or
+   filling any LPM, MUST report `unsupported_lpm_trie_kernel:<release>`, and MUST
+   NOT probe by performing a real LPM operation, because the probe itself can
+   reboot the device.
 
-那不是过度设计，是必需的：
+   **The gate cannot be conditional on the user configuring a large list.** Every
+   valid policy uses the fixed bypass LPM, so gating only on `bypass.files` would
+   leave the default configuration exposed. This is the **only** place in the
+   design where a kernel version string may deny activation, and the reason MUST
+   be stated in the code comment; every other capability is decided by attempting
+   the real operation (§1.1).
 
-| flag | 为什么要处理 |
+### 1.6.4 Local-address bypass MUST filter on the address flags
+
+D7 requires every local unicast address to be injected into the bypass set
+dynamically. **That requirement is incomplete**, and the older Flux's
+`addrsyncd` shows the gap: its configuration carries an `ignore_addr_flags`
+option accepting `temporary | optimistic | deprecated | tentative | dadfailed |
+stable_privacy | managetempaddr`.
+
+That was not over-engineering. It is necessary:
+
+| Flag | Why it must be handled |
 |---|---|
-| `tentative` | DAD 未完成，地址还不可用。此时注入是错的 |
-| `dadfailed` | 地址冲突，永不可用 |
-| `temporary` / `stable_privacy` | **IPv6 隐私扩展地址会定期轮换**（常见为每天）。不过滤就会持续累积，撑爆 `SELF_ADDR_MAX_ENTRIES` |
-| `deprecated` | 仍服务于既有连接，**要保留**——不能因为它被弃用就移除 bypass |
+| `tentative` | DAD has not finished and the address is not usable yet; injecting it now is wrong |
+| `dadfailed` | the address collided and will never be usable |
+| `temporary` / `stable_privacy` | **IPv6 privacy addresses rotate**, commonly daily. Without filtering they accumulate until the self-address map is full |
+| `deprecated` | still serving existing connections, so it **must be kept** — being deprecated is not a reason to withdraw the bypass |
 
-因此 §10.4 的地址观测必须：读 `IFA_FLAGS`；`tentative`/`dadfailed` **不注入**；`deprecated` **保留**；`temporary`/`stable_privacy` 注入但**按 LRU 淘汰**，上限即 `FLUX_SELF_ADDR_MAX_ENTRIES`。
+The address observer of §10.4 therefore MUST read `IFA_FLAGS`; MUST NOT inject
+`tentative` or `dadfailed`; MUST retain `deprecated`; and MUST inject
+`temporary` and `stable_privacy` under **LRU eviction** bounded by the
+self-address capacity of §1.6.3.
 
-### 1.6.5 逐项评估过的加速手段
+### 1.6.5 Every acceleration considered, and what came of it
 
-| 手段 | 结论 |
+| Technique | Conclusion |
 |---|---|
-| **旧版的 `PERFORMANCE_MODE`**（`-m socket` + conntrack `--ctdir REPLY -j ACCEPT` 快路径） | **已被结构性超越。** 那是为了让已建立连接跳过规则链遍历；我们的 `tcp_decision`（`SK_STORAGE`）是 per-socket O(1) 查找，根本没有链可遍历（§7.3 的 E2 在 E3 之前）。无需移植 |
-| **旧版的 `MSS_CLAMP_ENABLE`**（钳制 TCP MSS 以修运营商网络） | **在本架构下结构性地不需要。** app 的 TCP 由本机 transparent socket **终结**，只走 app→veth→本地 socket，路径 MTU 是 veth 的 65535；sing-box 到服务器是**另一条** TCP 连接，由内核正常协商 MSS。app 的 TCP 从不穿越运营商路径，所以那个问题不会发生。这是终结型代理相对转发型的固有优势 |
-| **旧版的 `BLOCK_QUIC`** | **不需要，且属于错误的层。** 我们正确捕获 UDP，QUIC 会被交给 sing-box。若用户的出口不支持 UDP relay 而希望强制 TCP 回落，那是**策略**，应当写在 sing-box 的 route rule（`{"network":"udp","port":443,"outbound":"block"}`），不是 Flux 的开关 |
-| **`SOCKMAP` / `sk_msg` 内核内 splice** | **拒绝，两条独立理由。** ① 需要 sing-box 把自己的 socket 放进 sockmap，违反"官方未修改二进制"（§3.8）；② splice 只在不需要变换数据时成立，而代理的意义通常正是加密——唯一可 splice 的是 `direct` 出口，而那种流量我们本来就在 §1.6.1 里 bypass 掉了。零收益 |
-| **XDP** | 不适用。XDP 只有入向、且在协议栈之前，**没有 socket 上下文**，拿不到 UID |
-| **`BPF_PROG_TYPE_SOCK_OPS`**（可用于设 MSS、拥塞控制等） | **禁止**。它是 cgroup attach 类型，§0.1 已全面禁止 cgroup attach |
-| **`bpf_redirect_peer` 省一跳** | 结构上不可用（§19）：要求 TC ingress 且跨 netns |
-| **GSO 超级包穿越 veth** | **这已经是一项加速**，且是免费的。`__is_skb_forwardable()` 对 GSO skb 有显式豁免，所以大包整个穿过 veth，遍历次数按段数下降（§16 Q4 已核实机制） |
-| **per-UID 字节/包计数** | **建议做**，见 §1.6.6 |
+| The older Flux's `PERFORMANCE_MODE` (`-m socket` plus a conntrack `--ctdir REPLY -j ACCEPT` fast path) | **Structurally superseded.** It existed to let established connections skip a chain walk; `tcp_decision` in `SK_STORAGE` is a per-socket O(1) lookup with no chain to walk (§7.3, E2 before E3). Nothing to port |
+| The older Flux's `MSS_CLAMP_ENABLE` | **Structurally unnecessary here.** The app's TCP is **terminated** by a local transparent socket, so it travels app → veth → local socket where the path MTU is the veth's 65535; sing-box to the server is a **separate** connection with a normally negotiated MSS. The app's TCP never crosses the carrier path, so the problem cannot arise. This is an inherent advantage of a terminating proxy over a forwarding one |
+| The older Flux's `BLOCK_QUIC` | **Unnecessary, and at the wrong layer.** UDP is captured correctly and QUIC reaches sing-box. Forcing a TCP fallback because an egress lacks UDP relay is **policy**, and belongs in a sing-box route rule (`{"network":"udp","port":443,"outbound":"block"}`), not a Flux switch |
+| `SOCKMAP` / `sk_msg` in-kernel splice | **Rejected on two independent grounds.** It would require sing-box to put its own sockets into a sockmap, breaking the unmodified-official-binary rule (§9.7, and §3.8 on why the asset cannot simply be rebuilt); and splice only pays when the data is not transformed, whereas the point of a proxy is usually encryption. The only spliceable case is a `direct` outbound, and that traffic is already bypassed by §1.6.1. Zero benefit |
+| XDP | Not applicable. XDP is ingress-only and runs before the stack, so it has **no socket context** and cannot see a UID |
+| `BPF_PROG_TYPE_SOCK_OPS` | **Forbidden.** It is a cgroup attach type, and §1.3 forbids cgroup attach entirely |
+| `bpf_redirect_peer` to save a hop | Structurally unavailable: it requires TC ingress and a netns crossing (§19) |
+| GSO super-packets crossing the veth | **Already an acceleration, and free.** `__is_skb_forwardable()` exempts GSO skbs explicitly, so a large packet crosses whole and the number of traversals falls with the segment count (mechanism verified by Q4, §16) |
+| per-UID byte and packet counters | **Recommended**, see §1.6.6 |
 
-### 1.6.6 per-UID 计数：唯一建议新增的数据面功能
+### 1.6.6 per-UID counters, the one data-plane addition worth making
 
-现有 counters 只在决策边沿递增（§6），所以能回答"有没有在工作"，但不能回答"哪个应用走了多少"。而后者是用户最常问的问题之一，也是"系统统计会翻倍"这条边界的直接补偿（§2.2.3(4)）。
+The existing counters increment only at decision edges (§6.1), so they answer
+"is it working" but not "which app used how much". The second question is one of
+the most common a user has, and it is the direct compensation for the
+double-counting boundary of §2.2.3(4).
 
-方案：一张 `PERCPU_HASH`，key 为 `uid`，value 为 `{ tx_packets, tx_bytes }`，**只在已捕获的包上更新**。
+A `PERCPU_HASH` keyed by `uid`, valued `{ tx_packets, tx_bytes }`, **updated
+only on captured packets**.
 
-成本论证：被捕获的包已经付了一次 redirect（约一次 `dev_queue_xmit`），再加一次 per-CPU hash 更新是边际的；而**未选中的流量一行都不碰**，§14.1 的性能地基不受影响。这是它与"per-packet 存活计数"（§8.5.4 已因此改用独立探测程序）的关键区别。
+The cost argument: a captured packet has already paid for a redirect, roughly a
+`dev_queue_xmit`, so one more per-CPU hash update is marginal — and **unselected
+traffic touches none of it**, so the performance floor of §14.1 is untouched.
+That is the difference between this and a per-packet liveness counter, which is
+why §8.5.4 uses a separate probe program instead.
 
-明确不做的：不记目的地址、不记端口、不记时间序列。只有"这个 UID 经代理走了多少字节"。**不记录任何能重建访问历史的东西。**
+Deliberately absent: no destination address, no port, no time series. Only "how
+many bytes did this UID send through the proxy". **Nothing that could
+reconstruct a browsing history is recorded.**
 
-# 第 2 部分：数据路径与失败语义
+# Part 2: The data path and its failure semantics
 
-## 2.1 路径
+## 2.1 The path
 
 ```
-选中 app 的 socket
- └─(1) 受支持物理接口 TC egress（chain 0 / direct-action / pref 见 §8.5.3 动态选取）
-        flx_cap_l2（ARPHRD_ETHER）或 flx_cap_l3（ARPHRD_RAWIP / 已确认 CLAT TUN）
-        ├─ 未选 / bypass / 未入场失败 → TC_ACT_UNSPEC（继续 AOSP CLAT/OEM，走 Android 原路径）
-        ├─ 越过 admission 后失败      → TC_ACT_SHOT
-        └─ 入场 → L2 零改写 / L3 补 14 字节头 → bpf_redirect(flxrs0, 0)
- └─(2) veth flxrs0 ──内核 veth_xmit──> flxrs1（eth_type_trans 置 PACKET_OTHERHOST）
- └─(3) flxrs1 TC ingress：flx_in（首先 bpf_skb_change_type(PACKET_HOST) 纠正归属）
-        ├─ snapshot 无效 / active=0 / 非 IP → TC_ACT_SHOT
-        ├─ TCP SYN&&!ACK：固定 tuple lookup actual listener → guard → bpf_sk_assign → TC_ACT_OK
-        ├─ TCP 其它（含 fragment）：TC_ACT_OK，交内核 request/established 查找
-        └─ UDP：逐 datagram lookup → guard → assign → TC_ACT_OK
- └─(4) 输入路由：ip rule `iif flxrs1 lookup 20260` → `local default dev lo` → RTN_LOCAL
- └─(5) 官方 sing-box TProxy inbound（flux-in-v4/v6）accept / recvmsg，原始目的完好
-        · TCP 目的 = accepted socket 的 LocalAddr()
-        · UDP 目的 = IP(V6)_RECVORIGDSTADDR cmsg
- └─(6) sing-box 普通 outbound socket（root，uid 0，不在 uid_policy）→ Android netd 原生出网
+a selected app's socket
+ └─(1) TC egress on a supported physical interface (chain 0, direct-action, preference selected per §8.5.3)
+        flx_cap_l2 (ARPHRD_ETHER) or flx_cap_l3 (ARPHRD_RAWIP / a confirmed CLAT TUN)
+        ├─ unselected / bypassed / pre-admission failure -> TC_ACT_UNSPEC (AOSP CLAT and OEM continue; Android's own path)
+        ├─ failure past the admission boundary   -> TC_ACT_SHOT
+        └─ admitted -> L2 rewrites nothing / L3 pushes a 14-byte header -> bpf_redirect(flxrs0, 0)
+ └─(2) veth flxrs0 --kernel veth_xmit--> flxrs1 (eth_type_trans sets PACKET_OTHERHOST)
+ └─(3) flxrs1 TC ingress: flx_in, which first corrects attribution with bpf_skb_change_type(PACKET_HOST)
+        ├─ invalid snapshot / active=0 / not IP -> TC_ACT_SHOT
+        ├─ TCP SYN && !ACK: fixed-tuple listener lookup -> guard -> bpf_sk_assign -> TC_ACT_OK
+        ├─ other TCP, fragments included: TC_ACT_OK, leaving the kernel's request/established lookup to it
+        └─ UDP: per-datagram lookup -> guard -> assign -> TC_ACT_OK
+ └─(4) input routing: ip rule `iif flxrs1 lookup 20260` -> `local default dev lo` -> RTN_LOCAL
+ └─(5) the official sing-box TProxy inbound (flux-in-v4/v6) accepts or recvmsgs, original destination intact
+        - TCP destination = the accepted socket's LocalAddr()
+        - UDP destination = the IP(V6)_RECVORIGDSTADDR cmsg
+ └─(6) sing-box's ordinary outbound socket (root, uid 0, absent from uid_policy) -> Android netd routes it natively
 ```
 
-关键性质：**IP/port 从不改写**；未选流量的热路径是"1 次 helper + 1 次 HASH miss"；engine 消失时下一个新 SYN/datagram 在 redirect 前就 lookup miss → Direct。
+Three properties hold along the whole path: **IP and port are never rewritten**;
+the hot path for unselected traffic is one helper call plus one HASH miss; and
+when the engine is gone, the next new SYN or datagram misses the listener lookup
+*before* the redirect and goes Direct.
 
-## 2.2 fail-open 精确合同
+## 2.2 Failure is admission-bounded, not fail-open
 
-**egress"不接管"一律返回 `TC_ACT_UNSPEC`。禁止用 `TC_ACT_OK` 表示 egress Direct**（会终止 classifier chain，跳过 CLAT/OEM）。`TC_ACT_OK` 只用于 ingress。Flux capture **必须**是 chain 0 中该 protocol 的首个适用 classifier；仅 attach 成功不等于程序可达（§8.5）。
+"Fail-open" is the wrong word for what this design guarantees, and using it in
+user-facing text was a real error rather than a simplification. The guarantee has
+a boundary, and the boundary is admission.
 
-### 2.2.1 保证 Direct（`TC_ACT_UNSPEC`）
+| Moment | Failure semantics |
+|---|---|
+| A TCP flow has no immutable `CAPTURED` decision yet; the current UDP datagram has not been redirected | `TC_ACT_UNSPEC`, Direct along Android's own path |
+| A TCP flow holds a valid `CAPTURED` decision | internal inconsistency, generation mismatch or a failed ingress handoff MUST drop or reset. Leaking to the real destination is forbidden |
+| The packet has already been redirected to the veth | the redirect cannot be undone atomically, so later failures may drop |
+| The engine's listener still exists but its event loop is wedged | not detectable here; there is no heartbeat (§2.2.3(3)) |
 
-对**尚未入场的 TCP socket 首 SYN** 与**当前 UDP datagram**，下列 redirect 前失败一律 Direct：
+So `../guide/` may say "failures before admission stay direct". It MUST NOT say
+"no failure can ever break your network". **That is a security boundary, not an
+implementation shortfall:** once a flow is admitted, its packets carry a
+destination the app believes is being proxied, and quietly sending them to the
+real destination would defeat the reason the user selected that app.
 
-- `skb->sk` 为空、`bpf_sk_fullsock()` 返回空、`bpf_get_socket_uid()` 返回 overflow uid；
-- `uid_policy` miss；UID 为 `DRAINING` 且是新连接；
-- family / protocol / header / L2 layout 不支持（VLAN、未知 ARPHRD、非 IP EtherType）；
-- IPv6 未知 extension header、超出解析上界；
-- 命中固定安全 bypass、本机地址 bypass 或用户 CIDR bypass（**fragment 也做这一步**）；
-- control snapshot 无效或 `active == 0`；
-- 对应 family/protocol 的 actual listener lookup miss 或 guard 不符；
-- TCP decision storage `CREATE` 与并发只读重查**均**失败（当前包 Direct，无粘性，后续 SYN 可重判）；
-- 当前 interface 未成功 attach 精确 Flux filter（该 interface 上根本没有 Flux 程序运行）。
+**Egress "not taking over" is always `TC_ACT_UNSPEC`. Using `TC_ACT_OK` for
+egress Direct is forbidden**, because it terminates the classifier chain and
+skips CLAT and OEM programs. `TC_ACT_OK` is for ingress only. The Flux capture
+filter MUST be reachable within chain 0 for that protocol, and a successful
+attach does not establish reachability (§8.5).
 
-### 2.2.2 必须 drop/reset（越过 admission boundary）
+### 2.2.1 Guaranteed Direct (`TC_ACT_UNSPEC`)
 
-- `bpf_sk_storage_get(...F_CREATE)` 返回、或并发只读重查得到不可变 `CAPTURED(gen)` —— **这就是 TCP admission boundary**（`DIRECT` storage 不是 admission）。此后当前包与后续可解析包不得因 Flux 内部错误中途 direct；
-- selected + active 的 UDP fragment 未命中 bypass；
-- raw-IP 已 `bpf_skb_change_head()` 加内部以太头后的任何失败；
-- L3 入口的 EtherType 写入成功后的任何失败（L2 入口不写包，故无此边界）；
-- `bpf_redirect()` 已返回 redirect 之后的 enqueue/veth/route 失败；
-- 已入场 TCP 遇到 `active=0` 或 `generation` 过期；
-- ingress 的 parse / listener lookup / guard / `bpf_sk_assign()` 失败；
-- TCP final ACK/data 进入本地栈但 request/established socket 不存在（内核 RST/drop）。
+For the **first SYN of a TCP socket not yet admitted** and for the **current UDP
+datagram**, every pre-redirect failure below is Direct:
 
-### 2.2.3 公开的不可消除边界
+- `skb->sk` is null, `bpf_sk_fullsock()` returns null, or
+  `bpf_get_socket_uid()` returns the overflow uid;
+- `uid_policy` misses, or the UID is `DRAINING` and this is a new connection;
+- the family, protocol, header or L2 layout is unsupported — VLAN, an unknown
+  ARPHRD, a non-IP EtherType;
+- an unknown IPv6 extension header, or the parse bound is exceeded;
+- a hit in the fixed safety bypass, the local-address bypass or the user's CIDR
+  bypass — **fragments take this step too**;
+- the control snapshot is invalid or `active == 0`;
+- the actual listener lookup for that family and protocol misses, or the guard
+  does not match;
+- **both** the TCP decision storage `CREATE` and the concurrent read-only retry
+  fail — this packet goes Direct with no stickiness, and a later SYN may decide
+  again;
+- the current interface has no successfully attached Flux filter, meaning no
+  Flux program runs there at all.
 
-1. **跨 interface 无粘性**：Android 把已有 socket 改路由到 VPN TUN、未知 layout 或未 attach 的 interface 时，Flux 没有全局 hook，该 packet 走 Android 原路径。不宣称绝对流粘性。
-2. **late control packet**：socket 析构后的 TIME_WAIT ACK、abortive RST 等可能没有 full socket/UID，走 `TC_ACT_UNSPEC`。不建 tuple tombstone。
-3. **event-loop 活锁不可检测**：进程活着、listener socket 仍在、但 event loop 停止工作时，本数据面看不出来，该期间新流仍会被捕获并卡住。0.9.0 **不设** heartbeat / 周期探测 / watchdog packet。官方 sing-box 源码也允许个别 accept/read 致命错误关闭单个 listener 而不退出进程——这一类**会**被 §7.4 的 fault 通知在下一个相关 packet 上发现并自愈；"完全无流量时的内部故障"不会。
-4. **双 leg 统计**：AOSP 的 UID/interface accounting 会看到 app 原 leg，sing-box 另建 root outbound 又是第二 leg。Flux 不篡改 TrafficStats 去"抵消"，系统设置里的按 UID 流量因此不等于物理链路字节。
-5. **interface churn 窗口**：物理 interface 在 Android 上频繁变动——Wi-Fi↔蜂窝切换、每个 PDN 一个 `rmnet_data*` 的出现与消失、netd 按需创建销毁 `v4-*` CLAT。从"新 interface 变为 up 并开始承载流量"到"fluxd 收到 rtnetlink 事件并 attach 完 filter"之间存在一个**无法消除的窗口**，该窗口内的流量走 Android 原路径（即 Direct）。这与 §2.2.1 的 fail-open 语义一致，不是缺陷，但**必须公开**：0.9.0 不宣称"接管所有时刻的所有流量"。窗口大小取决于 rtnetlink 送达延迟与 §10.4 的 debounce，量级为百毫秒。**同一个窗口还会因 netd 删 `clsact` 而周期性重开**——见 §8.5.1，那不是异常而是日常。
-6. **被代理流量失去 app 请求的 DSCP 标记**。AOSP 的 `dscpPolicy` 装在物理 interface 的 **egress pref 5**（`DscpPolicyTracker.java:50-51`），而我们对捕获包返回 `TC_ACT_REDIRECT`，chain 就此终止——只要我们的 pref 小于 5，dscpPolicy 就看不到这些包。sing-box 随后发出的**出站 leg** 仍会经过 dscpPolicy，但那是 root 的 socket，带不上 app 通过 `ConnectivityManager` 申请的 per-UID DSCP 策略。**净效果：被代理流量的 app 级 QoS 标记丢失。** 影响面限于依赖 DSCP 的运营商网络，且本机实测三星另有 `tosMarker` 五个 egress 程序，受影响的下游比这一条写的更多。
-7. **conntrack 双计**。veth 跨越时 `skb_scrub_packet()` 必然 `nf_reset_ct()`，所以每条被代理的流会在 veth peer 的 PREROUTING 重新建立 conntrack，netfilter 因此看到两次。这与本节第 4 条的双 leg 统计叠加。TPROXY 类方案共性，不特殊处理。
+### 2.2.2 MUST drop or reset (past the admission boundary)
 
-## 2.3 为什么不可能自环（结构性论证，不是缓解措施）
+- `bpf_sk_storage_get(...F_CREATE)` returned, or a concurrent read-only retry
+  observed, an immutable `CAPTURED(gen)` — **this is the TCP admission
+  boundary**, and a `DIRECT` storage entry is not admission. From here neither
+  this packet nor any later parseable packet may go direct because of an internal
+  Flux error;
+- a selected, active UDP fragment that missed the bypass;
+- any failure after `bpf_skb_change_head()` has added the internal Ethernet
+  header on a raw-IP interface;
+- any failure after the EtherType has been written at the L3 entry — the L2 entry
+  writes nothing, so it has no such boundary;
+- any enqueue, veth or routing failure after `bpf_redirect()` has returned;
+- an admitted TCP flow meeting `active=0` or an expired `generation`;
+- a parse, listener lookup, guard or `bpf_sk_assign()` failure on ingress;
+- a TCP final ACK or data reaching the local stack with no request or established
+  socket, which the kernel answers with RST or a drop.
 
-"engine 自己的出站流量会不会被再次捕获，形成无限循环"是每个审阅者都会问的问题。同类项目确实需要专门的自排除机制：`clone/bpf2socks/connect_prog.c:226-237` 用 **GID** 比对做 bypass（因为 app 侧 UID 可能共享），`clone/AndroidTProxyShell/tproxy.sh:1002` 用 `-m owner --uid-owner $CORE_USER --gid-owner $CORE_GROUP -j ACCEPT`，`clone/dae/control/kern/tproxy.c:2362-2391` 用 cookie→pid 映射加 `dae_socket_mark` 三重判定。
+### 2.2.3 Boundaries that cannot be removed, and are therefore published
 
-**0.9.0 一个机制都不需要，因为策略是 allowlist 而不是 blacklist。** 论证：
+1. **No stickiness across interfaces.** When Android reroutes an existing socket
+   onto a VPN TUN, an unknown layout or an interface with no attachment, Flux has
+   no global hook and the packet takes Android's own path. Absolute flow
+   stickiness is not claimed.
+2. **Late control packets.** A TIME_WAIT ACK or abortive RST after the socket has
+   been destroyed may carry no full socket and no UID, and goes
+   `TC_ACT_UNSPEC`. No tuple tombstone is kept.
+3. **A wedged event loop is undetectable.** If the process is alive and the
+   listener socket still exists but the event loop has stopped, this data plane
+   cannot tell, and new flows are captured and stall. There is **no** heartbeat,
+   periodic probe or watchdog packet. The official sing-box source also allows a
+   fatal accept or read error to close one listener without exiting the process —
+   that class **is** caught by the fault notification of §7.4 on the next
+   relevant packet and heals; an internal failure with no traffic at all is not.
+4. **Both legs are counted.** AOSP's per-UID and per-interface accounting sees
+   the app's original leg, and sing-box's root outbound is a second leg. Flux does
+   not falsify TrafficStats to cancel this out, so per-UID figures in Settings do
+   not equal bytes on the physical link.
+5. **The interface churn window.** Physical interfaces change constantly on
+   Android: Wi-Fi to cellular handover, one `rmnet_data*` appearing and
+   disappearing per PDN, netd creating and destroying `v4-*` CLAT on demand.
+   Between "a new interface comes up and starts carrying traffic" and "fluxd
+   receives the rtnetlink event and finishes attaching" there is an
+   **irreducible window** in which traffic takes Android's own path. This is
+   consistent with §2.2.1 and is not a defect, but it **MUST be published**: Flux
+   does not claim to carry all traffic at all times. The window is bounded by
+   rtnetlink delivery latency plus the debounce of §10.4, on the order of
+   hundreds of milliseconds. **The same window reopens periodically because netd
+   deletes `clsact`** — see §8.5.1, where that is routine rather than
+   exceptional.
+6. **Proxied traffic loses the app's DSCP marking.** AOSP's `dscpPolicy` attaches
+   at **egress pref 5** on the physical interface
+   (`DscpPolicyTracker.java:50-51`), and a captured packet returns
+   `TC_ACT_REDIRECT`, ending the chain — so as long as our preference is below 5,
+   dscpPolicy never sees those packets. sing-box's **outbound leg** still passes
+   through it, but that is a root socket and cannot carry the per-UID DSCP policy
+   the app requested through `ConnectivityManager`. **Net effect: app-level QoS
+   marking is lost for proxied traffic.** The impact is confined to carrier
+   networks that act on DSCP, and the measured Samsung device carries five
+   further `tosMarker` egress programs, so more downstream consumers are affected
+   than this entry alone names.
+7. **conntrack counts twice.** Crossing the veth necessarily calls
+   `skb_scrub_packet()`, which calls `nf_reset_ct()`, so every proxied flow is
+   re-established in the veth peer's PREROUTING and netfilter sees it twice. This
+   compounds with item 4. It is common to the whole TPROXY family and is not
+   special-cased.
 
-1. `uid_policy` 是一张**只包含被选中 app UID 的 HASH**。§7.3 的 E1 步是"查表 miss 即 `TC_ACT_UNSPEC`"，不是"查表命中排除项才放行"。
-2. §1.4 硬性只接受 `appId ∈ [10000, 19999]`。sing-box 以 root(uid 0) 运行，**结构上不可能出现在表里**。
-3. `bpf_get_socket_uid()` 在无 `skb->sk` 时返回 `overflowuid`(65534)，同样不在表里 → `TC_ACT_UNSPEC`。**所以"UID 解析失败"的后果是不捕获，而不是误捕获。** 这一点与 blacklist 设计相反：blacklist 下解析失败意味着"没命中排除项"，会被捕获，才会形成循环。
-4. engine 的三类出站流量逐一检查：
-   - **上游代理连接**（sing-box → 远端服务器）：root socket，物理 interface egress，uid 0 → miss → Direct。
-   - **上游 DNS**：同上，uid 0 → miss → Direct（这也是 §1.3.1 里"既捕获 app 的系统 DNS 又不吞 engine 的 DNS"成立的原因）。
-   - **UDP 回写**（accepted 连接的返回流量）：目的是 app 的本机地址 → 输出路由走 `lo`，**根本不经过任何物理 interface 的 TC egress**。
-5. 被 `bpf_sk_assign` 交付的 packet 进入 engine 后就离开了数据面；engine 之后建立的是**新 socket**，走第 4 条。redirect 与 assign 之间没有任何回到 egress 的路径。
+### 2.2.4 What unselected traffic actually costs
 
-**结论：自环不是"已缓解"，是"不可构造"。** 因此 0.9.0 **不设** engine 专用 mark、不设 GID bypass、不设上游目的 CIDR 例外。这些机制若被加入，反而会在没有对应威胁的情况下增加热路径成本与配置面。
+Unselected traffic is **not** untouched, and saying so to users was wrong.
 
-**唯一需要保持的不变量**：`uid_policy` 永远不得包含 `appId < 10000` 的条目（§11.2 的解析器强制），且 engine 永远不以选中 app 的 UID 运行（§13.3 固定 root）。破坏其中任一条才会打开循环的可能性。
+The real cost per packet is one TC invocation, one `bpf_get_socket_uid()`, and
+one `uid_policy` HASH miss, followed immediately by `TC_ACT_UNSPEC`. It performs
+no packet parsing, reads no control snapshot, enters no userspace, and changes
+nothing about the Android classifiers that run after it.
+
+So the honest user-facing sentence is "not taken over, does not enter the
+proxy". The sentence "the kernel program never even looks at it" is false, and
+§14.1 budgets the cost that sentence would deny.
+
+## 2.3 Self-capture is unconstructible, not mitigated
+
+"Could the engine's own outbound traffic be captured again, looping forever?" is
+the question every reviewer asks. Comparable projects genuinely need a
+self-exclusion mechanism: `clone/bpf2socks/connect_prog.c:226-237` compares
+**GIDs** (because app-side UIDs can be shared),
+`clone/AndroidTProxyShell/tproxy.sh:1002` uses
+`-m owner --uid-owner $CORE_USER --gid-owner $CORE_GROUP -j ACCEPT`, and
+`clone/dae/control/kern/tproxy.c:2362-2391` combines a cookie→pid map with
+`dae_socket_mark` in a three-way test.
+
+**Flux needs none of them, because the policy is an allowlist rather than a
+blocklist.** The argument:
+
+1. `uid_policy` is a HASH containing **only selected app UIDs**. Step E1 of §7.3
+   is "miss ⇒ `TC_ACT_UNSPEC`", not "hit an exclusion entry ⇒ let it through".
+2. §1.4 admits only `appId ∈ [10000, 19999]`. sing-box runs as root, uid 0, so it
+   is **structurally incapable of appearing in the table**.
+3. `bpf_get_socket_uid()` returns `overflowuid` (65534) when there is no
+   `skb->sk`, which is also absent from the table ⇒ `TC_ACT_UNSPEC`. **A failure
+   to resolve the UID therefore means no capture, not a wrong capture.** A
+   blocklist inverts this: there, a failed resolution means "matched no exclusion"
+   and the packet *is* captured, which is what creates the loop.
+4. The engine's three kinds of outbound traffic, individually:
+   - **upstream proxy connections** (sing-box to the remote server): a root
+     socket on physical-interface egress, uid 0 ⇒ miss ⇒ Direct;
+   - **upstream DNS**: the same, uid 0 ⇒ miss ⇒ Direct — this is also why §1.3.1
+     can capture the app's system DNS without swallowing the engine's;
+   - **UDP write-back** (return traffic on an accepted connection): destined for
+     the app's local address, so output routing selects `lo` and it **never
+     reaches any physical interface's TC egress**.
+5. A packet delivered by `bpf_sk_assign` leaves the data plane on entering the
+   engine, and what the engine opens afterwards is a **new socket** covered by
+   item 4. There is no path from redirect or assign back to egress.
+
+**Self-capture is not "mitigated"; it cannot be constructed.** Flux therefore has
+no engine-specific mark, no GID bypass and no upstream-destination CIDR
+exception. Adding any of them would add hot-path cost and configuration surface
+against a threat that does not exist.
+
+**One invariant carries the whole argument:** `uid_policy` MUST never contain an
+entry with `appId < 10000` (enforced by the parser, §11.2), and the engine MUST
+never run as a selected app's UID (fixed root, §13.3). Breaking either one is
+what would open the loop.
 
 ---
 
-# 第 3 部分：Android 平台事实（实现者必读）
+# Part 3: Android platform facts every implementer needs
 
-## 3.1 netd、fwmark 与 RPDB
+## 3.1 netd, fwmark and the RPDB
 
-Android socket fwmark 是 packed 32-bit，编码 netId、explicitlySelected、protectedFromVpn、permission 与 vendor 位；netd 用 UID range、fwmark、`iif lo` 和 priority ≈10000–32000 的一组规则实现 VPN、explicit network、implicit/default network 与 prohibit/unreachable。它不是桌面 Linux 的 `local/main/default` 三条规则。
+Android's socket fwmark is a packed 32-bit value encoding the netId,
+`explicitlySelected`, `protectedFromVpn`, permission bits and vendor bits. netd
+implements VPN, explicit network, implicit and default network, and
+prohibit/unreachable behaviour with a set of rules keyed on UID ranges, fwmark
+and `iif lo`, at priorities roughly 10000–32000. This is **not** desktop Linux's
+three `local` / `main` / `default` rules.
 
-因此 Flux **必须**：不读写 packet fwmark、不为自己猜"空闲 mark"、不清空/重排/复用 netd rule、不假定 `main` 表或当前 default route 是 app 的真实网络。Flux 只增加一条由专用 `iif flxrs1` 命中的本地交付规则（§8.4）。
+Flux therefore MUST NOT read or write a packet's fwmark, MUST NOT guess a "free"
+mark for itself, MUST NOT flush, reorder or reuse a netd rule, and MUST NOT
+assume that the `main` table or the current default route is the app's real
+network. Flux adds exactly one local-delivery rule, matched by the dedicated
+`iif flxrs1` (§8.4).
 
-## 3.2 AOSP 已独占 root cgroup 的 SOCK_ADDR 槽位
+## 3.2 The root cgroup's SOCK_ADDR slots
 
-见 §0.1(2)。**结论：0.9.0 不 attach 任何 cgroup 程序，也不把 app 或 sing-box 移进自建 cgroup。** Flux 只在 AOSP 完成 socket/owner policy 之后的物理 netdevice TC egress 观察 packet；若 Android owner firewall 已 drop，Flux 看不到也不会绕过该包。
+**Fact, as measured:** on a clean Phase 0 re-measurement the root cgroup's
+`SOCK_ADDR` attach list was **empty**. **Inference, and the reason that fact
+changes nothing:** an AOSP program being loaded is not the same as being
+attached, the system may still attach dynamically depending on runtime
+conditions, and an ancestor holding `flags=0` prevents safe coexistence
+regardless.
 
-## 3.3 L2 布局差异：Wi-Fi vs rmnet vs CLAT
+State the two separately. An earlier draft compressed them into "the root cgroup
+is currently full", which the measurement then contradicted — and a reader who
+found the fact wrong had no way to see that the conclusion did not depend on it.
+The honest form is: **observed empty at the time of measurement; neither
+lifecycle nor coexistence can be guaranteed by one snapshot.**
 
-| 入口 | 接受条件 | packet 处理 |
+**The product conclusion is unchanged, and is not derived from the snapshot:
+Flux attaches no cgroup BPF program of any kind, and moves neither apps nor
+sing-box into a cgroup of its own.** It observes packets only at physical
+netdevice TC egress, after AOSP has finished applying socket and owner policy.
+If Android's owner firewall has already dropped a packet, Flux never sees it and
+does not circumvent the drop.
+
+See `../history/review-log.md` §0.1(2) for the source review this rests on.
+
+## 3.3 L2 layout differs: Wi-Fi vs rmnet vs CLAT
+
+| Entry | Accepts | Packet handling |
 |---|---|---|
-| `flx_cap_l2` | `ARPHRD_ETHER`、`skb->vlan_present == 0`、`skb->protocol ∈ {IPv4, IPv6}`、非 bridge/VPN/Flux 自有 | **不改写任何字节**，原以太头（含 EtherType）原样带走；`pkt_type` 由 ingress 修正（D17） |
-| `flx_cap_l3` | `ARPHRD_RAWIP`（Qualcomm rmnet）或被严格识别的 CLAT `v4-*` TUN | `bpf_skb_change_head(skb, 14, 0)`（该 helper 会 `memset` 清零并 `skb_reset_mac_header()`），随后**只**在 offset 12 写入按 `skb->protocol` 得到的 EtherType；dst/src MAC 留全零，由 ingress 的 `bpf_skb_change_type()` 处理归属（D17） |
+| `flx_cap_l2` | `ARPHRD_ETHER`, `skb->vlan_present == 0`, `skb->protocol ∈ {IPv4, IPv6}`, not a bridge, VPN or Flux's own | **No byte is rewritten.** The original Ethernet header, EtherType included, travels as-is; `pkt_type` is corrected on ingress (D17) |
+| `flx_cap_l3` | `ARPHRD_RAWIP` (Qualcomm rmnet), or a strictly identified CLAT `v4-*` TUN | `bpf_skb_change_head(skb, 14, 0)` — the helper zeroes the new room and calls `skb_reset_mac_header()` — then writes **only** the EtherType at offset 12, derived from `skb->protocol`. The destination and source MAC stay all zero; attribution is handled by `bpf_skb_change_type()` on ingress (D17) |
 
-VLAN、QinQ、未知 ARPHRD 在 0.9.0 直接排除该 interface。手机上几乎不需要 VLAN，为它加 strip/rebuild 分支不属首发范围。
+VLAN, QinQ and unknown ARPHRD values exclude the interface outright. Phones
+almost never need VLAN, and a strip-and-rebuild branch for it is out of scope.
 
-### 3.3.1 为什么 L3 分支是**强制**的，不是优化
+### 3.3.1 The L3 branch is **mandatory**, not an optimisation
 
-这条如果漏掉，产品在 Wi-Fi 下完全正常，而**全部蜂窝数据被静默丢弃且没有任何计数器**。机制已从内核源码逐行核对：
+Omit it and the product works perfectly over Wi-Fi while **every cellular packet
+is silently dropped, with no counter recording it**. The mechanism is verified
+line by line against kernel source:
 
 ```c
 /* v6.1 net/core/filter.c:2144-2165 */
@@ -501,221 +893,442 @@ static int __bpf_redirect(struct sk_buff *skb, struct net_device *dev, u32 flags
 }
 ```
 
-三个关键点，缺一不可地推出结论：
+Three facts, none of them dispensable, produce the conclusion:
 
-1. **`dev_is_mac_header_xmit()` 看的是 *目标* 设备**（`include/linux/if_arp.h:44-60`）。veth 是 `ARPHRD_ETHER`，所以**只要目标是 veth，就永远走带 `-ERANGE` 检查的那条路径**——源设备是什么类型不影响分支选择，只影响检查是否通过。
-2. **TC egress 之前刚做过 `skb_reset_mac_header()`**：`__dev_queue_xmit()` 在 `net/core/dev.c:4170` 调它，紧接着 `:4198` 才调 egress hook。在不带以太头的设备上 `skb->data` 指向 IP 头，于是 `mac_header == network_header`，`>=` 成立。
-3. **Android 上命中这条的就是全部蜂窝路径**：`rmnet_data*` 是 `ARPHRD_RAWIP`，CLAT 的 `v4-*` 是 `ARPHRD_NONE`——AOSP 自己在 `ClatCoordinator.java:471` 写明"*This program will be attached to the v4-\* interface which is a TUN and thus always rawip*"，`tcutils.cpp:478-512` 也把两者一并归为非以太。
+1. **`dev_is_mac_header_xmit()` inspects the *target* device**
+   (`include/linux/if_arp.h:44-60`). A veth is `ARPHRD_ETHER`, so **any redirect
+   whose target is the veth always takes the path carrying the `-ERANGE`
+   check.** The source device's type does not select the branch; it only decides
+   whether the check passes.
+2. **`skb_reset_mac_header()` runs immediately before TC egress.**
+   `__dev_queue_xmit()` calls it at `net/core/dev.c:4170` and only then invokes
+   the egress hook at `:4198`. On a device with no Ethernet header `skb->data`
+   points at the IP header, so `mac_header == network_header` and the `>=` holds.
+3. **On Android this is the entire cellular path.** `rmnet_data*` is
+   `ARPHRD_RAWIP` and CLAT's `v4-*` is `ARPHRD_NONE`. AOSP states it directly in
+   `ClatCoordinator.java:471` — "*This program will be attached to the v4-\*
+   interface which is a TUN and thus always rawip*" — and
+   `tcutils.cpp:478-512` classifies both as non-Ethernet.
 
-修复手段是内核**明文认可**的：`__bpf_skb_change_head()` 的注释原文就是"*Intention for this helper is to be used by an L3 skb that needs to push mac header for redirection into L2 device*"（`net/core/filter.c:3729-3758`）。它内部调 `skb_reset_mac_header()`，正好让 `mac_header < network_header` 重新成立；且它对 GSO skb 豁免长度上限，因此 GSO 安全。
+The fix is one the kernel **documents explicitly**. The comment on
+`__bpf_skb_change_head()` reads "*Intention for this helper is to be used by an
+L3 skb that needs to push mac header for redirection into L2 device*"
+(`net/core/filter.c:3729-3758`). It calls `skb_reset_mac_header()` internally,
+which restores `mac_header < network_header`, and it exempts GSO skbs from the
+length ceiling, so it is GSO-safe.
 
-顺带一提，AOSP 与 honk 都把这件事做成两个 object / 两个 attach 分支（AOSP 的 `..._ether` 与 `..._rawip`，`clatd.c:248-270`；honk `attach.rs:657-690`），与本设计的 `flx_cap_l2` / `flx_cap_l3` 分法一致。
+AOSP and honk both split this into two objects and two attach branches — AOSP's
+`..._ether` and `..._rawip` at `clatd.c:248-270`, honk's at
+`attach.rs:657-690` — matching the `flx_cap_l2` / `flx_cap_l3` split here.
 
-> **接口筛选不得用 `operstate` 做判据。** 实测（§16.9.5）：`rmnet_data0` 承载着默认路由、有 v4 与 v6 全局地址、流量正在跑，而 `/sys/class/net/rmnet_data0/operstate` 读出来是 **`unknown`**，不是 `up`。RAWIP 接口不上报载波状态。所以任何形如 `operstate == "up"` 或 `IF_OPER_UP` 的过滤会**漏掉全部蜂窝接口**——恰好是 `flx_cap_l3` 唯一的适用对象。判据用 `IFF_UP` 标志（来自 `RTM_NEWLINK` 的 `ifi_flags`）加"存在 scope global 地址"，不要用 `operstate`。
+> **Interface selection MUST NOT use `operstate`.** Measured (§16.9.5):
+> `rmnet_data0` was carrying the default route, held global v4 and v6 addresses
+> and was passing traffic, while `/sys/class/net/rmnet_data0/operstate` read
+> **`unknown`** rather than `up`. RAWIP interfaces do not report carrier state.
+> Any filter of the form `operstate == "up"` or `IF_OPER_UP` therefore **misses
+> every cellular interface** — precisely the only interfaces `flx_cap_l3`
+> applies to. Use the `IFF_UP` flag from `RTM_NEWLINK`'s `ifi_flags` plus the
+> presence of a global-scope address.
 >
-> 同一段实测还给出另一个不该用的判据：**"有地址"不等于"netd 认为它在网络里"**。观测时 `wlan0` 带着 `192.168.x.x` 却**没有 `clsact`**，因为 Wi-Fi 刚被断开而地址还没回收。`clsact` 的有无才是 netd 视角的真相（§8.5.1），这也正是我们复用它而不是自己创建的理由。
+> The same measurement produced a second criterion not to use: **having an
+> address does not mean netd considers the interface part of a network.** At
+> observation time `wlan0` held a `192.168.x.x` address but had **no `clsact`**,
+> because Wi-Fi had just disconnected and the address had not yet been reclaimed.
+> The presence of `clsact` is netd's view of the truth (§8.5.1), which is also
+> why Flux reuses it rather than creating its own.
 
 ## 3.4 CLAT464
 
-AOSP `ClatCoordinator` 创建 `v4-*` raw-IP TUN，并在其 egress 用固定低 priority 的 TC BPF 做 IPv4→IPv6 翻译。IPv4 packet 在 `v4-*` egress 仍带原 app socket UID；翻译后的物理 IPv6 通常已属 `AID_CLAT`，不能再作为 app 选择依据。
+AOSP's `ClatCoordinator` creates a `v4-*` raw-IP TUN and translates IPv4 to IPv6
+with a TC BPF program at a fixed low priority on its egress. An IPv4 packet at
+`v4-*` egress still carries the originating app's socket UID; the translated
+physical IPv6 usually belongs to `AID_CLAT` and can no longer be used to select
+an app.
 
-Flux 支持 CLAT 的**全部**条件：① link 是 TUN/raw-IP 且名字匹配 `v4-*`；② 存在 CLAT 特征地址与关联 underlay；③ TC dump 中存在可识别的 AOSP CLAT egress filter；④ Flux 能在同 chain 以**某个小于 `FLUX_TC_PREF_CLAT_MAX`(4) 的可用 pref** + IPv4 protocol + handle `0x1` 安装且**位于 CLAT 之前**（§8.5.3；若 1–3 全被占则该条件不成立）；⑤ Phase 0 已在该设备证明 UID/GSO/checksum/MTU/header 转换正确。任一条件不明 → 该 interface Direct。**Flux 不删除、不移动、不替换 AOSP 的 filter。** 不硬编码 AOSP 的 priority 数值，只要求 dump 顺序满足 first-applicable 谓词。
+Flux supports CLAT only when **all** of these hold: ① the link is a TUN or
+raw-IP device whose name matches `v4-*`; ② the characteristic CLAT address and
+an associated underlay are present; ③ a recognisable AOSP CLAT egress filter
+exists in the TC dump; ④ Flux can install in the same chain at **some available
+preference below `FLUX_TC_PREF_CLAT_MAX` (4)** with IPv4 protocol and handle
+`0x1` (§8.5.3; the condition fails if 1–3 are all taken); ⑤ Phase 0 has proven
+UID, GSO, checksum, MTU and header conversion correct on that device. Any
+condition in doubt means the interface stays Direct.
 
-## 3.5 VPN / TUN
+**Flux never deletes, moves or replaces an AOSP filter**, and never hardcodes
+AOSP's priority numbers.
 
-- app 走 VPN 时原 packet 在 VPN TUN 上，Flux 排除所有 generic TUN/TAP。
-- 物理接口上随后出现的是 VPN provider 的 outer socket，通常已不是原 app UID。
-- always-on / lockdown VPN 继续由 Android 处理；Flux 不提供"优先于 VPN"的隐藏开关。
-- VPN 上线导致已有 Flux TCP 迁移到被排除的 TUN 时，该流离开 Flux 可执行粘性的范围（§2.2.3(1)）。Flux 不为此再向 VPN TUN 挂 drop-only 程序。
+Note what condition ④ does and does not assert. It requires a numerically lower
+preference than CLAT's, which is a necessary condition for running first — but
+**dump order is not evidence that our program is reached** (R091-05 overturned
+that claim; see §8.5.3). Reachability is established by the liveness
+verification of §8.5.4, on this interface, and nowhere else.
 
-## 3.6 显式 network 与 outbound 身份
+## 3.5 VPN and TUN
 
-app 通过 Android API 显式绑定 Wi-Fi/蜂窝后，原 packet 可能在对应 underlay 被捕获；但 sing-box outbound 是新的 root 进程 socket，**不继承** app 的 netId、VPN protection 或 per-flow network identity。0.9.0 使用 Android 为 root socket 选择的网络，用户可用官方 sing-box outbound 选项（`bind_interface` / `routing_mark` / `network_strategy`）自行控制，后果自负。Flux 不声称"完全保持原 app 的 Android network 选择"。
+- When an app uses a VPN, its original packet is on the VPN TUN. Flux excludes
+  all generic TUN and TAP devices.
+- What appears on the physical interface afterwards is the VPN provider's outer
+  socket, usually no longer the original app's UID.
+- Always-on and lockdown VPNs remain Android's business. Flux offers no hidden
+  switch to "take precedence over the VPN".
+- If a VPN coming up migrates an established Flux TCP flow onto an excluded TUN,
+  that flow leaves the range over which Flux can enforce stickiness
+  (§2.2.3(1)). Flux does not attach a drop-only program to the VPN TUN to
+  compensate.
 
-## 3.7 GKI / OEM / SELinux / root 管理器
+## 3.6 Explicit networks and outbound identity
 
-API level、内核版本字符串、GKI defconfig、OEM backport、SELinux domain、root provider 权限是互不等价的维度。Flux **不维护机型 catalog**，不按字符串白名单猜能力。启动时的正常 activation 本身就是最小 capability admission：创建真实 map、加载真实 program、创建/核验真实网络对象、尝试精确 attach。任一步失败 → 该 interface 或整个数据面保持 Direct，并在 `status` 给出**第一个具体错误**。禁止为"兼容更多机型"动态注入宽泛 sepolicy。
+When an app binds explicitly to Wi-Fi or cellular through the Android API, its
+original packet may be captured on the corresponding underlay. But the sing-box
+outbound is a new socket in a root process and **does not inherit** the app's
+netId, VPN protection or per-flow network identity. Flux uses whatever network
+Android selects for that root socket. Users who need control have the official
+sing-box outbound options — `bind_interface`, `routing_mark`,
+`network_strategy` — and own the consequences. **Flux does not claim to preserve
+the app's Android network selection.**
 
-## 3.8 4 KiB / 16 KiB
+## 3.7 GKI, OEM, SELinux and root managers
 
-Android 15 起允许 16 KiB base-page 内核，但 API level 推不出 page size。固定的官方 sing-box arm64 资产四个 `PT_LOAD` 的 `p_align` 均为 `0x1000`，不满足 AOSP 16 KiB ELF 对齐要求；`zipalign` 不能修改 program header。因此 0.9.0 只支持 `sysconf(_SC_PAGESIZE) == 4096`。`fluxd` 自身仍按 16 KiB 对齐构建（安装/诊断卫生），使它在其它 page size 设备上能给出确定诊断而不是崩溃。
+API level, kernel version string, GKI defconfig, OEM backports, SELinux domain
+and root provider permissions are independent dimensions, none of which implies
+another. Flux **maintains no device catalogue** and never infers a capability
+from a string allowlist.
+
+Normal activation at startup *is* the capability admission: create the real
+maps, load the real programs, create and verify the real network objects,
+attempt the exact attach. Any step failing leaves that interface — or the whole
+data plane — Direct, with the **first concrete error** in `status`. Injecting
+broad sepolicy to widen device compatibility is forbidden.
+
+## 3.8 4 KiB and 16 KiB
+
+Android 15 allows a 16 KiB base-page kernel, and the API level does not imply
+the page size. All four `PT_LOAD` segments of the pinned official sing-box arm64
+asset have `p_align == 0x1000`, which does not satisfy AOSP's 16 KiB ELF
+alignment requirement, and `zipalign` cannot modify a program header. Flux
+therefore supports `sysconf(_SC_PAGESIZE) == 4096` only.
+
+`fluxd` itself is still built 16 KiB aligned, for installation and diagnostic
+hygiene: on a device with another page size it can then produce a definite
+diagnosis instead of crashing.
 
 ## 3.9 netns
 
-BPF socket lookup、TC、veth、RPDB、sing-box listener 全部在当前 netns。`fluxd` 与 sing-box **必须**位于 Android app 所在的初始 netns；启动时比较 `/proc/self/ns/net` 与 `/proc/1/ns/net` 的 inode，不一致则 Inactive 并报错。Magisk 的 mount namespace 不等于 network namespace。
+BPF socket lookup, TC, the veth, the RPDB and the sing-box listeners all live in
+the current network namespace. `fluxd` and sing-box MUST be in the initial netns
+where Android's apps run. At startup, compare the inodes of
+`/proc/self/ns/net` and `/proc/1/ns/net`; a mismatch means Inactive with an
+error. **Magisk's mount namespace is not a network namespace**, and confusing
+the two is the likely cause of a mismatch here.
 
 ---
 
-# 第 4 部分：内核机制依赖清单
+# Part 4: Kernel mechanisms this design depends on
 
-实现者可用此表逐项核对目标设备。**表中每一项都必须在 activation 时以"实际调用成功"验证，而不是查版本。** "最低内核"列只记录该机制首次出现的版本；全部早于产品基线 5.15，列出它是为了说明为什么这些机制在基线上可用，不是运行时判定依据。
+Use this table to check a target device item by item. **Every entry MUST be
+verified at activation by performing the real call successfully, never by
+inspecting a version.** The "minimum kernel" column records only where each
+mechanism first appeared; all of them predate the 5.15 baseline, and the column
+exists to explain why they are available on it, not to be consulted at run time.
 
-**GKI defconfig 已逐项核对**（`android12-5.10` / `android13-5.15` / `android14-6.1` / `android15-6.6` 的 arm64 `gki_defconfig`，四个分支全部满足）：`CONFIG_VETH=y`、`CONFIG_DUMMY=y`、`CONFIG_TUN=y`、`CONFIG_NET_SCH_INGRESS=y`（clsact）、`CONFIG_NET_CLS_BPF=y`、`CONFIG_NET_CLS_ACT=y`、`CONFIG_NET_ACT_BPF=y`、`CONFIG_BPF_SYSCALL=y`、`CONFIG_BPF_JIT=y`、`CONFIG_CGROUP_BPF=y`、`CONFIG_IP_MULTIPLE_TABLES=y`、`CONFIG_NF_CONNTRACK=y`。**`CONFIG_NETKIT` 四个分支全部缺失。**
+**GKI defconfigs verified item by item** across the arm64 `gki_defconfig` of
+`android12-5.10`, `android13-5.15`, `android14-6.1` and `android15-6.6`, with
+all four branches satisfying: `CONFIG_VETH=y`, `CONFIG_DUMMY=y`, `CONFIG_TUN=y`,
+`CONFIG_NET_SCH_INGRESS=y` (clsact), `CONFIG_NET_CLS_BPF=y`,
+`CONFIG_NET_CLS_ACT=y`, `CONFIG_NET_ACT_BPF=y`, `CONFIG_BPF_SYSCALL=y`,
+`CONFIG_BPF_JIT=y`, `CONFIG_CGROUP_BPF=y`, `CONFIG_IP_MULTIPLE_TABLES=y`,
+`CONFIG_NF_CONNTRACK=y`. **`CONFIG_NETKIT` is absent from all four.**
 
-| 机制 | 最低内核 | 用途 | 失败后果 |
+| Mechanism | Min kernel | Purpose | Consequence of failure |
 |---|---|---|---|
-| `BPF_PROG_TYPE_SCHED_CLS` + direct-action | 4.4 / 4.5 | 三个程序 | 整体 Inactive |
-| `bpf_get_socket_uid()` | 4.3 | UID 粗分流 | 整体 Inactive |
-| `__sk_buff->sk` + `bpf_sk_fullsock()` | 5.1 | 取 app full socket | 整体 Inactive |
-| `BPF_MAP_TYPE_SK_STORAGE` + `bpf_sk_storage_get(F_CREATE)` | 5.2 | TCP first-decision | 整体 Inactive |
-| `bpf_sk_lookup_tcp/udp()` + `bpf_sk_release()` | 4.20 | listener liveness / assign 目标 | 整体 Inactive |
-| `bpf_sk_assign()`（TC ingress） | 5.7 | 交付给 TProxy listener | 整体 Inactive |
-| `BPF_MAP_TYPE_ARRAY_OF_MAPS` | 4.12 | control snapshot 原子发布 | 整体 Inactive |
-| `BPF_MAP_FREEZE` | 5.2 | leaf 不可变 | 可降级为不 freeze（仅卫生） |
-| `BPF_MAP_TYPE_RINGBUF` | 5.8 | fault-only 通知 | 可降级为无自愈通知 |
-| `BPF_MAP_TYPE_LPM_TRIE` | 4.11 | CIDR bypass | 整体 Inactive |
-| `bpf_skb_change_head()` | 4.16 | raw-IP 补以太头 | 该 interface 排除（仅 L3 入口） |
-| `bpf_skb_store_bytes()` / `bpf_skb_pull_data()` | 4.1 / 4.9 | 安全写包 | 整体 Inactive |
-| `bpf_redirect()` | 4.4 | 回送 veth | 整体 Inactive |
-| `BPF_BTF_LOAD` | 5.1 | SK_STORAGE 必需的 BTF | 整体 Inactive |
-| `veth`（`CONFIG_VETH=y`，GKI built-in） | — | 回送拓扑 | 整体 Inactive |
-| `CONFIG_NETKIT` | — | **GKI 四个分支全部缺失** → dae 的 netkit L3 快路径在 Android 不可用，veth 是唯一选项 | — |
-| `clsact` qdisc | 4.5 | TC 挂载点 | 该 interface 排除 |
-| RPDB `iif` selector + `RTN_LOCAL` 路由 | — | 本地交付 | 整体 Inactive |
-| `NETLINK_SOCK_DIAG`（inet_diag） | — | listener readiness 核验 | 整体 Inactive |
-| `pidfd_open` + `PR_SET_PDEATHSIG` | 5.3 | engine 生命周期 | 整体 Inactive |
-| `signalfd` / `inotify` / `timerfd` / `epoll` | — | reactor | 整体 Inactive |
+| `BPF_PROG_TYPE_SCHED_CLS` + direct-action | 4.4 / 4.5 | the four programs | Inactive overall |
+| `bpf_get_socket_uid()` | 4.3 | coarse UID selection | Inactive overall |
+| `__sk_buff->sk` + `bpf_sk_fullsock()` | 5.1 | reach the app's full socket | Inactive overall |
+| `BPF_MAP_TYPE_SK_STORAGE` + `bpf_sk_storage_get(F_CREATE)` | 5.2 | the TCP first decision | Inactive overall |
+| `bpf_sk_lookup_tcp/udp()` + `bpf_sk_release()` | 4.20 | listener liveness and the assign target | Inactive overall |
+| `bpf_sk_assign()` on TC ingress | 5.7 | delivery to the TProxy listener | Inactive overall |
+| `BPF_MAP_TYPE_ARRAY_OF_MAPS` | 4.12 | atomic publication of the control snapshot | Inactive overall |
+| `BPF_MAP_FREEZE` | 5.2 | leaf immutability | degrade to not freezing; hygiene only |
+| `BPF_MAP_TYPE_RINGBUF` | 5.8 | fault-only notification | degrade to no self-healing notification |
+| `BPF_MAP_TYPE_LPM_TRIE` | 4.11 | CIDR bypass | Inactive overall |
+| `bpf_skb_change_head()` | 4.16 | push an Ethernet header on raw-IP | exclude that interface; L3 entry only |
+| `bpf_skb_store_bytes()` / `bpf_skb_pull_data()` | 4.1 / 4.9 | safe packet writes | Inactive overall |
+| `bpf_redirect()` | 4.4 | redirect into the veth | Inactive overall |
+| `BPF_BTF_LOAD` | 5.1 | the BTF that SK_STORAGE requires | Inactive overall |
+| `veth` (`CONFIG_VETH=y`, built into GKI) | — | the loopback topology | Inactive overall |
+| `CONFIG_NETKIT` | — | **absent from all four GKI branches**, so dae's netkit L3 fast path is unavailable on Android and veth is the only option | — |
+| `clsact` qdisc | 4.5 | the TC attach point | exclude that interface |
+| RPDB `iif` selector + an `RTN_LOCAL` route | — | local delivery | Inactive overall |
+| `NETLINK_SOCK_DIAG` (inet_diag) | — | verifying listener readiness | Inactive overall |
+| `pidfd_open` + `PR_SET_PDEATHSIG` | 5.3 | engine lifecycle | Inactive overall |
+| `signalfd` / `inotify` / `timerfd` / `epoll` | — | the reactor | Inactive overall |
 
-**已知的 6.5 之前限制**：`bpf_sk_assign()` 拒绝 `SO_REUSEPORT` socket。见 §9.2 的硬约束。
+**A known limitation before 6.5:** `bpf_sk_assign()` rejects a `SO_REUSEPORT` socket. This is the hard constraint of §9.2.
 
 ---
 
-# 第 5 部分：crate 与模块结构
+# Part 5: Crate and module structure
+
+Three crates, one product binary, and no abstraction built for a single
+implementation.
 
 ```text
 Flux-rs/
 ├── Cargo.toml                     # [workspace] members = ["crates/flux-core","crates/fluxd","xtask"]
 ├── Cargo.lock
-├── rust-toolchain.toml            # stable，pin 精确版本；targets = ["aarch64-linux-android"]
-├── engine.lock                    # 官方 sing-box pin
+├── rust-toolchain.toml            # stable, pinned exactly; targets = ["aarch64-linux-android"]
+├── engine.lock                    # the official sing-box pin
 ├── LICENSE / README.md / CHANGELOG.md / THIRD_PARTY_NOTICES.md
 ├── licenses/…
 ├── bpf/
-│   ├── flux.bpf.c                 # 唯一 BPF 源文件（见 bpf/flux.bpf.c）
-│   └── include/flux_abi.h         # C 与 Rust 共享 ABI 真相源（见 bpf/include/flux_abi.h）
+│   ├── flux.bpf.c                 # the only BPF source file
+│   └── include/flux_abi.h         # ABI source of truth, shared by C and Rust
 ├── crates/
-│   ├── flux-core/                 # 纯逻辑，无 libc / 无 syscall / 跨平台可测
+│   ├── flux-core/                 # pure logic: no libc, no syscalls, testable anywhere
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── config.rs          # flux.toml 解析 + canonicalize + 硬上限
-│   │       ├── selector.rs        # "userId:package" 解析、UID 计算、appId 范围校验
-│   │       ├── cidr.rs            # v4/v6 CIDR canonicalize、固定 bypass、LPM key 编码
-│   │       ├── engine_config.rs   # 用户 sing-box.json 校验 + effective JSON 生成
-│   │       ├── abi.rs             # flux_abi.h 的 Rust 镜像 + size/offset 断言
-│   │       ├── control_wire.rs    # 控制协议请求/响应类型（serde）
-│   │       └── version.rs         # SemVer → versionCode / artifact 名
-│   └── fluxd/                     # Linux/Android 运行时（单一产品二进制）
-│       ├── build.rs               # clang 编译 bpf/flux.bpf.c，OUT_DIR 产出 object
+│   │       ├── config.rs          # flux.toml parse, canonicalise, hard ceilings
+│   │       ├── selector.rs        # "userId:package" parse, UID maths, appId range
+│   │       ├── cidr.rs            # CIDR canonicalise, fixed bypass, LPM key encoding
+│   │       ├── engine_config.rs   # template validation and generated-config assembly
+│   │       ├── abi.rs             # Rust mirror of flux_abi.h, with layout assertions
+│   │       ├── control_wire.rs    # control protocol request/response types
+│   │       └── version.rs         # SemVer to versionCode and artifact name
+│   └── fluxd/                     # the Linux/Android runtime: one product binary
+│       ├── build.rs               # compiles bpf/flux.bpf.c with clang into OUT_DIR
 │       └── src/
 │           ├── main.rs            # CLI dispatch
-│           ├── layout.rs          # /data/adb/flux-rs 目录、权限、单实例锁
-│           ├── control.rs         # SOCK_SEQPACKET 服务端 + 客户端
-│           ├── reactor.rs         # 单线程 epoll 事件循环 + 状态机 + 收敛
-│           ├── packages.rs        # /data/system/packages.list 读取与解析
-│           ├── netlink/           # rtnetlink：link/addr/route/rule/tc 的编解码与操作
-│           ├── bpf/               # 最小加载器：syscall、BTF blob、relocation、map、ringbuf
-│           ├── dataplane.rs       # 对象生命周期、control leaf 发布、interface admission
-│           └── engine.rs          # effective JSON 落盘、check、spawn、SOCK_DIAG readiness
-├── module/                        # Magisk/KernelSU/APatch 信封源
-└── xtask/                         # 构建 / 打包 / release，只在开发机运行
+│           ├── layout.rs          # directories, permissions, single-instance lock
+│           ├── control.rs         # SOCK_SEQPACKET server and client
+│           ├── reactor.rs         # single-threaded epoll loop, state machine, convergence
+│           ├── packages.rs        # reads and parses /data/system/packages.list
+│           ├── netlink/           # rtnetlink: link/addr/route/rule/tc codecs and operations
+│           ├── bpf/               # minimal loader: syscalls, BTF blob, relocation, maps, ringbuf
+│           ├── dataplane.rs       # object lifecycle, control leaf publication, admission
+│           └── engine.rs          # config write-out, check, spawn, SOCK_DIAG readiness
+├── module/                        # the Magisk/KernelSU/APatch envelope
+└── xtask/                         # build, package, release; development host only
 ```
 
-依赖方向：`flux-core` 不依赖任何 crate（除 serde/toml/serde_json）；`fluxd → flux-core`；`xtask → flux-core`。**禁止** `flux-core` 依赖 `fluxd`，**禁止**新增 platform/testkit/backend registry crate，**禁止**为单一实现创建 trait 抽象层。
+Dependency direction: `flux-core` depends on no crate beyond serde, toml and
+serde_json; `fluxd → flux-core`; `xtask → flux-core`. `flux-core` MUST NOT
+depend on `fluxd`. No platform, testkit or backend-registry crate may be added,
+and **no trait abstraction may be created for a single implementation.**
 
-`fluxd` 内部模块依赖：`main → reactor → {layout, control, packages, netlink, bpf, dataplane, engine}`；后者不反向依赖 `reactor`。全部运行时状态在 `reactor` 拥有的单个 `Runtime` 结构里，无可变全局。
+Module dependencies inside `fluxd`:
+`main → reactor → {layout, control, packages, netlink, bpf, dataplane, engine}`,
+with no reverse edge back to `reactor`. All runtime state lives in one `Runtime`
+struct owned by `reactor`; there is no mutable global.
 
-**一条从旧仓库继承的边界要求**：旧的过度设计复审判定"在 daemon 里直接写裸 rtnetlink 消息（`native_canary_facility.rs` 里的 ACK/超时/序列号处理）违反深模块原则"。合并 `flux-platform` 之后这条依然成立，只是边界从 crate 变成模块：**裸 netlink 消息构造、序列号、ACK 与超时处理只允许出现在 `fluxd/src/netlink/` 内部；裸 `bpf(2)` 只允许出现在 `fluxd/src/bpf/` 内部。** `reactor` 与 `dataplane` 只看到类型化操作（`create_veth`、`add_rule`、`attach_filter`、`publish_control`），看不到 `nlmsghdr`。
+**One boundary inherited from the previous repository.** The old over-design
+review found that writing raw rtnetlink messages directly in the daemon — the
+sequence-number, ACK and timeout handling in `native_canary_facility.rs` —
+violated the deep-module principle. Merging `flux-platform` away did not retire
+that finding; it only moved the boundary from a crate to a module:
+
+**Raw netlink message construction, sequence numbers, ACK and timeout handling
+belong inside `fluxd/src/netlink/` and nowhere else. Raw `bpf(2)` belongs inside
+`fluxd/src/bpf/` and nowhere else.** `reactor` and `dataplane` see typed
+operations — `create_veth`, `add_rule`, `attach_filter`, `publish_control` — and
+never an `nlmsghdr`.
+
+The test is not module count but what a caller must know. A module is deep when
+its interface is much smaller than the knowledge it holds; `attach_filter` is
+deep because the caller needs to know nothing about netlink framing, and a
+`Capture` trait with one implementation is shallow because it adds a name
+without removing anything a caller must understand (PHIL-1).
 
 ---
 
-# 第 6 部分：BPF ABI
+# Part 6: The BPF ABI
 
-`bpf/include/flux_abi.h` 是唯一真相源，见 `bpf/include/flux_abi.h`。`flux-core/src/abi.rs` 是手写镜像，并**必须**带 `#[test]` 断言每个 `size_of` / 字段 offset 与 C 一致（`xtask` 在 CI 里用 clang 打印 offset 对照）。改动任何布局**必须**同时改 `FLUX_ABI_MAGIC`。
+`bpf/include/flux_abi.h` is the only source of truth. `flux-core/src/abi.rs` is a
+hand-written mirror and MUST carry tests asserting every `size_of` and field
+offset against it, with `cargo xtask abi-check` having clang compute the C side
+in CI. **Changing any layout MUST change `FLUX_ABI_MAGIC` in the same commit.**
 
-## 6.1 map 集合（稳态 12 个 kernel object）
+## 6.1 The map set — 12 kernel objects in steady state
 
-| 名称 | 类型 | key | value | max_entries / flags |
+| Name | Type | Key | Value | max_entries / flags |
 |---|---|---|---|---|
 | `uid_policy` | `HASH` | `__u32 uid` | `__u8` (`FLUX_UID_*`) | 4096 |
-| `bypass_v4` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` | 65536，`BPF_F_NO_PREALLOC`（内核强制，故 `max_entries` 只是上限） |
-| `bypass_v6` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` | 65536，同上 |
-| `self_addr_v4` | `HASH` | `__u8[4]` | `__u8` | 256（D20：本机地址是全长前缀，不进 LPM） |
-| `self_addr_v6` | `HASH` | `__u8[16]` | `__u8` | 256，同上 |
-| `uid_stats` | `PERCPU_HASH` | `__u32 uid` | `struct flux_uid_stats`（16 B） | 4096（D23，只在已捕获包上更新） |
-| `tcp_decision` | `SK_STORAGE` | `int`（隐式） | `struct flux_decision`（16 B） | 0，`BPF_F_NO_PREALLOC`，**需 BTF** |
-| `control_root` | `ARRAY_OF_MAPS` | `__u32 0` | 当前 leaf 引用 | 1 |
-| `control_leaf` | `ARRAY`（inner） | `__u32 0` | `struct flux_control` | 1，写满后 `BPF_MAP_FREEZE` |
+| `bypass_v4` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` (`FLUX_BYPASS_*`) | 65536, `BPF_F_NO_PREALLOC` — kernel-forced, so `max_entries` is only a ceiling |
+| `bypass_v6` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` (`FLUX_BYPASS_*`) | 65536, as above |
+| `self_addr_v4` | `HASH` | `__u8[4]` | `__u8` | 256 — D20: local addresses are full-length prefixes and never enter the LPM |
+| `self_addr_v6` | `HASH` | `__u8[16]` | `__u8` | 256, as above |
+| `uid_stats` | `PERCPU_HASH` | `__u32 uid` | `struct flux_uid_stats` (16 B) | 4096 — D23, updated only on captured packets |
+| `tcp_decision` | `SK_STORAGE` | `int`, implicit | `struct flux_decision` (16 B) | 0, `BPF_F_NO_PREALLOC`, **requires BTF** |
+| `control_root` | `ARRAY_OF_MAPS` | `__u32 0` | reference to the current leaf | 1 |
+| `control_leaf` | `ARRAY`, inner | `__u32 0` | `struct flux_control` | 1, `BPF_MAP_FREEZE` once written |
 | `fault_latch` | `HASH` | `struct flux_fault_key` | `__u8` | 64 |
-| `fault_events` | `RINGBUF` | — | `struct flux_fault_event`（32 B） | 16384 bytes |
+| `fault_events` | `RINGBUF` | — | `struct flux_fault_event` (32 B) | 16384 bytes |
 | `counters` | `PERCPU_ARRAY` | `__u32 idx` | `__u64` | 32 |
 
-- 发布期短暂同时存在 old/new 两个 `control_leaf`，其它时刻共 12 个。
-- `fault_events` 固定 16384 是同时满足"2 的幂且 PAGE_SIZE 对齐"在 4 KiB 与 16 KiB 下的最小通用值，避免 ABI 分叉。
-- map 默认**不 pin**。
-- **禁止**引入会让 selected packet 全局争用的 `bpf_spin_lock`、per-packet telemetry、per-flow map，或声称大 struct 的 `ARRAY` update 是原子的。新增任何 map 必须写明热路径与生命周期成本。
+- During publication two `control_leaf` maps exist briefly; at every other moment
+  there are 12 objects.
+- `fault_events` is fixed at 16384 because that is the smallest value that is
+  both a power of two and PAGE_SIZE-aligned under 4 KiB and 16 KiB alike, which
+  keeps the ABI from forking on page size.
+- Maps are **not pinned**.
+- Forbidden: a `bpf_spin_lock` that would make selected packets contend
+  globally; per-packet telemetry; a per-flow map; and any claim that an `ARRAY`
+  update of a large struct is atomic. Adding a map requires stating its hot-path
+  and lifecycle cost.
 
-## 6.2 `flux_decision`（SK_STORAGE value）
+### 6.1.1 The bypass value distinguishes mechanism from policy
+
+One LPM set was doing two unrelated jobs:
+
+| | Internal: a mechanism invariant | External: user policy |
+|---|---|---|
+| Contents | loopback, link-local, multicast and broadcast, listener addresses | LAN, chnroute, a CGNAT gateway |
+| Cost of violation | self-capture, contending with a local service for a port — the mechanism breaks | the user's own trade-off |
+| Affected by `mode` | **never** | yes |
+
+Mixing them had concrete costs: the allow-list semantics were ambiguous (does a
+listener address belong in the user's allow list?), the fakeip check had to
+reason about a union, and listener addresses had to be written in two places.
+
+The value byte already exists and **has never been read**: the loader always
+writes `1` and the BPF side only tests for a non-NULL pointer. Tagging it costs
+no new map and no new lookup.
+
+```c
+#define FLUX_BYPASS_RESERVED 1   /* mechanism invariant; always direct */
+#define FLUX_BYPASS_POLICY   2   /* user policy; subject to cidr.mode */
+```
+
+One lookup, plus one branch on a mode flag carried in `flux_control`:
+
+| LPM result | blacklist | whitelist |
+|---|---|---|
+| hit `RESERVED` | direct | direct |
+| hit `POLICY` | direct | **capture** |
+| miss | capture | direct |
+
+`cidr_mode` occupies `flux_control`'s existing `pad0[2]`, so the struct size and
+every offset are unchanged — but the **contract** changed, so `FLUX_ABI_MAGIC`
+MUST be bumped. That is the smallest possible ABI change carrying this meaning.
+
+This split is PHIL-1 applied to a map. The reference implementations reach the
+same shape by other means: `AndroidTProxyShell/tproxy.sh:980-1012` orders
+mechanism before policy by chain position, and
+`box4magisk/box/scripts/net.inotify:15-22` inserts local addresses as a separate
+anti-loopback rule on a different path from the user's `cn.zone`. Flux had
+already done half of it — D20 moved local addresses into their own `self_addr_*`
+HASH, which is why `bypass_hit()` in `bpf/flux.bpf.c:420-439` is already
+two-level. This finishes the second level.
+
+What it buys: the allow-list semantics stop being ambiguous, because `RESERVED`
+ignores the mode and listener addresses are simply not in the user's set, so the
+question disappears; the fakeip check splits into two separately decidable
+sentences, where intersecting `RESERVED` is a hard refusal on mechanism grounds
+(PHIL-6) and the relation to `POLICY` follows the mode and is the user's
+trade-off; and the `[cidr]` documentation shrinks to one sentence, because it
+now describes user policy only.
+
+## 6.2 `flux_decision`, the SK_STORAGE value
 
 ```c
 struct flux_decision {
-    __u32 magic;        /* == FLUX_DECISION_MAGIC，防止误读未初始化/他方 storage */
+    __u32 magic;        /* == FLUX_DECISION_MAGIC; rejects uninitialised or foreign storage */
     __u8  mode;         /* FLUX_DEC_DIRECT | FLUX_DEC_CAPTURED */
-    __u8  reserved[3];  /* 必须为 0 */
-    __u64 generation;   /* CAPTURED 时为入场 generation；DIRECT 时为 0 */
+    __u8  reserved[3];  /* MUST be zero */
+    __u64 generation;   /* the admitting generation when CAPTURED; 0 when DIRECT */
 };
 ```
 
-**不变量**：创建后**绝不原地改写**。`DIRECT` 不是 admission；观察到合法 `CAPTURED` 的下一条指令起就是 admission。storage 随 app socket 析构释放，不存在 LRU 容量驱逐。
+**Invariant: never rewritten in place once created.** `DIRECT` is not admission;
+admission begins at the instruction after a valid `CAPTURED` is observed. The
+storage is released when the app's socket is destroyed, and there is no LRU
+capacity eviction to race with.
 
-## 6.3 `flux_control`（不可变 snapshot）
+## 6.3 `flux_control`, an immutable snapshot
 
-字段见 `bpf/include/flux_abi.h`。要点：
+Fields are in `bpf/include/flux_abi.h`. What matters here:
 
-- `abi_magic`、`generation`、`active`；
-- `flxrs0_ifindex`（redirect 目标）、`flxrs1_ifindex`；
-- **没有 MAC 字段**（D17）。egress 不改写以太头，由 ingress 的 `bpf_skb_change_type(skb, PACKET_HOST)` 兜住 `eth_type_trans()` 判出的 `PACKET_OTHERHOST`；
-- `listen_v4[4]` / `listen_v6[16]` / `listen_port_v4` / `listen_port_v6`（网络字节序）；
-- `probe_remote_v4[4]` / `probe_remote_v6[16]` / `probe_remote_port`（固定 synthetic 远端，用于确定性 listener lookup）；
-- 诊断计数：`selected_count` / `draining_count` / `bypass_v4_count` / `bypass_v6_count`。
+- `abi_magic`, `generation`, `active`;
+- `flxrs0_ifindex`, the redirect target, and `flxrs1_ifindex`;
+- **no MAC field** (D17). Egress rewrites no Ethernet header, and ingress covers
+  the `PACKET_OTHERHOST` that `eth_type_trans()` derives by calling
+  `bpf_skb_change_type(skb, PACKET_HOST)`;
+- `listen_v4[4]` / `listen_v6[16]` / `listen_port_v4` / `listen_port_v6`, in
+  network byte order;
+- `probe_remote_v4[4]` / `probe_remote_v6[16]` / `probe_remote_port`, the fixed
+  synthetic remote that makes the listener lookup deterministic;
+- `cidr_mode`, in the former `pad0[2]` (§6.1.1);
+- diagnostic counts: `selected_count`, `draining_count`, `bypass_v4_count`,
+  `bypass_v6_count`.
 
-## 6.4 control snapshot 的原子发布协议
+## 6.4 Publishing a control snapshot atomically
 
-**已核验**：`ARRAY_OF_MAPS` 的 update 取新 inner map 引用后 `xchg()` 指针，syscall 返回前 `synchronize_rcu()`，旧 inner map 在再一个 RCU grace period 后释放。因此：
+**Verified:** updating an `ARRAY_OF_MAPS` takes a reference to the new inner map,
+`xchg()`es the pointer, calls `synchronize_rcu()` before the syscall returns, and
+frees the old inner map after a further RCU grace period. Therefore:
 
-1. 创建新 `control_leaf`（`ARRAY`，1 元素）；
-2. 一次 `bpf_map_update_elem(leaf, 0, &full_control)` 写满整个 struct；
-3. `BPF_MAP_FREEZE(leaf)`；
-4. `bpf_map_update_elem(control_root, 0, &leaf_fd)` 发布；
-5. 关闭旧 leaf fd。
+1. create a new `control_leaf`, an `ARRAY` of one element;
+2. write the whole struct with a single
+   `bpf_map_update_elem(leaf, 0, &full_control)`;
+3. `BPF_MAP_FREEZE(leaf)`;
+4. publish with `bpf_map_update_elem(control_root, 0, &leaf_fd)`;
+5. close the old leaf fd.
 
-**BPF 侧强制约束**：每次 invocation **只** lookup `control_root[0]` 一次，把返回的 inner value 指针一直用到本次结束。leaf 先 freeze 后 publish、永不原地改。这样单次 invocation 只会看到旧或新的**完整** snapshot，不会看到 `memcpy` 中途撕裂的字段。
+**Mandatory on the BPF side:** look up `control_root[0]` exactly **once** per
+invocation and use the returned inner pointer for the rest of that invocation.
+The leaf is frozen before publication and never modified in place. A single
+invocation therefore sees either the old or the new snapshot **whole**, and never
+a struct torn mid-`memcpy`.
 
-**何时创建新 leaf**：engine generation 切换、`active` 0/1 翻转、拓扑字段（ifindex / listener 地址与端口）变化。（**没有 MAC 字段**——D17 之后 `flux_control` 里不存在 MAC。）**policy 变化（UID/CIDR）不创建新 leaf、不翻转 `active`**（D5）。
+**When a new leaf is created:** an engine generation switch, an `active` flip
+between 0 and 1, or a change to a topology field — an ifindex, a listener address
+or port. **A policy change to UIDs or CIDRs creates no new leaf and does not
+flip `active`** (D5), and the diagnostic counts above are refreshed only when the
+next legitimate leaf is published. BPF programs MUST NOT treat those counts as
+policy authority, and `status` computes live counts from the data plane's current
+set rather than reading them.
 
 ## 6.5 generation
 
-同一 boot 内从 1 单调递增，**不复用、不重置**。daemon 冷启动时从 1 开始（此时旧对象已被删除重建，不存在跨代 in-flight 包）。`u64` 计数，产品生命周期内不可能 wrap。generation 只在 §9.4 的 engine 候选切换中递增。
+Monotonically increasing from 1 within a boot, **never reused and never reset**.
+A cold daemon start begins at 1, which is safe because the old objects have been
+deleted and rebuilt by then, so no cross-generation packet is in flight. It is a
+`u64` and cannot wrap within the product's lifetime. Only the engine candidate
+switch of §9.4 increments it.
 
 ---
 
-# 第 7 部分：数据面算法
+# Part 7: Data-plane algorithms
 
-## 7.1 公共约束
+## 7.1 Constraints common to every program
 
-- 三个 entry：`flx_cap_l2`、`flx_cap_l3`（egress）、`flx_in`（ingress）。共享 `static __always_inline` 辅助函数，实际逻辑只有一份。
-- **禁止** tail call、BPF-to-BPF 调用图、perf event、BPF timer、spinlock、per-CPU 统计（除 §6.1 的 `counters`）。
-- 每个 `bpf_sk_lookup_tcp/udp()` 返回的引用**必须**在每条分支上恰好 `bpf_sk_release()` 一次。`bpf_sk_assign()` **不**代替 release。`bpf_sk_fullsock()` 不取引用，**不得** release。
-- 禁止把 socket 指针存进 map 或跨程序传递。
-- 所有 offset 运算先做 verifier 可见的固定上界与 `data_end` 检查。
-- 对 skb 的写入**必须**经 `bpf_skb_store_bytes()`；深层解析前若 `data_end` 不足，调用一次 `bpf_skb_pull_data(skb, FLUX_MAX_PULL_BYTES)` 并重读 `data`/`data_end`（D15）。
+- Four entry points: `flx_cap_l2` and `flx_cap_l3` on egress, `flx_in` on
+  ingress, and `flx_verify` for liveness (§8.5.4). They share
+  `static __always_inline` helpers, so the logic exists once.
+- Forbidden: tail calls, a BPF-to-BPF call graph, perf events, BPF timers,
+  spinlocks, and per-CPU statistics other than `counters` and `uid_stats`
+  (§6.1).
+- Every reference returned by `bpf_sk_lookup_tcp/udp()` MUST be released by
+  exactly one `bpf_sk_release()` on every branch. **`bpf_sk_assign()` does not
+  release.** `bpf_sk_fullsock()` takes no reference and MUST NOT be released.
+- A socket pointer MUST NOT be stored in a map or passed between programs.
+- Every offset computation is preceded by a fixed bound and a `data_end` check
+  the verifier can see.
+- Writes to an skb MUST go through `bpf_skb_store_bytes()`. When `data_end` is
+  insufficient before a deeper parse, call
+  `bpf_skb_pull_data(skb, FLUX_MAX_PULL_BYTES)` once and re-read `data` and
+  `data_end` (D15).
 
-## 7.2 解析上界
+## 7.2 Parse bounds
 
-- IPv4：最小 header、`version == 4`、`ihl ∈ [5,15]`、`tot_len` 合理；`MF` 或非零 fragment offset → 走 fragment 分支。
-- IPv6：最多 4 个 extension header、累计 ≤ 256 bytes；遇 Fragment header → fragment 分支；遇 ESP / No-Next-Header / 未知 ext / jumbogram → Direct。
-- 只接受 `IPPROTO_TCP` / `IPPROTO_UDP`；TCP 必须能读到固定 header 与 flags；UDP 必须有完整 8 字节 header。
+- **IPv4:** minimum header present, `version == 4`, `ihl ∈ [5,15]`, a plausible
+  `tot_len`. `MF` set or a non-zero fragment offset takes the fragment branch.
+- **IPv6:** at most 4 extension headers totalling at most 256 bytes. A Fragment
+  header takes the fragment branch; ESP, No-Next-Header, an unknown extension or
+  a jumbogram is Direct.
+- Only `IPPROTO_TCP` and `IPPROTO_UDP` are accepted. TCP must expose its fixed
+  header and flags; UDP must have a complete 8-byte header.
 
-## 7.3 egress 算法（`flx_cap_l2` / `flx_cap_l3`）
+## 7.3 The egress algorithm (`flx_cap_l2` / `flx_cap_l3`)
 
 ```
 E0  if skb->protocol ∉ {ETH_P_IP, ETH_P_IPV6}            -> UNSPEC
@@ -723,8 +1336,8 @@ E0  if skb->protocol ∉ {ETH_P_IP, ETH_P_IPV6}            -> UNSPEC
 E1  skc = skb->sk;             if !skc                   -> UNSPEC
     sk  = bpf_sk_fullsock(skc);if !sk                    -> UNSPEC
     uid = bpf_get_socket_uid(skb)
-    mode = uid_policy[uid];    if miss                   -> UNSPEC   ← 未选流量的全部代价
-E2  /* 已有决策：不解析 L4，fragment 亦跟随决策 */
+    mode = uid_policy[uid];    if miss                   -> UNSPEC   <- the entire cost for unselected traffic
+E2  /* a decision exists: no L4 parse, and fragments follow the decision */
     d = bpf_sk_storage_get(&tcp_decision, sk, NULL, 0)
     if d:
         if d->magic != FLUX_DECISION_MAGIC || d->reserved != 0 || d->mode unknown
@@ -734,28 +1347,28 @@ E2  /* 已有决策：不解析 L4，fragment 亦跟随决策 */
         if !c->active                                     -> cnt(INACTIVE); SHOT
         if d->generation != c->generation                 -> cnt(STALE_GEN); SHOT
         goto HANDOFF(c)
-E3  /* 无决策 */
-    parse L3（有界）;  if unsupported                      -> UNSPEC
+E3  /* no decision yet */
+    parse L3 (bounded);  if unsupported                  -> UNSPEC
     if fragment:
         if bypass_lookup(family, daddr)                   -> UNSPEC
         c = ctrl()
         if mode == SELECTED && c && c->active             -> cnt(UDP_FRAG_DROP); SHOT
         else                                              -> UNSPEC
-    parse L4（有界）;  if !TCP && !UDP                     -> UNSPEC
+    parse L4 (bounded);  if !TCP && !UDP                 -> UNSPEC
 E4  if TCP:
-        if !(SYN && !ACK)                                 -> UNSPEC   /* 捕获前已建立的连接不付 control 代价 */
+        if !(SYN && !ACK)                                 -> UNSPEC   /* a connection established before capture pays no control cost */
         cand.magic = FLUX_DECISION_MAGIC
         c = ctrl()
         capture = (mode == SELECTED)
                && c && c->active
                && !bypass_lookup(family, daddr)
-               && listener_alive(c, family, TCP)          /* miss 时发一次 fault */
+               && listener_alive(c, family, TCP)          /* emits one fault on a miss */
         cand.mode = capture ? CAPTURED : DIRECT
         cand.generation = capture ? c->generation : 0
         d = bpf_sk_storage_get(&tcp_decision, sk, &cand, BPF_SK_STORAGE_GET_F_CREATE)
-        if !d: d = bpf_sk_storage_get(&tcp_decision, sk, NULL, 0)   /* 并发 loser 只读重查 winner */
-        if !d:  cnt(ALLOC_FAIL);                          -> UNSPEC /* 无粘性，后续 SYN 可重判 */
-        /* 无条件服从 winner，即使与本次 cand 相反 */
+        if !d: d = bpf_sk_storage_get(&tcp_decision, sk, NULL, 0)   /* a concurrent loser re-reads the winner */
+        if !d:  cnt(ALLOC_FAIL);                          -> UNSPEC /* no stickiness; a later SYN may decide again */
+        /* obey the winner unconditionally, even where it contradicts this cand */
         if d->mode == DIRECT: cnt(DIRECT_FIRST)           -> UNSPEC
         if !c || !c->active || d->generation != c->generation
                                                           -> cnt; SHOT
@@ -768,20 +1381,29 @@ E5  if UDP:
         cnt(ADMIT_UDP); goto HANDOFF(c)
 
 HANDOFF(c):
-    l2: /* 不写任何 packet 字节 */
+    l2: /* writes no packet byte */
     l3: ok = bpf_skb_change_head(skb, ETH_HLEN, 0) == 0
-          && bpf_skb_store_bytes(skb, 12, &ethertype, 2, 0) == 0   /* 头 12 字节已被内核置零 */
-        if !ok: cnt(HANDOFF_FAIL); SHOT      /* 已越过 admission，只能 drop */
+          && bpf_skb_store_bytes(skb, 12, &ethertype, 2, 0) == 0   /* the kernel already zeroed the first 12 bytes */
+        if !ok: cnt(HANDOFF_FAIL); SHOT      /* past admission, so dropping is the only option */
     return bpf_redirect(c->flxrs0_ifindex, 0)
 ```
 
-要点：
+Three properties this ordering buys:
 
-- **E2 在 E3 之前**：CAPTURED 的稳态包完全不解析 IP/TCP。L2 路径只做 1 次 storage 查、2 次 map 查、1 次 redirect——**零字节写入**（D17）；L3 路径额外一次 `bpf_skb_change_head(14)` 加一次 2 字节 EtherType 写。
-- `SYN` 重传命中同一不可变 state：`DIRECT` 永远 direct，`CAPTURED` 保持同 generation。只有"从未成功安装 decision"的分配失败边界会重判（§2.2.1 最后一条）。
-- `DIRECT` state 存在的价值：避免同一 `connect()` 在 bypass/active/短故障期间的重传因策略变化而在 direct/proxy 间翻转。代价只是每个 selected-direct socket 一个 16 字节 storage，无每包写入。
+- **E2 precedes E3.** A steady-state packet on a captured flow parses no IP and
+  no TCP at all. The L2 path performs one storage lookup, two map lookups and one
+  redirect, **writing zero bytes** (D17); the L3 path adds one
+  `bpf_skb_change_head(14)` and one 2-byte EtherType write.
+- **A retransmitted `SYN` meets the same immutable state.** `DIRECT` stays
+  direct and `CAPTURED` keeps its generation. Only the allocation-failure edge,
+  where no decision was ever installed, is decided again (the last item of
+  §2.2.1).
+- **The `DIRECT` state earns its keep.** Without it, retransmissions of one
+  `connect()` could flip between direct and proxied as bypass, `active` or a
+  brief fault changed underneath them. The cost is 16 bytes of storage per
+  selected-but-direct socket and no per-packet write.
 
-## 7.4 `listener_alive()` 与 fault 通知
+## 7.4 `listener_alive()` and fault notification
 
 ```
 listener_alive(c, family, proto):
@@ -792,41 +1414,57 @@ listener_alive(c, family, proto):
     if !sk2: fault_once(c, family, proto, LISTENER_MISS); return false
     ok = sk2->family == (family == 4 ? AF_INET : AF_INET6)
       && (proto == TCP ? sk2->state == BPF_TCP_LISTEN : 1)
-      && bound_addr_matches(sk2, c)          /* src_ip4 / src_ip6 == listen 地址 */
+      && bound_addr_matches(sk2, c)          /* src_ip4 / src_ip6 == the listen address */
       && sk2->src_port == host_order(listen_port)
     bpf_sk_release(sk2)
     if !ok: fault_once(c, family, proto, LISTENER_GUARD); 
     return ok
 ```
 
-**固定 synthetic 远端**（`probe_remote_*`）使 lookup key 每次相同：确定性、cache 友好，且排除了偶然命中某条 established socket 的可能。
+**The fixed synthetic remote** (`probe_remote_*`) makes the lookup key identical
+every time: deterministic, cache-friendly, and incapable of accidentally matching
+some established socket.
 
-`bpf_sock` 字节序注意：`src_port` 是**主机序**，`dst_port` 是**网络序**（内核 ABI 的既有不一致）。
+**Byte-order trap in `bpf_sock`:** `src_port` is in **host** order while
+`dst_port` is in **network** order. This is a pre-existing inconsistency in the
+kernel ABI, not a choice available here, and getting it backwards produces a
+guard that fails for reasons no log will explain.
 
-**fault 通知规则**：
+**Fault notification rules:**
 
-- 只对两类事件通知：① egress 的 `listener_alive` 失败（包未修改，返回 `UNSPEC`）；② ingress 已通过前置检查但 lookup/guard/assign 失败（已入场，drop）。
-- 机制：以 `{generation, family, protocol, reason}` 对 `fault_latch` 做 `BPF_NOEXIST` 插入；只有首次成功插入者向 `fault_events` 写一条 32 字节事件。ringbuf 满则**删除刚插入的 latch**，让后续包重试。
-- **不为** parse 错误、bypass、UID miss、`active=0`、正常 Direct 发事件。事件只含 `generation/family/protocol/reason`，**不含** header、UID、地址、payload。
-- `fluxd` 收到 current-generation fault → 先 publish `active=0`，再重启整个 engine generation。handler 按 generation/state 幂等；旧/重复事件只清 latch 并忽略。新 generation 激活前清空 latch。
-- 合同是"不会形成稳态 event storm"，**不是** exactly-once。
+- Only two classes of event are notified: ① a `listener_alive` failure on
+  egress, where the packet is unmodified and returns `UNSPEC`; ② an ingress
+  lookup, guard or assign failure after the earlier checks passed, where the flow
+  is already admitted and the packet is dropped.
+- Mechanism: insert `{generation, family, protocol, reason}` into `fault_latch`
+  with `BPF_NOEXIST`; only the program that wins that insert writes one 32-byte
+  event to `fault_events`. **If the ringbuf is full, delete the latch just
+  inserted**, so a later packet retries rather than the fault being lost.
+- No event is emitted for a parse error, a bypass hit, a UID miss, `active=0` or
+  an ordinary Direct. An event carries only generation, family, protocol and
+  reason — **no header, no UID, no address, no payload**.
+- On a current-generation fault `fluxd` publishes `active=0` first, then restarts
+  the whole engine generation. The handler is idempotent per generation and
+  state; an old or duplicate event only clears the latch and is ignored. Latches
+  are cleared before a new generation activates.
+- The contract is **"no steady-state event storm"**, not exactly-once delivery.
 
-## 7.5 `flx_in` 算法（`flxrs1` ingress）
+## 7.5 The ingress algorithm, `flx_in` on `flxrs1`
 
 ```
 I0  c = ctrl(); if !c                                     -> SHOT
     if !c->active                                         -> SHOT
-    bpf_skb_change_type(skb, PACKET_HOST)                 /* 见下方说明，必须在 ip_rcv 之前 */
-I1  /* cls_bpf 在 ingress 已 __skb_push(mac_len)，可直接读以太头 */
-    eth 可读性检查; if fail                                -> cnt; SHOT
+    bpf_skb_change_type(skb, PACKET_HOST)                 /* see below; MUST precede ip_rcv */
+I1  /* cls_bpf already did __skb_push(mac_len) on ingress, so the Ethernet header is readable */
+    check eth readability; if fail                     -> cnt; SHOT
     if eth->h_proto ∉ {ETH_P_IP, ETH_P_IPV6}              -> cnt; SHOT
-    /* 不做 MAC 比对：设备本身就是来源边界（D3） */
-I2  parse L3（与 egress 同一有界实现）
+    /* no MAC comparison: the device itself is the provenance boundary (D3) */
+I2  parse L3 (the same bounded implementation as egress)
     if fragment                                           -> cnt(PASS_FRAG); TC_ACT_OK
-                                                             /* 交内核 ip_defrag 重组后走 established 查找 */
+                                                             /* let the kernel ip_defrag reassemble, then the established lookup */
     parse L4; if !TCP && !UDP                             -> cnt; SHOT
 I3  if TCP:
-        if SYN && !ACK:                                   /* 含重传与 TFO */
+        if SYN && !ACK:                                   /* retransmissions and TFO included */
             sk = lookup_listener(c, family, TCP)
             if !sk: fault; cnt; SHOT
             if !guard(sk, c): release; fault; cnt; SHOT
@@ -834,7 +1472,7 @@ I3  if TCP:
             if r != 0: fault; cnt(ASSIGN_FAIL); SHOT
             cnt(ASSIGN_TCP); return TC_ACT_OK
         else:
-            cnt(PASS_ESTABLISHED); return TC_ACT_OK       /* 依赖内核 request/established 查找 */
+            cnt(PASS_ESTABLISHED); return TC_ACT_OK       /* relies on the kernel request/established lookup */
 I4  if UDP:
         sk = lookup_listener(c, family, UDP)
         if !sk: fault; cnt; SHOT
@@ -844,35 +1482,63 @@ I4  if UDP:
         cnt(ASSIGN_UDP); return TC_ACT_OK
 ```
 
-**边界**：I3 的 else 分支不是"必定 accepted"的承诺；若 request/established socket 不存在，内核可能 RST/drop。完整握手、TFO、重传、engine crash 必须在 Phase 0 覆盖（§16 Q3）。
+**Boundary:** the `else` branch of I3 is not a promise that the packet will be
+accepted. If no request or established socket exists the kernel may RST or drop.
+A complete handshake, TFO, retransmission and an engine crash must all be covered
+by Phase 0 (§16, Q3).
 
-**来源边界**：`flxrs1` 是 Flux 专有、无地址、只由 `flxrs0` 的 xmit 喂入的设备。除 root 外无人能向其注入 packet。这就是 provenance 边界；不再叠加 custom EtherType、token map 或 skb metadata。（注意：同 netns 的 veth **不会**清掉 `skb->mark`，见 §0.5.8 的更正——我们不用它是因为不需要，不是因为传不过去。）
+**Provenance boundary:** `flxrs1` is Flux's own device, has no address, and is
+fed only by `flxrs0`'s xmit. Nothing but root can inject a packet into it. That
+*is* the provenance boundary, and no custom EtherType, token map or skb metadata
+is layered on top of it. (Note that a veth within one netns does **not** clear
+`skb->mark` — see the correction in `../history/review-log.md` §0.5.8. Flux does
+not use the mark because it does not need to, not because the mark would not
+survive.)
 
-**一条必须写下来的内核不变量：为什么 established 分支的 `TC_ACT_OK` 能正确交付。**
+**A kernel invariant that must be written down: why `TC_ACT_OK` on the
+established branch delivers correctly.**
 
-`bpf_sk_assign()` 会 `skb_orphan()` 后设 `skb->sk = 我们的 listener` 且 `skb->destructor = sock_pfree`。而 `ip_rcv_core()` / `ip6_rcv_core()` 有这一段（v6.1 `net/ipv4/ip_input.c:538-540`，注释原文 "Must drop socket now because of tproxy."）：
+`bpf_sk_assign()` calls `skb_orphan()`, then sets `skb->sk` to our listener and
+`skb->destructor` to `sock_pfree`. `ip_rcv_core()` and `ip6_rcv_core()` contain
+this (v6.1 `net/ipv4/ip_input.c:538-540`, comment verbatim: "Must drop socket now
+because of tproxy."):
 
 ```c
 	if (!skb_sk_is_prefetched(skb))
 		skb_orphan(skb);
 ```
 
-`skb_sk_is_prefetched()` 就是判 `destructor == sock_pfree`。于是两条路径各自正确：
+`skb_sk_is_prefetched()` is exactly the test `destructor == sock_pfree`. So both
+paths are correct, for different reasons:
 
-| 路径 | 进 `ip_rcv_core` 时的 `skb->sk` | `ip_rcv_core` 是否 orphan | 后续查找结果 |
+| Path | `skb->sk` entering `ip_rcv_core` | Does `ip_rcv_core` orphan it? | Result of the later lookup |
 |---|---|---|---|
-| SYN（已 assign） | 我们的 listener，destructor = `sock_pfree` | **否**（prefetched） | `skb_steal_sock()` 直接拿到 listener ✓ |
-| established / fragment（未 assign） | **仍是 app 自己的 socket**（veth 跨越不 orphan） | **是** | `skb_steal_sock()` 得 NULL → 按 tuple 查到 engine 的 accepted child ✓ |
+| SYN, already assigned | our listener, destructor `sock_pfree` | **no**, it is prefetched | `skb_steal_sock()` returns the listener directly ✓ |
+| established or fragment, not assigned | **still the app's own socket** — crossing a veth does not orphan | **yes** | `skb_steal_sock()` returns NULL, and the tuple lookup finds the engine's accepted child ✓ |
 
-第二行为什么不会错查到 app 自己的 socket：established 查找的 key 是「local = daddr:dport，remote = saddr:sport」。我们的入向包是 `saddr=app_ip, sport=app_port, daddr=server_ip, dport=server_port`，所以 local 侧是 `server_ip:server_port`——那是 engine 的 transparent accepted child（`ir_loc_addr` 取自 SYN 的 daddr），**不是** app 的 socket（它的 local 是 `app_ip:app_port`）。
+Why the second row cannot wrongly find the app's own socket: the established
+lookup keys on local = `daddr:dport` and remote = `saddr:sport`. Our inbound
+packet has `saddr=app_ip, sport=app_port, daddr=server_ip, dport=server_port`, so
+the local side is `server_ip:server_port` — which is the engine's transparent
+accepted child, whose `ir_loc_addr` came from the SYN's daddr. It is **not** the
+app's socket, whose local side is `app_ip:app_port`.
 
-**由此得到两条禁令**：① **禁止**对 established/data 包调 `bpf_sk_assign`——把 listener 关联到数据段会让 `tcp_v4_rcv` 用错 socket；② **禁止**在任何地方"顺手"把 `skb->destructor` 设成 `sock_pfree`，那会跳过 `ip_rcv_core` 的 orphan，让 app 自己的 socket 有机会被 `skb_steal_sock` 取回，等于把 app 的报文交还给 app。这两条是 §7.5 的 I3 else 分支为什么必须是 `TC_ACT_OK` 而不是"再 assign 一次"的全部理由。
+**Two prohibitions follow.** ① `bpf_sk_assign()` MUST NOT be called on an
+established or data packet: associating the listener with a data segment makes
+`tcp_v4_rcv` use the wrong socket. ② `skb->destructor` MUST NOT be set to
+`sock_pfree` anywhere as a convenience, because that skips the orphan in
+`ip_rcv_core` and lets `skb_steal_sock` recover the app's own socket — handing
+the app its own packet back. Together these are the entire reason the `else`
+branch of I3 must be `TC_ACT_OK` rather than a second assign.
 
-## 7.5.0 一条比 verifier 更靠后的陷阱：arm64 5.15 不支持带返回值的原子操作
+## 7.5.0 A trap that lies past the verifier: arm64 5.15 has no fetching atomics
 
-**实测于 2026-08-25，SM-S9180 / 5.15.211**（Phase 0 Q1 的副产物，§16.6）。
+**Measured 2026-08-25 on SM-S9180 / 5.15.211**, as a by-product of Phase 0 Q1
+(§16.6).
 
-在 BPF 里写 `__sync_fetch_and_add(p, 1)` **并使用它的返回值**，会生成带 `BPF_FETCH` 标志的 `BPF_ATOMIC` 指令。在 arm64 5.15 上加载这样的程序会失败：
+Writing `__sync_fetch_and_add(p, 1)` in BPF **and using its return value**
+generates a `BPF_ATOMIC` instruction carrying the `BPF_FETCH` flag. Loading such
+a program on arm64 5.15 fails:
 
 ```
 libbpf: prog 'q1_probe': BPF program load failed: Unknown error 524
@@ -880,153 +1546,178 @@ processed 167 insns (limit 1000000) ... total_states 15 peak_states 15
 libbpf: prog 'q1_probe': failed to load: -524
 ```
 
-`524` 是 `-ENOTSUPP`。注意日志的形状：**verifier 本身通过了**（167 条指令、无任何抱怨），失败发生在其后的 JIT 阶段。所以这不是"程序写错了"，而是"这条指令这个平台不实现"，而 errno 完全没有指向性。
+`524` is `-ENOTSUPP`. Note the shape of that log: **the verifier itself passed** —
+167 instructions, no complaint — and the failure came afterwards, in the JIT. So
+this is not a malformed program but an instruction the platform does not
+implement, reported by an errno that points nowhere near the cause.
 
-**规则：数据面禁止使用带返回值的原子操作。** 不取返回值的原子加（纯 `BPF_XADD` 形态）不受影响。
+**Rule: the data plane MUST NOT use a fetching atomic.** A non-fetching atomic
+add, the plain `BPF_XADD` form, is unaffected.
 
-本设计**天然满足**这条：`counters` 是 `PERCPU_ARRAY`，per-CPU 数据不存在竞争，`cnt()` 用的是普通 `*v += 1`；`uid_stats`（D23）是 `PERCPU_HASH`，同理。generation 号来自 `flux_control.generation`，由用户态发布，数据面从不自增任何全局计数器。
+The design satisfies this **by construction rather than by discipline**:
+`counters` is a `PERCPU_ARRAY` and per-CPU data cannot contend, so `cnt()` is an
+ordinary `*v += 1`; `uid_stats` (D23) is a `PERCPU_HASH` for the same reason. The
+generation number comes from `flux_control.generation`, published by userspace,
+and the data plane increments no global counter at all.
 
-**但实现者很容易在调试时踩进来**——想加一个"全局计数看看"，随手写 `__sync_fetch_and_add`，然后对着 `-524` 发懵。这就是记下它的理由。
+**An implementer will walk into this while debugging**, wanting one global count
+to see what is happening, reaching for `__sync_fetch_and_add`, and then staring
+at `-524`. That is the reason to write it down rather than rely on the design not
+needing it.
 
-## 7.5.1 BPF verifier 陷阱清单
+## 7.5.1 Verifier traps
 
-这些都是会让 §7.3–§7.5 的算法**无法加载**（而不是行为错误）的具体形态。每一条都写出正确写法，因为 verifier 的报错信息通常指不到真正的原因。
+Each of these makes the algorithms of §7.3–§7.5 **fail to load** rather than
+behave wrongly. Every row states the correct form, because the verifier's message
+usually does not point at the real cause.
 
-| # | 陷阱 | 正确写法 |
+| # | Trap | Correct form |
 |---:|---|---|
-| 1 | **helper 之后指针失效**。`bpf_skb_pull_data()`、`bpf_skb_change_head()`、`bpf_skb_store_bytes()` 之后，之前读到的 `data` / `data_end` 与所有派生指针全部失效 | 每次调用后**重新**从 `skb->data` / `skb->data_end` 读，并重做全部边界检查。不要把旧指针"顺手再用一次" |
-| 2 | **标志与指针的关联不被跟踪**。`int ok = (c && ...); if (ok) c->field;` 会被拒 | 把 `c` 的解引用放进 `if (c && ...)` 的**同一个**条件链内。这正是 §7.3 E4 步不写成三元表达式的原因（reference C 里有显式注释） |
-| 3 | **变长偏移的上界不可见**。`data + ip->ihl * 4` 中 `ihl` 来自包 | 先算进局部变量并**显式 clamp**（`if (ihl_bytes < 20 \|\| ihl_bytes > 60) return -1;`），再参与地址运算 |
-| 4 | **`bpf_sk_lookup_*` 的引用必须在每条路径恰好 release 一次**。早退分支忘记 release 即"reference leak"，加载失败 | 每个 lookup 后立刻用单一出口结构（先 `guard`→存 bool→`release`→再按 bool 分支），不要在 `if` 内直接 `return` |
-| 5 | `bpf_sk_fullsock()` **不取引用**，对它 `bpf_sk_release()` 会被拒（"reference has never been acquired"） | 只 release 来自 `bpf_sk_lookup_tcp/udp` 的指针 |
-| 6 | **IPv6 扩展头循环**。`for` 循环上界必须是编译期常量，且累计偏移要有可见上界 | `#pragma unroll` + `FLUX_IPV6_MAX_EXT_HDRS`(4) + 累计字节 `FLUX_IPV6_MAX_EXT_BYTES`(256) 双上界，**先判上界再推进偏移** |
-| 7 | **map value 指针的 NULL 检查不可省**，包括 `PERCPU_ARRAY` 的固定下标 | `counters` 的自增也必须 `if (v)`；见 reference C 的 `cnt()` |
-| 8 | **map-in-map 的 inner 指针**：`bpf_map_lookup_elem(&control_root, &z)` 返回的是 map 指针，必须再 lookup 一次才是 value；两次都要判 NULL | 见 `ctrl()`；并且**整个 invocation 只 lookup 一次**（§6.4 的原子快照要求） |
-| 9 | **`__builtin_memcmp` / `memcpy` 的长度必须是编译期常量** | 全部用固定长度（4/6/16），不要用变量长度 |
-| 10 | **栈超限（512 字节）**。`struct bpf_sock_tuple` + `flux_pkt` + `flux_decision` 同时在栈上很容易接近上限 | `flux_pkt` 只存必要字段（当前 32 字节）；tuple 在使用处就地构造、不跨函数传递；`static __always_inline` 会共享调用者栈帧，注意累加 |
-| 11 | **`skb->protocol` 是 `__be16` 零扩展**，不是主机序 | 与 `bpf_htons(ETH_P_IP)` 比较，不要与 `0x0800` 比 |
-| 12 | **`bpf_sock->src_port` 是主机序，`dst_port` 是网络序**（内核 ABI 的既有不一致） | §7.4 的 guard 里对 `src_port` 用 `bpf_ntohs(listen_port)` 转换后比较 |
-| 13 | **`-mcpu` 与内核不匹配**导致未知指令 | 固定 `-mcpu=v3`（5.15 支持），不要用 `v4` |
-| 14 | **CI 必须在 5.15 内核上真实 `BPF_PROG_LOAD`**。在 6.x 上通过不代表 5.15 verifier 通过（新内核放宽了很多约束） | §15.1 已列为硬门禁 |
+| 1 | **Pointers die across a helper.** After `bpf_skb_pull_data()`, `bpf_skb_change_head()` or `bpf_skb_store_bytes()`, the `data` and `data_end` read earlier and every pointer derived from them are invalid | Re-read `skb->data` and `skb->data_end` after every such call and redo all bounds checks. Never reuse the earlier pointer "just once more" |
+| 2 | **A flag is not tracked as related to a pointer.** `int ok = (c && ...); if (ok) c->field;` is rejected | Put the dereference of `c` inside the **same** condition chain as `if (c && ...)`. This is why step E4 of §7.3 is not written as a ternary, and the reference C carries an explicit comment saying so |
+| 3 | **A variable offset has no visible bound.** In `data + ip->ihl * 4`, `ihl` came from the packet | Compute into a local and **clamp explicitly** — `if (ihl_bytes < 20 \|\| ihl_bytes > 60) return -1;` — before it takes part in address arithmetic |
+| 4 | **A `bpf_sk_lookup_*` reference must be released exactly once on every path.** An early return that forgets is a reference leak and fails to load | Use a single-exit shape immediately after each lookup: guard, store a bool, release, then branch on the bool. Do not `return` from inside the `if` |
+| 5 | `bpf_sk_fullsock()` **takes no reference**, so releasing it is rejected with "reference has never been acquired" | Release only pointers obtained from `bpf_sk_lookup_tcp/udp` |
+| 6 | **The IPv6 extension header loop.** A `for` bound must be a compile-time constant, and the accumulated offset needs a visible ceiling | `#pragma unroll` with the two ceilings `FLUX_IPV6_MAX_EXT_HDRS` (4) and `FLUX_IPV6_MAX_EXT_BYTES` (256), **checking the bound before advancing the offset** |
+| 7 | **A map value pointer's NULL check is never optional**, including a fixed index into a `PERCPU_ARRAY` | Even a `counters` increment must be wrapped in `if (v)`; see `cnt()` in the reference C |
+| 8 | **The inner pointer of a map-in-map**: `bpf_map_lookup_elem(&control_root, &z)` returns a map pointer, and a second lookup is needed for the value. Both must be NULL-checked | See `ctrl()`, and look it up **once per invocation**, which §6.4's atomic snapshot requires |
+| 9 | **`__builtin_memcmp` and `memcpy` lengths must be compile-time constants** | Use the fixed lengths 4, 6 and 16; never a variable length |
+| 10 | **The 512-byte stack limit.** A `struct bpf_sock_tuple`, a `flux_pkt` and a `flux_decision` on the stack together come close to it | Keep `flux_pkt` to the fields actually needed, currently 32 bytes; build the tuple in place where it is used rather than passing it between functions; remember `static __always_inline` shares the caller's frame, so the sizes add up |
+| 11 | **`skb->protocol` is a zero-extended `__be16`**, not host order | Compare against `bpf_htons(ETH_P_IP)`, never against `0x0800` |
+| 12 | **`bpf_sock->src_port` is host order while `dst_port` is network order** — a pre-existing kernel ABI inconsistency | The guard in §7.4 compares `src_port` against `bpf_ntohs(listen_port)` |
+| 13 | **An `-mcpu` newer than the kernel** produces unknown instructions | Pin `-mcpu=v3`, which 5.15 supports. Do not use `v4` |
+| 14 | **Passing `BPF_PROG_LOAD` on 6.x does not mean passing on 5.15**; newer kernels relaxed many constraints | §15.1 states where the baseline evidence actually comes from, and why CI alone does not supply it |
 
-**调试纪律**：verifier 拒绝时，先看 log 的**最后 20 行**（失败点）而不是开头；`log_level=1` 足够，`log_level=2` 的指令级 dump 只在定位状态爆炸时用。§12.7 第 3 条的 log 重试机制保证不会因为 log buffer 太小而丢掉真正的错误。
+**Debugging discipline:** when the verifier rejects a program, read the **last 20 lines** of the log — the point of failure — not the first. `log_level=1` is enough; the instruction-level dump of `log_level=2` is only for diagnosing a state explosion. The log-retry mechanism of §12.7 item 3 ensures the real error is never lost to an undersized log buffer.
 
-## 7.6 UID policy 的流粘性
+## 7.6 How UID policy sticks to a flow
 
-`uid_policy` 只有两个值：
+`uid_policy` holds exactly two values:
 
-- `FLUX_UID_SELECTED`：无决策的新 TCP 可判 DIRECT/CAPTURED；UDP 可入场。
-- `FLUX_UID_DRAINING`：已有 TCP decision 继续按其 mode/generation 处理；无 decision 的首 SYN 安装 `DIRECT`；UDP direct。
+- `FLUX_UID_SELECTED` — a new TCP flow with no decision may be judged DIRECT or CAPTURED, and UDP may be admitted.
+- `FLUX_UID_DRAINING` — an existing TCP decision continues to be honoured by its own mode and generation; a first SYN with no decision installs `DIRECT`; UDP goes direct.
 
-移除 app 时把旧 UID 从 `SELECTED` 改为 `DRAINING`，**不删除**。增加 app 只影响尚无决策的连接。bypass 变化同理。
+Deselecting an app changes its UID from `SELECTED` to `DRAINING`; it is **not deleted**. Selecting an app affects only flows that have no decision yet. A bypass change behaves the same way.
 
-**硬不变量：同一 boot 内任何曾可能创建过 TCP decision 的 UID entry 都不得从 `uid_policy` 删除**，只能保留为 `SELECTED` 或 `DRAINING`。这维持了"UID miss ⇒ 走最短 Direct 路径"的语义（否则删除后旧 CAPTURED socket 的包会在 E1 就 `UNSPEC`，泄漏到真实目的）。`DRAINING` entry 最晚在设备重启后消失。
+**Hard invariant: within one boot, a UID entry that could ever have created a
+TCP decision MUST NOT be deleted from `uid_policy`**; it may only remain
+`SELECTED` or `DRAINING`.
 
-上限：总 UID entry ≤ 4096，其中 SELECTED ≤ 1024。候选配置若会超限，热更新被拒绝并保持当前策略。
+This is what preserves the meaning of "UID miss ⇒ take the shortest Direct
+path". Delete the entry instead, and packets belonging to an already-`CAPTURED`
+socket hit `UNSPEC` at step E1 and **leak to the real destination** — the exact
+outcome §2.2.2 forbids. `DRAINING` entries disappear no later than the next
+reboot, and paying for them until then is the price of that guarantee.
 
-这两个数字是按实测定的，不是猜的：一台真机 `[10000,19999]` 范围内有 **429** 个 app，所以原先的 512/128 让"代理全部第三方应用"结构上不可能；而上一段那条"`DRAINING` 永不删除"的不变量意味着每改一次选择都会累积条目，429 选中再改几次就撑爆 512（§1.6.3）。
+Ceilings: at most 4096 UID entries in total, of which at most 1024 are SELECTED. A candidate configuration that would exceed either is rejected, and the current policy stays in force.
+
+Both numbers come from measurement rather than estimation: a real device held
+**429** apps in the `[10000, 19999]` range, so the original 512 and 128 made
+"proxy every third-party app" structurally impossible — and the never-delete
+invariant above means every change to the selection accumulates entries, so 429
+selected plus a few edits exceeds 512 (§1.6.3).
 
 ---
 
-# 第 8 部分：网络对象与所有权
+# Part 8: Network objects and ownership
 
-## 8.1 专用 veth
+## 8.1 A dedicated veth
 
-| 属性 | 值 |
+| Property | Value |
 |---|---|
-| host end | `flxrs0`，`IFLA_IFALIAS = "flux-rs:managed:v1:host"` |
-| peer end | `flxrs1`，`IFLA_IFALIAS = "flux-rs:managed:v1:peer"` |
-| 地址 | 两端均**不配置** IPv4/IPv6 |
-| link state | 两端 UP |
-| MTU | 两端 65535（`ETH_MAX_MTU`）；内核拒绝则整个 seam 不激活，不猜较小值 |
-| MAC | 内核生成的随机 locally-administered pair，**Flux 不读取也不使用**（D17：egress 不写 MAC，ingress 直接强制 `PACKET_HOST`） |
-| sysctl（`flxrs1`） | `net.ipv4.conf.flxrs1.rp_filter = 0`、`accept_local = 1`；`net.ipv6.conf.flxrs1.accept_ra = 0`、`autoconf = 0` |
+| Host end | `flxrs0`, `IFLA_IFALIAS = "flux-rs:managed:v1:host"` |
+| Peer end | `flxrs1`, `IFLA_IFALIAS = "flux-rs:managed:v1:peer"` |
+| Addresses | **none configured** on either end, IPv4 or IPv6 |
+| Link state | both ends UP |
+| MTU | 65535 on both ends (`ETH_MAX_MTU`). If the kernel refuses it the seam does not activate; **a smaller value is never guessed** |
+| MAC | the kernel's random locally-administered pair, **neither read nor used by Flux** (D17: egress writes no MAC and ingress forces `PACKET_HOST` directly) |
+| sysctls on `flxrs1` | `net.ipv4.conf.flxrs1.rp_filter = 0`, `accept_local = 1`; `net.ipv6.conf.flxrs1.accept_ra = 0`, `autoconf = 0` |
 | TC | `clsact` + `flx_in` ingress filter |
 
-同名对象存在但 alias/layout 不完全匹配 → 视为**冲突**，保持 Direct 并报告；**绝不删除后重建**他人的对象。自有对象（alias 完全匹配）在 daemon 冷启动时删除后重建。
+An object with the same name whose alias or layout does not match exactly is a **conflict**: stay Direct and report it. **Never delete and recreate somebody else's object.** Objects that are ours — the alias matching exactly — are deleted and rebuilt at daemon cold start.
 
-MTU 65535 的作用：让 `is_skb_forwardable()` 对任何非 GSO skb 都通过（GSO skb 本来就豁免）。
+The 65535 MTU exists so that `is_skb_forwardable()` accepts any non-GSO skb; GSO skbs are exempt already.
 
-## 8.2 pkt_type：为什么在 ingress 修，而不是在 egress 写 MAC
+## 8.2 Why `pkt_type` is corrected on ingress rather than writing a MAC on egress
 
-`veth_xmit → __dev_forward_skb → eth_type_trans()` 会按目的 MAC 重新判定 `pkt_type`。目的 MAC 不等于 `flxrs1->dev_addr` 时置 `PACKET_OTHERHOST`，而 `ip_rcv()` 对 `PACKET_OTHERHOST` 直接丢弃。（已核验；注意 `skb_scrub_packet()` 先设的 `PACKET_HOST` 会被随后的 `eth_type_trans()` 覆盖，所以那条不算。）
+`veth_xmit → __dev_forward_skb → eth_type_trans()` re-derives `pkt_type` from the destination MAC. When that MAC is not `flxrs1->dev_addr` it becomes `PACKET_OTHERHOST`, and `ip_rcv()` drops `PACKET_OTHERHOST` outright. **Verified** — and note that the `PACKET_HOST` set earlier by `skb_scrub_packet()` is overwritten by the later `eth_type_trans()`, so it does not help.
 
-有两种解法。**0.9.0 选后者（D17）**：
+There are two solutions, and **D17 chose the second**:
 
-| | egress 写正确的 dst MAC | **ingress 调 `bpf_skb_change_type(skb, PACKET_HOST)`** |
+| | Write the correct dst MAC on egress | **Call `bpf_skb_change_type(skb, PACKET_HOST)` on ingress** |
 |---|---|---|
-| control 结构 | 需要 `peer_mac` + `host_mac` 共 12 字节 | 无 MAC 字段 |
-| L2 捕获稳态热路径 | 每包一次 `bpf_skb_store_bytes(12)`，且会触发 `skb_ensure_writable()` —— TCP 重传 skb 是 clone，必须复制一份 | **零 packet 写入、零复制** |
-| L3 路径 | `change_head` + 写 14 字节 | `change_head` + 只写 2 字节 EtherType（前 12 字节已被 helper 置零） |
-| 正确性依赖 | 依赖 MAC 比对完全正确 | 依赖 TC ingress 在 `ip_rcv()` 之前运行（`sch_handle_ingress` 确实如此） |
+| control struct | needs `peer_mac` and `host_mac`, 12 bytes | no MAC field at all |
+| L2 steady-state hot path | one `bpf_skb_store_bytes(12)` per packet, which triggers `skb_ensure_writable()` — and a retransmitted TCP skb is a clone, so it must be copied | **zero packet writes, zero copies** |
+| L3 path | `change_head` plus 14 bytes written | `change_head` plus 2 bytes of EtherType, the first 12 having been zeroed by the helper |
+| Correctness rests on | the MAC comparison being exactly right | TC ingress running before `ip_rcv()`, which `sch_handle_ingress` does |
 
-**L3 路径仍必须写 EtherType**：`eth_type_trans()` 由 h_proto 推导 `skb->protocol`，`h_proto == 0` 的包永远到不了 `ip_rcv()`。
+**The L3 path MUST still write the EtherType.** `eth_type_trans()` derives `skb->protocol` from `h_proto`, and a packet with `h_proto == 0` never reaches `ip_rcv()`.
 
-代价只有一条：注入到 `flxrs1` 的包带着零或过期的目的 MAC。那条链路上没有任何 L2 转发，属纯观感问题。
+The single cost: packets injected into `flxrs1` carry a zero or stale destination MAC. Nothing on that link does L2 forwarding, so this is cosmetic.
 
-**上游先例**：dae 在它的 veth peer ingress 做的是同一件事（`control/kern/tproxy.c` 的 `tproxy_dae0peer_ingress` 调 `bpf_skb_change_type`），尽管它同时也在 egress 写了 MAC。
+**Upstream precedent:** dae does the same thing on its veth peer ingress — `tproxy_dae0peer_ingress` in `control/kern/tproxy.c` calls `bpf_skb_change_type` — although it also writes the MAC on egress.
 
-## 8.3 RPDB 与路由
+## 8.3 The RPDB rule and the route
 
-双栈各一条：
+One rule per family:
 
 ```text
 priority 100   iif flxrs1   lookup 20260
 ```
 
-table `20260` 只含：
+Table `20260` contains only:
 
 ```text
 local 0.0.0.0/0  dev lo  proto 202
 local ::/0       dev lo  proto 202
 ```
 
-priority 100 与 table 20260 的安全性现在有一手依据，不再是估计：
+The safety of priority 100 and table 20260 now rests on first-party evidence rather than estimation:
 
-- **netd 的最低 `ip rule` priority 是 10000**（`clone/aosp-netd/server/RouteController.h:34`，完整阶梯 10000→32000 见 `:34-85`）。因此 **1–9999 整段是空的**，priority 100 落在内核 `local`(0) 之后、netd 全部规则之前。
-- **netd 的 per-interface 路由表是 `ROUTE_TABLE_OFFSET_FROM_INDEX = 1000` 加 ifindex**（`RouteController.h:100`），即它占用大致 `1001 .. 1000+max_ifindex`。table **20260** 远在其外。（旁证：`box_for_magisk` 独立选了 table 2024 / pref 100，`box.iptables:12-13`。）
+- **netd's lowest `ip rule` priority is 10000** (`clone/aosp-netd/server/RouteController.h:34`; the full ladder from 10000 to 32000 is at `:34-85`). **The entire 1–9999 range is therefore empty**, and priority 100 sits after the kernel's `local` at 0 and before every netd rule.
+- **netd's per-interface route tables are `ROUTE_TABLE_OFFSET_FROM_INDEX = 1000` plus the ifindex** (`RouteController.h:100`), occupying roughly `1001` to `1000 + max_ifindex`. Table **20260** is far outside that. Corroborating: `box_for_magisk` independently chose table 2024 and pref 100 (`box.iptables:12-13`).
 
-这条规则**只**匹配 Flux 专用 ingress，不占用任何 fwmark。若 live RPDB 已有 priority 100 的未知规则，或 table 20260 已有未知路由 → 保持 Direct 并报告冲突。**不动态挑另一个值**，因为 cleanup 必须可证明。
+The rule matches **only** Flux's dedicated ingress and consumes no fwmark. An unknown rule already at priority 100, or an unknown route already in table 20260, means staying Direct and reporting the conflict. **Flux MUST NOT pick a different value dynamically**, because cleanup has to be provable: an object at an address chosen at random cannot be shown to be ours later.
 
-`proto 202` 是自选的 `rtm_protocol` 标记，用于精确识别自有路由。
+`proto 202` is a self-assigned `rtm_protocol` marker used to identify our own routes exactly.
 
-## 8.4 rp_filter：前两版蓝图的实现级漏洞
+## 8.4 rp_filter: an implementation-level hole in the two earlier blueprints
 
-**已核验**：`IN_DEV_RPFILTER(idev) = max(net.ipv4.conf.all.rp_filter, net.ipv4.conf.<dev>.rp_filter)`（`IN_DEV_MAXCONF`），而 `IN_DEV_ACCEPT_LOCAL` 是 **or**（`IN_DEV_ORCONF`）。
+**Verified:** `IN_DEV_RPFILTER(idev) = max(net.ipv4.conf.all.rp_filter, net.ipv4.conf.<dev>.rp_filter)` via `IN_DEV_MAXCONF`, while `IN_DEV_ACCEPT_LOCAL` is an **or** via `IN_DEV_ORCONF`. **The asymmetry is the whole problem**: a per-device `rp_filter` of 0 cannot override a global 1, but a per-device `accept_local` of 1 does take effect.
 
-我们注入到 `flxrs1` 的包，源地址是设备**自己的**地址（例如 wlan0 的 IP），目的是远端服务器。输入路由命中 `RTN_LOCAL` 后走 `fib_validate_source()`：
+A packet Flux injects into `flxrs1` carries a source address belonging to **the device itself** — wlan0's IP, say — and a remote destination. Input routing hits `RTN_LOCAL` and then reaches `fib_validate_source()`:
 
-- 若有效 rp_filter 为 0：因为我们添加了自定义 local 路由，`net->ipv4.fib_has_custom_local_routes` 为真，会进 `__fib_validate_source()`；`accept_local=1` 让 `res.type == RTN_LOCAL` 通过；`dev_match` 为假；`flxrs1` 无地址故 `no_addr` 为真 → `last_resort:` → `rpf == 0` → **接受**。
-- 若有效 rp_filter 非 0：同一路径最终 `goto e_rpf` → **martian source 丢包**。此时 `accept_local` 救不了（它只在 `r == 0` 的早退分支起作用）。
+- **Effective rp_filter of 0:** because Flux added a custom local route, `net->ipv4.fib_has_custom_local_routes` is true and `__fib_validate_source()` is entered; `accept_local=1` lets `res.type == RTN_LOCAL` through; `dev_match` is false; `flxrs1` has no address so `no_addr` is true, reaching `last_resort:`, where `rpf == 0` means **accept**.
+- **Effective rp_filter non-zero:** the same path ends at `goto e_rpf` and the packet is dropped as a **martian source**. `accept_local` cannot save it here, because it only applies on the early-return branch where `r == 0`.
 
-**实现要求**：activation 时读取 `all.rp_filter` 与 `flxrs1.rp_filter`。
-- `flxrs1.rp_filter` 由 Flux 设为 0（自有对象，允许写）。
-- `all.rp_filter != 0` 时**不得**擅自修改全局 sysctl（会降低系统整体安全姿态）。此时整个数据面保持 Inactive，`status` 报告 `rp_filter_conflict` 并给出人工处置说明。
-- AOSP 默认不设置 `rp_filter`（依赖自己的 RPDB），因此实际设备上预期为 0；但**必须检查**而不是假设。
+**Implementation requirement:** read both `all.rp_filter` and `flxrs1.rp_filter` at activation.
+- Flux sets `flxrs1.rp_filter` to 0. That interface is ours, so writing it is legitimate.
+- When `all.rp_filter != 0`, Flux **MUST NOT** modify the global sysctl, which would weaken the device's overall security posture. The whole data plane stays Inactive, and `status` reports the conflict with instructions for the user to act on.
+- AOSP does not set `rp_filter` by default, relying on its own RPDB, so 0 is expected on a real device — but this **MUST be checked rather than assumed**.
 
-**Android 上没有先例，但 dae 在 Linux 上遇到并证实了同一个问题。**
+**There is no Android precedent, but dae hit and confirmed the same problem on Linux.**
 
-`clone/AndroidTProxyShell/tproxy.sh` 全脚本从不写 `rp_filter` 或 `accept_local`，原因不是 Android 不需要，而是它的包从 **`lo`** 重新入栈，命中了 `__fib_validate_source()` 里 `dev_match = dev_match || (res.type == RTN_LOCAL && dev == net->loopback_dev)` 的早退分支。我们的包从 `flxrs1` 进来，走不到那条分支。
+`clone/AndroidTProxyShell/tproxy.sh` never writes `rp_filter` or `accept_local` anywhere — **not because Android does not need it**, but because its packets re-enter through **`lo`** and hit the early-return branch in `__fib_validate_source()`: `dev_match = dev_match || (res.type == RTN_LOCAL && dev == net->loopback_dev)`. Flux's packets arrive on `flxrs1` and never reach that branch.
 
-而 **dae 走的正是 veth 回送，它必须写这些 sysctl**（`control/netns_utils.go:433-473`）：
+**dae uses veth loopback exactly as Flux does, and it must write these sysctls** (`control/netns_utils.go:433-473`):
 
-| sysctl | dae 的值 | 行 |
+| sysctl | dae's value | Line |
 |---|---|---|
 | `net.ipv4.conf.dae0.rp_filter` | 0 | 437 |
 | **`net.ipv4.conf.all.rp_filter`** | **0** | **440** |
 | `net.ipv4.conf.dae0.arp_filter` / `all.arp_filter` | 0 | 443 / 446 |
 | `net.ipv4.conf.dae0.accept_local` | 1 | 449 |
-| peer 侧 `conf.dae0peer.accept_local` | 1 | 473（注释明写 martian-source） |
+| peer-side `conf.dae0peer.accept_local` | 1 | 473, with a comment naming martian-source |
 
-**这印证了 §8.4 的内核分析是对的，同时暴露出一个我们不接受的取舍：dae 直接写全局 `all.rp_filter=0`。** 0.9.0 **禁止**这么做，理由有两条：① 在用户手机上静默削弱一个全局安全 sysctl，不是一个网络模块该做的事；② 崩溃后无法证明该恢复成什么值，"备份-恢复"在 `SIGKILL` 下不可靠（这正是 §15.4(1) 状态诚实性规则的适用场景）。因此有效 `rp_filter != 0` 时我们保持 Inactive 并报告，把决定权交给用户。
+**This corroborates the kernel analysis above, and simultaneously exposes a trade-off Flux does not accept: dae writes the global `all.rp_filter=0` directly.** Flux **MUST NOT**, for two reasons. First, silently weakening a global security sysctl on a user's phone is not a networking module's decision to make. Second, after a crash there is no way to prove what value should be restored — a backup-and-restore is not reliable under `SIGKILL`, which is precisely the situation the honesty rule of §15.4(1) governs. So a non-zero effective `rp_filter` means staying Inactive and reporting, leaving the decision to the user.
 
-`arp_filter` 我们**不需要**：`flxrs0/1` 无 IPv4 地址，不参与 ARP。Phase 0 Q5 顺带确认。
+`arp_filter` is **not needed**: `flxrs0` and `flxrs1` hold no IPv4 address and take no part in ARP. Phase 0 Q5 confirms this incidentally.
 
-**结论**：机制被 dae 证实，但"Android 上有效 `all.rp_filter` 是否为 0"以及"不写全局 sysctl 是否可行"仍必须实测（§16 Q5）。
+**Conclusion:** the mechanism is confirmed by dae, but whether the effective `all.rp_filter` is 0 on Android, and whether declining to write the global sysctl is workable, still **MUST be measured** (§16, Q5).
 
-### 8.4.1 两条外部证据，以及一条明确不适用的 sysctl
+### 8.4.1 Two pieces of external evidence, and one sysctl that does not apply
 
-**(1) dae 有一份带 drop trace 的实证**（`daeuniverse/dae` PR #512，CHANGELOG `:403`）。它甚至发生在 dae 的**独立 netns** 里，而我们是同 netns、源地址就是本机地址，所以对我们只会更确定：
+**(1) dae has an empirical drop trace** (`daeuniverse/dae` PR #512, CHANGELOG `:403`). It occurred inside dae's **separate netns**, whereas Flux runs in the same netns with a source address that is genuinely local — so the outcome applies to Flux with more certainty, not less:
 
 ```
 if=83(dae0peer) ... 10.0.8.9:35964 > 1.1.1.2:80 tcp_flags=S ... fib_validate_source
@@ -1034,52 +1725,102 @@ if=83(dae0peer) ... ip_handle_martian_source
 if=83(dae0peer) ... kfree_skb_reason(SKB_DROP_REASON_NOT_SPECIFIED)
 ```
 
-修复正是 `sysctl net.ipv4.conf.dae0peer.accept_local=1`。这把 §8.4 的推理从"内核源码推导"升级为"有人踩过并留下了 trace"。顺带记下：**这一串 `pwru` + `kfree_skb_reason` 是本类问题唯一有效的调试手段**，Phase 0 Q5 若失败应当直接用它，而不是猜。
+The fix was exactly `sysctl net.ipv4.conf.dae0peer.accept_local=1`. That raises §8.4 from reasoning over kernel source to something somebody hit and left a trace of. Worth noting separately: **`pwru` plus `kfree_skb_reason` is the only effective way to debug this class of problem**, and Phase 0 Q5 should reach for it directly on failure rather than guessing.
 
-**(2) Cilium 在同构拓扑上（fwmark 规则 → `local default dev lo`）遇到同一问题**（`cilium/cilium` PR #46312），并指出它一直漏了 `accept_local`、只设了 `rp_filter=0`——两者应当**成对**设置。这与 §8.4 的结论一致（`IN_DEV_ACCEPT_LOCAL` 是 `or`、`IN_DEV_RPFILTER` 是 `max`，两个都得对）。
+**(2) Cilium hit the same problem on an isomorphic topology** — an fwmark rule into a `local default dev lo` — in `cilium/cilium` PR #46312, and observed that it had long been setting only `rp_filter=0` while missing `accept_local`. The two belong **together**. This agrees with §8.4: `IN_DEV_ACCEPT_LOCAL` is an `or` and `IN_DEV_RPFILTER` is a `max`, so both have to be right.
 
-**(3) `net.ipv4.conf.all.src_valid_mark` 明确不适用，不要照抄。** Cilium 设它，作用是让 `fib_validate_source()` 的反查**带上 fwmark**，从而命中基于 mark 的规则。我们的规则是 `iif flxrs1` 而非 `fwmark`，而反查时 `iif` 是 `lo`，所以带不带 mark 都不会命中我们那条规则——设了没用。**记录在此，防止实现者从 Cilium 抄一个无效的全局 sysctl。**
+**(3) `net.ipv4.conf.all.src_valid_mark` does not apply. Do not copy it.** Cilium sets it so that the reverse lookup in `fib_validate_source()` **carries the fwmark** and therefore matches a mark-based rule. Flux's rule keys on `iif flxrs1` rather than fwmark, and during the reverse lookup the `iif` is `lo`, so our rule cannot match whether a mark is carried or not — setting it achieves nothing. **Recorded here to stop an implementer copying an ineffective global sysctl out of Cilium.**
 
-**(4) AOSP 自己从不设置这四个 sysctl。** 遍历 `clone/aosp-netd/server` 与 `clone/aosp-Connectivity` 全树，`rp_filter` / `accept_local` / `route_localnet` / `src_valid_mark` **零命中**。含义是双向的：好消息是没有 AOSP 组件会跟我们抢或把值改回去；坏消息是**有效值完全由厂商 defconfig 与 `init.rc` 决定，无法从 AOSP 推断**。这直接决定了 §8.4 的实现要求必须是"运行时读取 + 冲突则响亮失败"，不能有任何默认值假设。
+**(4) AOSP never sets any of these four.** Searching all of `clone/aosp-netd/server` and `clone/aosp-Connectivity` gives **zero hits** for `rp_filter`, `accept_local`, `route_localnet` and `src_valid_mark`. That cuts both ways: no AOSP component will contend with us or change a value back, **and the effective values are determined entirely by the vendor's defconfig and `init.rc`, so they cannot be inferred from AOSP at all.** This is what forces §8.4's implementation requirement to be "read at run time, fail loudly on conflict" with no assumed default.
 
-**`ip_forward` 是一条推断，必须被实测确认。** 我的分析是：包命中 `RTN_LOCAL` 本地交付、走 `ip_local_deliver` 而非 `ip_forward_finish`，因此**不需要**打开 `ip_forward`。但两个先例都打开了它——AndroidTProxyShell 为其转发/热点路径设 `ip_forward=1` 与 `ipv6 conf/all/forwarding=1`（`tproxy.sh:1414-1415`、`1433-1434`），dae 也在文档里列为必需（`clone/dae/docs/en/user-guide/kernel-parameters.md`）。两者都有 LAN/转发路径，所以它们需要不代表我们需要。
+**`ip_forward` is an inference and MUST be confirmed by measurement.** The analysis: the packet hits `RTN_LOCAL` for local delivery and travels `ip_local_deliver` rather than `ip_forward_finish`, so `ip_forward` does **not** need enabling. But both precedents enable it — AndroidTProxyShell sets `ip_forward=1` and `ipv6 conf/all/forwarding=1` for its forwarding and hotspot paths (`tproxy.sh:1414-1415`, `1433-1434`), and dae lists it as required (`clone/dae/docs/en/user-guide/kernel-parameters.md`). **Both have LAN and forwarding paths that Flux does not**, so their needing it does not imply we do.
 
-**Phase 0 Q5 必须以 `ip_forward=0` 跑通端到端**。若实测发现必需，那是一次**范围变更**而非小修：写全局 `ip_forward` 与 §8.4 拒绝写 `all.rp_filter` 的理由同源（在用户手机上改全局网络语义），届时必须回到 §21 重新征求确认，不得默默打开。dae 另外还设了 `arp_filter=0`（含 `all.`）；我们的 `flxrs0/1` 无 IPv4 地址、不参与 ARP，判断为不需要，同样在 Q5 确认。
+**Phase 0 Q5 MUST establish the end-to-end path with `ip_forward=0`.** If measurement shows it is required, that is a **scope change rather than a small fix**: writing the global `ip_forward` shares its objection with §8.4's refusal to write `all.rp_filter` — both alter global network semantics on a user's phone — and it MUST go back to §21 for confirmation rather than being enabled quietly. dae additionally sets `arp_filter=0`, including `all.`; `flxrs0` and `flxrs1` hold no IPv4 address and take no part in ARP, so this is judged unnecessary and confirmed in Q5 as well.
 
-IPv6 没有 rp_filter，无此问题。
+IPv6 has no rp_filter, so none of this arises there.
 
-## 8.5 TC identity 与 ownership 谓词
+## 8.5 TC identity and the ownership predicate
 
-| 位置 | chain | pref | protocol | handle | program |
-|---|---:|---:|---|---:|---|
-| 普通 L2 egress | 0 | 1 | all | `0x1` | `flx_cap_l2` |
-| 普通 L3 egress（rmnet） | 0 | 1 | all | `0x1` | `flx_cap_l3` |
-| 已确认 CLAT egress | 0 | 1 | ip | `0x1` | `flx_cap_l3` |
-| `flxrs1` ingress | 0 | 1 | all | `0x2` | `flx_in` |
+| Position | chain | pref | protocol | handle | program |
+|---|---:|---|---|---:|---|
+| Ordinary L2 egress | 0 | chosen per interface, §8.5.3 | all | `0x1` | `flx_cap_l2` |
+| Ordinary L3 egress (rmnet) | 0 | chosen per interface, §8.5.3 | all | `0x1` | `flx_cap_l3` |
+| Confirmed CLAT egress | 0 | chosen, `< FLUX_TC_PREF_CLAT_MAX` (4) | ip | `0x1` | `flx_cap_l3` |
+| `flxrs1` ingress | 0 | 1, fixed — Flux owns this interface | all | `0x2` | `flx_in` |
+| Liveness probe | 0 | same pref as that interface's capture filter | all | `0x3` | `flx_verify` |
 
-完整 ownership 谓词（**全部**匹配才可接管或删除该 filter）：netns、ifindex、ifname、parent/direction、chain、preference、protocol、handle、`kind == "bpf"`、direct-action 标志、**`TCA_BPF_ID`（program id）**、**`TCA_BPF_TAG`（8 字节指令流哈希）**、`TCA_BPF_NAME`、program 的预期 map 集合。
+The complete ownership predicate — **every** item must match before a filter may
+be adopted or deleted: netns, ifindex, ifname, parent and direction, chain,
+preference, protocol, handle, `kind == "bpf"`, the direct-action flag,
+**`TCA_BPF_ID`** (the program id), **`TCA_BPF_TAG`** (the 8-byte hash of the
+instruction stream), `TCA_BPF_NAME`, and the program's expected map set.
 
-**为什么必须带 id 与 tag**：program name 可被伪造，也会在 program 被替换后保持不变；`TCA_BPF_TAG` 是内核对指令流算的哈希，`TCA_BPF_ID` 是本次加载的唯一 id。两者都由我们自己 `BPF_OBJ_GET_INFO_BY_FD` 得到并作为期望值。这条来自 `clone/asteriskd/asteriskd_tc_netlink.c:170-177` 的五路精确匹配（`TCA_BPF_NAME`/`FLAGS`/`FLAGS_GEN`/`TAG`/`ID`），是本轮调研里最值得直接照搬的一条。
+**Why the id and the tag are required.** A program name can be forged, and it
+also survives the program being replaced underneath it. `TCA_BPF_TAG` is the
+kernel's hash of the instruction stream and `TCA_BPF_ID` is unique to this load;
+Flux obtains both from its own `BPF_OBJ_GET_INFO_BY_FD` and holds them as the
+expected values. This is the five-way exact match of
+`clone/asteriskd/asteriskd_tc_netlink.c:170-177` (`TCA_BPF_NAME`, `FLAGS`,
+`FLAGS_GEN`, `TAG`, `ID`), and it is the single most directly reusable finding of
+the whole source review.
 
-**netlink dump 解析必须 allowlist**：顶层与 `TCA_OPTIONS` 内的属性类型都只接受已知集合，出现未知/重复属性即解析失败并把该 slot 判为 foreign（`asteriskd_tc_netlink.c:141-157`）。`NLMSG_OVERRUN` 视为致命。**一切失败路径都判 foreign 并 fail closed**，不得"看起来像我们的就接管"。
+**Dump parsing MUST use an allowlist.** Attribute types are accepted from a known
+set, at the top level and inside `TCA_OPTIONS` alike; an unknown or duplicated
+attribute fails the parse and marks the slot foreign
+(`asteriskd_tc_netlink.c:141-157`). `NLMSG_OVERRUN` is fatal. **Every failure
+path marks the slot foreign and fails closed** — "it looks like ours, adopt it"
+is forbidden.
 
-**双次 dump 的 TOCTOU 守卫**：删除或接管任何 filter 之前，连续取两次 dump，逐项比对 `{id, tag, name, flags}`；不一致则返回 `ESTALE` 并放弃本轮，下个事件重来。这条来自 `clone/bpf2socks/bpf_util.c:411-454` 对 `BPF_PROG_QUERY` 的同样处理。
+**A TOCTOU guard using two dumps.** Before deleting or adopting any filter, take
+two consecutive dumps and compare `{id, tag, name, flags}` item by item. A
+mismatch returns `ESTALE` and abandons this round; the next event tries again.
+This mirrors `clone/bpf2socks/bpf_util.c:411-454`, which does the same for
+`BPF_PROG_QUERY`.
 
-**`clsact` 的 foreign 判定**：若 dump 显示该 `clsact` 携带 `TCA_INGRESS_BLOCK`(13) 或 `TCA_EGRESS_BLOCK`(14)，或 `TCA_OPTIONS` 非空，则判为 foreign 并**排除该 interface**——共享 block 意味着另一个控制器在通过我们看不见的间接层管理 filter（`asteriskd_tc_netlink.c:333-341`）。这是 §8.5 "block/goto 使 chain 0 不可达"的具体检测手段。
+**When a `clsact` is foreign.** If the dump shows the `clsact` carrying
+`TCA_INGRESS_BLOCK` (13) or `TCA_EGRESS_BLOCK` (14), or a non-empty
+`TCA_OPTIONS`, it is foreign and **the interface is excluded** — a shared block
+means another controller is managing filters through indirection Flux cannot see
+(`asteriskd_tc_netlink.c:333-341`). This is the concrete detection behind "block
+or goto makes chain 0 unreachable".
 
-**可达性要求**（原"first-applicable 要求"，2026-08-25 按实测放宽）：我们的 filter 不需要是 chain 0 的**首个** classifier——那个要求在实测面前站不住，因为厂商可能已占 pref 1 而 tc 的 pref 最小就是 1（§8.5.3）。真正的要求是**在我们之前没有会终止 chain 的 classifier**。
+### 8.5.0 Reachability, not first place in the dump
 
-这个条件**无法从 dump 推断**：dump 只告诉你谁在前面，不告诉你它返回什么。已知 AOSP ingress accounting 返回 `TC_ACT_UNSPEC`、CLAT translation 返回 `TC_ACT_PIPE`，但这不能替任何 OEM 程序背书。因此判定方式是**实测而非推理**：§8.5.4 的存活验证。
+**Flux's filter does not have to be the first classifier in chain 0.** The
+earlier requirement that it must be does not survive contact with real devices:
+a vendor may already hold pref 1, and tc's lowest preference *is* 1 (§8.5.3).
 
-Direct 用 `TC_ACT_UNSPEC` 交给全部后续系统程序。以下任一成立 → 该 interface **不得**标为 active：`block`/`goto` 使 chain 0 不可达；attach 后 dump 顺序不满足所有权谓词；小于 `FLUX_TC_PREF_CLAT_MAX` 的 pref 在 `v4-*` 上全被占用；**或存活验证判定被遮挡**。
+The real requirement is that **no classifier ahead of Flux terminates the
+chain**, and that condition **cannot be inferred from a dump**. A dump says who
+is in front; it does not say what they return. AOSP's ingress accounting returns
+`TC_ACT_UNSPEC` and CLAT translation returns `TC_ACT_PIPE`, but neither fact
+vouches for an OEM program. The determination is therefore **measured, not
+reasoned**: the liveness verification of §8.5.4.
 
-**`clsact` 规则**：Flux 可在不存在时创建，但**永不删除** `clsact`（crash 后无法证明是谁最初创建；而且删掉它会连带破坏 tethering 与 CLAT）。只删除精确自有 filter；**禁止** flush qdisc 或 chain。
+Activation requires all four of:
 
-### 8.5.1 netd 会删掉 `clsact`——这是常态事件，不是异常
+1. identity and relative ordering satisfy the ownership predicate;
+2. the CLAT position constraint holds where CLAT applies;
+3. `flx_verify` observes packets inside a real tx-growth window;
+4. re-verification happens whenever the identity of a numerically lower
+   preference — that is, a filter ahead of us — changes.
 
-这是本轮调研里**运维上最重要的一条**，必须按"频繁发生"来设计，而不是按"异常处理"。
+Direct returns `TC_ACT_UNSPEC`, handing the packet to every later system
+program. An interface MUST NOT be marked active if any of these hold: a `block`
+or `goto` makes chain 0 unreachable; the post-attach dump does not satisfy the
+ownership predicate; every preference below `FLUX_TC_PREF_CLAT_MAX` is taken on a
+`v4-*`; **or liveness verification finds us shadowed**.
 
-`clone/aosp-netd/server/RouteController.cpp:1201-1229` 的 `maybeModifyQdiscClsact()` 在 **interface 加入网络时创建、离开网络时删除** `clsact`（调用点 `:1347` / `:1374` / `:833`）。更彻底的是 netd 启动时会清空所有 interface 的 clsact：
+**`clsact` rule.** Flux MAY create a `clsact` where none exists but MUST NEVER
+delete one: after a crash there is no way to prove who created it originally, and
+removing it breaks tethering and CLAT as collateral. Flux deletes only its own
+exactly-matched filters, and MUST NOT flush a qdisc or a chain.
+
+### 8.5.1 netd deletes `clsact` routinely — design for it, not around it
+
+This is the operationally most consequential finding of the whole source review. It MUST be designed for as a frequent event, not handled as an exception.
+
+`maybeModifyQdiscClsact()` at `clone/aosp-netd/server/RouteController.cpp:1201-1229` **creates the `clsact` when an interface joins a network and deletes it when the interface leaves** (call sites `:1347`, `:1374`, `:833`). More sweepingly, netd clears the clsact of every interface at startup:
 
 ```cpp
 // clone/aosp-netd/server/NetworkController.cpp:152-164
@@ -1091,35 +1832,58 @@ for (const std::string& iface : ifaces.value()) {
 }
 ```
 
-AOSP 自己在 `ConnectivityService.java:12231-12240` 记录了这个约束："*in case of a system server crash, the NetworkController constructor in netd (called when netd starts up) deletes the clsact qdisc of all interfaces*"。
+AOSP documents the constraint itself at `ConnectivityService.java:12231-12240`: "*in case of a system server crash, the NetworkController constructor in netd (called when netd starts up) deletes the clsact qdisc of all interfaces*".
 
-**对本设计的直接后果**：
+**Direct consequences for this design:**
 
-1. **每一次 Wi-Fi 重连、蜂窝切换、system_server 崩溃后的 netd 重启，都会把我们的 filter 连带删掉。** 这不是罕见故障，是日常。
-2. 因此 reactor **必须**订阅 `RTM_NEWQDISC` / `RTM_DELQDISC` 并把"qdisc 消失"当作**预期事件**处理：只对受影响的那个 interface 重走 §8.7 步骤 9 的 egress attach（必要时先重建 clsact），**不报错、不进 `Inactive`、不动 `active`**。§26 把它单列为**捕获侧漂移**，与需要 `active=0` 的**核心漂移**分开——两者绝不能混为一谈，理由见 §26 不变量 4。
-3. **创建时不要期望自己是唯一创建者。** AOSP 用 `tcQdiscReplaceDevClsact`（`NLM_F_CREATE | NLM_F_REPLACE`，`aosp-netd/server/TcUtils.h:28-37`）。我们用 `NLM_F_EXCL` 并把 `EEXIST` 当成"存在且非我创建"（§8.9.4），效果等价且额外获得了"是谁创建的"这一信息。
-4. 每次重新 attach 之间存在流量走 Direct 的窗口，量级为 rtnetlink 送达 + §10.4.1 debounce，见 §2.2.3(5)。
+1. **Every Wi-Fi reconnect, every cellular handover, and every netd restart after
+   a system_server crash takes our filter with it.** This is not a rare fault; it
+   is daily life.
+2. The reactor MUST therefore subscribe to `RTM_NEWQDISC` and `RTM_DELQDISC` and
+   treat a vanished qdisc as an **expected event**: redo step 9 of §8.7 — the
+   egress attach — for that one interface, recreating the clsact first if
+   necessary, **without reporting an error, without entering `Inactive`, and
+   without touching `active`**. §26 lists this separately as **capture-side
+   drift**, distinct from **core drift** which does require `active=0`. Conflating
+   the two is forbidden; invariant 4 of §26 explains what it costs.
+3. **Do not expect to be the only creator.** AOSP uses
+   `tcQdiscReplaceDevClsact` with `NLM_F_CREATE | NLM_F_REPLACE`
+   (`aosp-netd/server/TcUtils.h:28-37`). Flux uses `NLM_F_EXCL` and reads
+   `EEXIST` as "it exists and I did not create it" (§8.9.4) — equivalent in
+   effect, and it additionally yields the information about who created it.
+4. Between re-attachments there is a window in which traffic goes Direct, on the
+   order of rtnetlink delivery plus the debounce of §10.4.1. See §2.2.3(5).
 
-### 8.5.2 AOSP 在物理 interface 上已占用的 TC 优先级
+### 8.5.2 TC preferences AOSP already occupies on a physical interface
 
-| pref | 方向 | protocol | 占用者 | 依据 |
+| pref | Direction | protocol | Held by | Evidence |
 |---:|---|---|---|---|
-| 1 | ingress | `ETH_P_ALL` | `tc police` 入向限速 | `ConnectivityService.java:974`（`TC_PRIO_POLICE = 1`）、`:1730` |
+| 1 | ingress | `ETH_P_ALL` | `tc police` inbound rate limiting | `ConnectivityService.java:974` (`TC_PRIO_POLICE = 1`), `:1730` |
 | 2 | ingress | `ETH_P_IPV6` | tethering downstream6 | `Tethering/.../BpfUtils.java:57-61` |
-| 3 | ingress | `ETH_P_IP` | tethering downstream4 | 同上 |
-| 4 | ingress | `ETH_P_IPV6` | CLAT ingress6（upstream 上） | `ClatCoordinator.java:107-109`、`:499-505` |
-| 4 | **egress** | `ETH_P_IP` | CLAT egress4（`v4-*` 上） | `ClatCoordinator.java:473-479` |
-| **5** | **egress** | `ETH_P_ALL` | **dscpPolicy** | `DscpPolicyTracker.java:50-51`（`PRIO_DSCP = 5`）、`:338` |
+| 3 | ingress | `ETH_P_IP` | tethering downstream4 | same |
+| 4 | ingress | `ETH_P_IPV6` | CLAT ingress6, on the upstream | `ClatCoordinator.java:107-109`, `:499-505` |
+| 4 | **egress** | `ETH_P_IP` | CLAT egress4, on the `v4-*` | `ClatCoordinator.java:473-479` |
+| **5** | **egress** | `ETH_P_ALL` | **dscpPolicy** | `DscpPolicyTracker.java:50-51` (`PRIO_DSCP = 5`), `:338` |
 
-**三条结论**：
+Three conclusions:
 
-1. **ingress pref 1 在物理 interface 上是冲突的**（`tc police`）。这不影响我们——我们的 ingress filter 只装在自有的 `flxrs1` 上，那里没有别人。
-2. ~~**egress pref 1 无硬冲突**~~ —— **这一条已被 §8.5.3 的实测推翻**。就 AOSP 自身而言 egress pref 1 确实空着（CLAT 在 4、dscpPolicy 在 5），但**这张表只涵盖 AOSP，不涵盖 OEM**：三星的 `semUidBPF` 就占着 egress pref 1。约束仍然成立的部分是"必须排在 CLAT(pref 4) 之前"。
-3. **egress pref 5 的 `dscpPolicy` 会被跳过**：只要我们的 pref 小于 5，被捕获的包在我们这里返回 `TC_ACT_REDIRECT`，chain 终止，dscpPolicy 看不到它。后果见 §2.2.3(6)。
+1. **ingress pref 1 is contended on a physical interface**, by `tc police`. This
+   does not affect Flux: our ingress filter lives only on our own `flxrs1`, where
+   nobody else is.
+2. ~~**egress pref 1 is uncontended**~~ — **overturned by the measurement in
+   §8.5.3.** As far as *AOSP* goes, egress pref 1 is indeed free, with CLAT at 4
+   and dscpPolicy at 5. But **this table covers AOSP and not OEMs**, and
+   Samsung's `semUidBPF` holds egress pref 1. What survives of the constraint is
+   "must precede CLAT at pref 4".
+3. **`dscpPolicy` at egress pref 5 is skipped.** With our preference below 5, a
+   captured packet returns `TC_ACT_REDIRECT` at our filter and the chain ends, so
+   dscpPolicy never sees it. Consequences in §2.2.3(6).
 
-### 8.5.3 厂商已经占了 egress pref 1：pref 不能硬编码
+### 8.5.3 A vendor already holds egress pref 1, so the preference cannot be fixed
 
-> **2026-08-25 实测推翻了 §8.5.2 的一个隐含前提。** 我原先假定"AOSP 只用 pref 1（ingress，`tc police`）、4、5，所以 **egress** pref 1 是我们的"。在 SM-S9180 / Android 16 上实测：
+> **Measured 2026-08-25, overturning an assumption implicit in §8.5.2.** The
+> assumption was that AOSP uses only pref 1 on ingress (`tc police`), 4 and 5, so
+> **egress** pref 1 belongs to us. On SM-S9180 running Android 16:
 
 ```
 # tc filter show dev wlan0 parent ffff:fff3        (clsact egress)
@@ -1127,125 +1891,289 @@ filter protocol all pref 1 bpf chain 0 handle 0x1 \
     prog_semUidBPF_schedcls_egress_tsm_ether id 96 tag 2ef4ef809be2dd32 jited
 ```
 
-三星的 `semUidBPF` 占据 **`chain 0` / `pref 1` / `handle 0x1` / `protocol all`**——与 `flux_abi.h` 里 `FLUX_TC_CHAIN` / `FLUX_TC_PREF` / `FLUX_TC_HANDLE_EGRESS` **完全相同的四元组**。ingress 侧同样被 `..._ingress_tsm_ether` 占据（对我们无影响，我们的 ingress 在自有 veth 上）。
+Samsung's `semUidBPF` occupies **`chain 0` / `pref 1` / `handle 0x1` /
+`protocol all`** — **the same four-tuple** that `flux_abi.h` named in
+`FLUX_TC_CHAIN`, `FLUX_TC_PREF` and `FLUX_TC_HANDLE_EGRESS`. The ingress side is
+likewise held by `..._ingress_tsm_ether`, which does not affect Flux because our
+ingress filter is on our own veth.
 
-**三条由此推出的硬约束**：
+**Three hard constraints follow:**
 
-1. **pref 1 不是我们能预定的。** tc 的 priority 取值是 `1..0xFFFF`，1 已是最小值，所以在厂商占了 pref 1 的接口上，**我们无法排到它前面**。原先的固定常量 `FLUX_TC_PREF` 已删除，换成 `FLUX_TC_PREF_PREFERRED`(2) / `_MIN`(1) / `_CLAT_MAX`(4) 三个边界值 + **dump 后动态选取**，并把实际取到的 pref 记进所有权谓词与 `status`。
-2. **在 CLAT 的 `v4-*` 上仍必须 < 4**（AOSP CLAT egress 在 pref 4，§3.4）。若 1/2/3 在该接口全被占，**排序约束无法满足 → 排除该 interface**，不要降级到 pref ≥ 4。
-3. **"attach 成功"不再等于"能工作"。** 如果 pref 更低的厂商程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，classifier chain 会在我们之前终止，我们的程序**一个包也收不到，而 attach 本身完全成功**。因此激活流程必须增加一步**正向存活验证**，机制见 **§8.5.4**；判定被遮挡时**只排除该 interface**（不是整体 `Inactive`），并报告 `tc_chain_shadowed`。执行位置是 §8.7 步骤 9 之后、步骤 10 之前。
+1. **Preference 1 cannot be reserved.** tc priorities run `1..0xFFFF` and 1 is
+   already the minimum, so on an interface where a vendor holds pref 1 **there is
+   no way to get in front of it**. The fixed constant `FLUX_TC_PREF` is deleted
+   and replaced by three bounds — `FLUX_TC_PREF_PREFERRED` (2), `_MIN` (1),
+   `_CLAT_MAX` (4) — plus **selection from the dump at attach time**, with the
+   preference actually taken recorded in the ownership predicate and in `status`.
+2. **On a CLAT `v4-*` it MUST still be below 4**, since AOSP's CLAT egress sits
+   at pref 4 (§3.4). If 1, 2 and 3 are all taken on that interface, the ordering
+   constraint cannot be satisfied and **the interface is excluded**. Do not fall
+   back to a preference at or above 4.
+3. **"Attach succeeded" no longer means "it works".** If a vendor program at a
+   lower preference returns `TC_ACT_OK` or `TC_ACT_PIPE`, the classifier chain
+   ends before us and our program **receives not one packet, while the attach
+   itself succeeded completely**. Activation therefore gains a step of **positive
+   liveness verification** (§8.5.4). A shadowed verdict **excludes only that
+   interface** — not the whole data plane — and reports `tc_chain_shadowed`. It
+   runs after step 9 of §8.7 and before step 10.
 
-**还有一个竞态，比上面三条更难处理。** 探针第一次运行时，`wlan0` 已连上、已有全局地址、已有 `clsact`，但**还没有 filter**；几分钟后三星才把 egress 程序挂上（程序本身在开机后 7 秒就由 bpfloader 加载并 pin 了，`loaded_at` 与 attach 时刻是两件事）。含义：
+**There is also a race, harder to handle than any of the three.** When the probe
+first ran, `wlan0` was connected, held a global address and had a `clsact`, but
+**no filter yet**; Samsung attached its egress program minutes later. The program
+itself had been loaded and pinned by bpfloader seven seconds after boot — being
+loaded and being attached are two different events. Consequences:
 
-- **一次性的冲突检查会漏。** 激活时 pref 1 空着，不代表它会一直空着。
-- **我们若先占了 pref 1**，厂商随后的 attach 要么失败（我们悄悄弄坏了三星的流量统计），要么用 `NLM_F_REPLACE` 把我们顶掉（捕获静默停止）。两种都不可接受。
-- 因此**即使 pref 1 当时是空的，也不应该占它**。选 pref 的策略是"满足排序约束的前提下，避开厂商惯用的 pref 1"，并靠 §10.4 的 `RTM_NEWTFILTER` 事件持续监视自己那一条是否还在、以及是否有新 filter 插到我们前面。
+- **A one-time conflict check misses this.** Pref 1 being free at activation does
+  not mean it stays free.
+- **If Flux takes pref 1 first**, the vendor's later attach either fails, meaning
+  Flux has silently broken Samsung's traffic accounting, or uses `NLM_F_REPLACE`
+  and evicts us, meaning capture silently stops. Neither is acceptable.
+- **So pref 1 MUST NOT be taken even when it is free.** The selection policy is
+  "the lowest preference that satisfies the ordering constraint, avoiding the
+  vendor-conventional pref 1", backed by continuous monitoring through §10.4's
+  `RTM_NEWTFILTER` events — both that our own filter is still there and that
+  nothing new has been inserted ahead of it.
 
-**这一条同时改变了 §2.2.3(6) 的影响面评估**：本机除 AOSP 的 `dscpPolicy` 外，三星还有 `tosMarker` 系列**五个** egress 程序（`classify_ack` / `classify_uid` / `classify_queue_mapping` / `set_queue_mapping` / `set_tos_mobile`）以及 `mnxbNetd`、`semUidBPF_ape`、`tcpAccECN` 的 ether 变体。被捕获流量绕过的下游 filter 比蓝图原先设想的多得多。
+**This also changes the impact assessment of §2.2.3(6).** Beyond AOSP's
+`dscpPolicy`, this device carries Samsung's `tosMarker` family of **five** egress
+programs — `classify_ack`, `classify_uid`, `classify_queue_mapping`,
+`set_queue_mapping`, `set_tos_mobile` — plus ether variants of `mnxbNetd`,
+`semUidBPF_ape` and `tcpAccECN`. Far more downstream filters are bypassed by
+captured traffic than the original blueprint assumed.
 
-> **2026-08-25 追加实测：占位是按接口的，不是按设备的。** 上面那句"三星占了 egress pref 1"容易被读成设备级事实，**它不是**。在同一台 SM-S9180 上、Wi-Fi 断开蜂窝为主网时，`rmnet_data0` / `rmnet_data1` / `rmnet_data8` 三个接口都有 `clsact`，而 **egress 与 ingress 两侧一个 filter 都没有**（§16.9.2）。
+> **Measured 2026-08-25, additionally: occupancy is per interface, not per
+> device.** "Samsung holds egress pref 1" reads like a device-level fact.
+> **It is not.** On the same SM-S9180, with Wi-Fi disconnected and cellular as
+> the primary network, `rmnet_data0`, `rmnet_data1` and `rmnet_data8` all had a
+> `clsact` and **not one filter on either side** (§16.9.2).
 >
-> 名字本身就在提示这一点：`..._tsm_ether` 的后缀是 `ether`，它是给 `ARPHRD_ETHER` 准备的，RAWIP 的蜂窝接口不在它的范围内。
+> The name says so itself: the `..._tsm_ether` suffix is `ether`, so it is meant
+> for `ARPHRD_ETHER`, and RAWIP cellular interfaces are out of its scope.
 >
-> **对实现的直接后果**：不得把"本设备的可用 pref"缓存成一个值，必须**逐接口 dump、逐接口选取、逐接口做 §8.5.4 的存活验证**。同一台设备上蜂窝可能拿到 pref 1（但按上面的理由仍应避开它）、Wi-Fi 只能拿 pref 2。把 wlan0 的观察外推到 rmnet 会得出错误的排除决策。
+> **Direct consequence for the implementation:** the available preference MUST
+> NOT be cached as one value for the device. Dump, select and run §8.5.4's
+> liveness verification **per interface**. On one device cellular may be able to
+> take pref 1 — though the reasoning above says still avoid it — while Wi-Fi can
+> only take 2. Extrapolating an observation on `wlan0` to `rmnet` produces the
+> wrong exclusion decision.
 
-### 8.5.4 正向存活验证：唯一与厂商无关的"我们真的在工作"判据
+### 8.5.4 Positive liveness verification: the only vendor-independent test
 
-§8.5.3 约束 3 提出了要求，这里定稿机制。**这是整个设计里唯一不依赖任何厂商知识的健康检查**，因此它的实现方式必须是确定的，不能留给实现者发挥。
+Constraint 3 of §8.5.3 states the requirement; this section fixes the mechanism.
+**This is the only health check in the entire design that depends on no vendor
+knowledge**, so its implementation is specified rather than left to the
+implementer.
 
-**要解决的问题**：`attach` 系统调用返回成功，只证明 filter 挂上了；不证明它会被执行。若同一 chain 上有一个 pref 更低的程序返回 `TC_ACT_OK` 或 `TC_ACT_PIPE`，`__tcf_classify` 就地终止，我们的程序**一个包都收不到，且没有任何错误码**。这是本设计最可能"装上了但什么都没发生"的失效模式，而在陌生 OEM 上我们无法预知谁在前面。
+**The problem.** A successful `attach` syscall proves the filter is installed. It
+does not prove the filter will run. If a program at a lower preference in the
+same chain returns `TC_ACT_OK` or `TC_ACT_PIPE`, `__tcf_classify` terminates
+there and our program **receives no packet and produces no error code**. This is
+the most likely "installed but nothing happens" failure mode in the design, and
+on an unfamiliar OEM there is no way to know in advance who is ahead of us.
 
-**为什么不能用现有的计数器判断**：§6 规定 counters **只在决策/丢弃/fault 边沿**递增，为的是让未选中流量的稳态per-packet 成本保持为"1 helper + 1 hash miss"（§14.1）。如果设备上此刻没有被选中的 app 在通信，所有计数器都不动——而这与"程序没被执行"完全无法区分。
+**Why the existing counters cannot answer it.** §6.1 increments counters only at
+decision, drop and fault edges, precisely so that unselected traffic keeps its
+steady-state cost of one helper plus one hash miss (§14.1). If no selected app
+happens to be communicating, every counter stays still — which is
+indistinguishable from the program never having run.
 
-**为什么不能用 `tc -s filter show` 的内核统计**：`cls_bpf` 在 direct-action 模式下不走 `tcf_exts_exec`，不更新 `bstats`。而且本机的 `iproute2-ss171113` 对 `tc -s filter show` 返回空（实测），这条路在真机上根本不可靠。
+**Why kernel statistics cannot answer it either.** In direct-action mode
+`cls_bpf` does not go through `tcf_exts_exec` and does not update `bstats`. And
+measured on this device, `iproute2-ss171113` returns nothing at all for
+`tc -s filter show`, so that route is unreliable in practice as well as in
+theory.
 
-**一条被否决的设计，先说清楚为什么**：最自然的想法是在 `flux_control` 里加一个 `verify` 标志，让 `flx_cap_l2/l3` 在取到快照后顺手计数。**这行不通。** 看 §7.3 的 E1：未选中流量在 `uid_policy` 查不到时就 `return TC_ACT_UNSPEC` 了，**根本走不到 `ctrl()`**——`ctrl()` 只在"已有决策"的 E2 分支里被调用。要让标志生效，就得把快照查找提到热路径最顶端，对**设备上每一个出向包**多付两次 map 查找，这直接摧毁 §14.1 的性能地基。为一个只在激活时用 2 秒的检查付永久代价，不划算。
+**A rejected design, stated because it is the natural first idea.** Add a
+`verify` flag to `flux_control` and have `flx_cap_l2/l3` count when it picks up
+the snapshot. **This does not work.** Look at step E1 of §7.3: unselected traffic
+returns `TC_ACT_UNSPEC` on the `uid_policy` miss and **never reaches `ctrl()`**,
+which is only called on the E2 branch where a decision already exists. Making the
+flag effective would mean hoisting the snapshot lookup to the very top of the hot
+path, paying two extra map lookups on **every outbound packet on the device** —
+destroying the performance floor of §14.1 permanently to serve a check that runs
+for two seconds at activation.
 
-**采用的机制：一个独立的探测程序 `flx_verify`。**
+**The mechanism: a separate probe program, `flx_verify`.**
 
 ```c
 SEC("tc/verify")
 int flx_verify(struct __sk_buff *skb) {
 	cnt(FLUX_CNT_SAW_PACKET);
-	return TC_ACT_UNSPEC;   /* 不改变任何包的命运 */
+	return TC_ACT_UNSPEC;   /* changes no packet's fate */
 }
 ```
 
-流程（插在 §8.7 步骤 9 与步骤 10 之间，逐 interface 执行）：
+The procedure, run per interface between steps 9 and 10 of §8.7:
 
-1. 按 §8.5.3 dump 该 parent，选出目标 pref **P**。
-2. 在 `(parent, protocol all, pref P, handle FLUX_TC_HANDLE_VERIFY)` 挂上 `flx_verify`。
-3. 读 `counters[FLUX_CNT_SAW_PACKET]` 记基线，等一个 timerfd 窗口（建议 2 s），再读。
-4. **判定**：
-   - 差值 > 0 → **pref P 可达**。卸下探测程序，在同一 pref P 挂上真正的 capture 程序（handle `0x1`）。两者都是同 parent、同 protocol、同 pref 的 direct-action `cls_bpf`，位置完全等价，所以"探测能跑"即"capture 能跑"。
-   - 差值 == 0 → **必须区分两种原因**，否则会把"当时没流量"误报成"被遮挡"：读该 interface 的 `/sys/class/net/<if>/statistics/tx_packets` 在同一窗口内是否增长。
-     - tx 在涨而计数不动 → **确认被遮挡**。记 `tc_chain_shadowed`，把该 interface 移出 active 集，并在 `status` 里**点名**同 chain 上 pref 低于 P 的那些 filter（用户在陌生机型上靠这条自证）。
-     - tx 也不涨 → 只是没流量，**不作结论**。退避后重试（复用 §10.4 的 timerfd）；到退避上限仍无流量则标注"未验证"并**允许激活**——不能因为用户当时没上网就拒绝服务。
-5. 全部 interface 处理完，才做步骤 10 那一次 pointer swap 发布 `active = 1`。
+1. Dump that parent per §8.5.3 and select the target preference **P**.
+2. Attach `flx_verify` at
+   `(parent, protocol all, pref P, handle FLUX_TC_HANDLE_VERIFY)`.
+3. Read `counters[FLUX_CNT_SAW_PACKET]` as a baseline, wait one timerfd window —
+   2 s is the recommended value — and read it again.
+4. **Decide:**
+   - **Difference > 0 ⇒ preference P is reachable.** Detach the probe and attach
+     the real capture program at the same preference P with handle `0x1`. Both
+     are direct-action `cls_bpf` filters on the same parent, protocol and
+     preference, so their positions are exactly equivalent: if the probe runs,
+     the capture program runs.
+   - **Difference == 0 ⇒ the two possible causes MUST be distinguished**, or
+     "no traffic right now" gets misreported as "shadowed". Read whether that
+     interface's `/sys/class/net/<if>/statistics/tx_packets` grew over the same
+     window.
+     - **tx grew while the count did not ⇒ shadowing confirmed.** Record
+       `tc_chain_shadowed`, remove the interface from the active set, and **name**
+       in `status` the filters in that chain at a preference below P. On an
+       unfamiliar device that naming is how a user substantiates the diagnosis.
+     - **tx did not grow either ⇒ no conclusion.** Retry after a backoff, reusing
+       the timerfd of §10.4. If the backoff ceiling is reached with still no
+       traffic, mark the interface unverified and **allow activation anyway** —
+       refusing to work because the user happened not to be online is worse than
+       an unverified attach.
+5. Only after every interface has been processed does step 10 perform the single
+   pointer swap publishing `active = 1`.
 
-**五条硬约束**：
+**Five hard constraints:**
 
-- 验证全程 `active` **必须**为 0。让流量在"尚未确认能工作"的状态下被捕获，等于拿用户的连接做实验。反过来说，因为 `active == 0`，**卸下探测到挂上 capture 之间的那个微秒级空档是无害的**。
-- `flx_verify` **只能**返回 `TC_ACT_UNSPEC`。它是观测器，不是策略。
-- `FLUX_CNT_SAW_PACKET` **只由 `flx_verify` 触碰**，capture 与 ingress 程序一行都不许写它。这条是把"零热路径成本"这个性质固定下来的唯一办法。
-- handle 用独立的 `0x3`，不复用 capture 的 `0x1`：所有权谓词因此永不混淆两者，而且**验证中途崩溃留下的残留仍然可被精确识别并删除**（§8.7 步骤 3 的清理要认这个 handle）。
-- 判定失败**只排除该 interface**，不进 `Inactive`——与 §26 不变量 4 对捕获侧的处置一致。
+- **`active` MUST be 0 throughout verification.** Capturing traffic in a state
+  not yet confirmed to work is experimenting on the user's connections.
+  Conversely, *because* `active == 0`, the microsecond gap between detaching the
+  probe and attaching the capture program is harmless.
+- **`flx_verify` MUST return only `TC_ACT_UNSPEC`.** It is an observer, not a
+  policy.
+- **`FLUX_CNT_SAW_PACKET` MUST be touched only by `flx_verify`.** The capture and
+  ingress programs MUST NOT write it. This is the only way the zero-hot-path-cost
+  property stays true rather than merely intended.
+- **Use the distinct handle `0x3`**, not the capture handle `0x1`. The ownership
+  predicate then can never confuse the two, and residue left by a crash during
+  verification remains exactly identifiable and deletable — the cleanup in step 3
+  of §8.7 must recognise this handle.
+- **A failed verdict excludes only that interface** and does not enter
+  `Inactive`, consistent with §26 invariant 4 on capture-side handling.
 
-**它顺带覆盖的其它失效**：attach 到了错误的 parent、interface 已 down 但 filter 还在、以及 chain 上出现了新的、pref 更低的厂商 filter。三者都表现为"tx 在涨而计数不动"。
+**Other failures this covers incidentally:** attaching to the wrong parent; the
+interface having gone down while the filter remains; and a new vendor filter
+appearing at a lower preference. All three present as "tx grew, count did not".
 
-**再验证**：稳态下若 reactor 收到 `RTM_NEWTFILTER` 且新 filter 的 pref 低于我们，可以在 **P+1** 挂一次探测——若 P+1 可达则 P 必然可达，于是无需动我们自己的 filter 就能确认仍在工作。这是这套设计相对"控制位"方案的额外好处。
+**Re-verification.** In steady state, if the reactor sees an `RTM_NEWTFILTER`
+whose preference is below ours, it can attach a probe at **P+1**: if P+1 is
+reachable then P necessarily is, so we confirm we are still working **without
+touching our own filter**. This is a benefit the rejected control-bit design does
+not have.
 
-**这套机制没有先例，实现时不要指望能抄。** §0.5.10 逐个读过语料里所有 attach TC filter 的项目：**没有任何一个验证程序是否真的执行**。最接近的是 asteriskd，它在 attach 后用 `RTM_GETTFILTER` dump 比对 object id / program tag / bpf name / `da` 标志——但那验证的是**身份**（"我装的那条还在不在、是不是我的"），不是**执行**。被前面的 filter 遮挡时，身份检查会**通过**。两者是不同故障，都要有：身份侧本设计由 §8.5 的所有权谓词 + `RTM_NEWTFILTER` 监视覆盖，执行侧就是本节。
+**There is no precedent for this; do not expect to copy one.**
+`../history/review-log.md` §0.5.10 read every project in the corpus that attaches
+a TC filter: **not one verifies that its program actually executes.** The closest
+is asteriskd, which dumps with `RTM_GETTFILTER` after attaching and compares
+object id, program tag, bpf name and the `da` flag. That verifies **identity** —
+is my filter still there, and is it mine — not **execution**. When shadowed by a
+filter in front, an identity check **passes**. They are different failures and
+both need covering: identity by the ownership predicate of §8.5 plus
+`RTM_NEWTFILTER` monitoring, execution by this section.
 
-**同时补一条 asteriskd 教给我们的对照**：它遇到自有槽位被外人占用时**直接拒绝启动**（`"foreign TC resource collision"`）。那是"fail closed"，简单且安全，但结果是在三星设备上完全不可用。本设计选择"换个 pref + 实测能否跑到"，能力更强，代价就是必须自己实现本节这套东西。
+**One contrast asteriskd does teach.** When it finds its own slot occupied by a
+stranger it **refuses to start**, reporting `"foreign TC resource collision"`.
+That is fail-closed, simple and safe — and it would make Flux entirely unusable
+on a Samsung device. Choosing "pick another preference and measure whether we are
+reached" is strictly more capable, and the price is having to implement this
+section rather than borrow it.
 
-## 8.6 interface admission
+## 8.6 Interface admission
 
-由 rtnetlink 的 live link/address/route 事件收集"可能承载本机输出"的 interface，**不按名字硬编码**。排除：
+Interfaces that might carry this host's output are collected from live
+rtnetlink link, address and route events. **Names are never hardcoded.**
+Excluded:
 
-- `lo`、`flxrs0`、`flxrs1`；
-- generic TUN/TAP、活跃 Android VPN、bridge、bond、veth、dummy、team；
-- tether / downstream / LAN-only interface；
-- VLAN、未知 ARPHRD、未知 layout；
-- 已有 TC filter 占用 Flux 精确 identity 的 interface；
-- 无法确认 first-applicable 顺序的 interface（含条件不满足的 `v4-*`）。
+- `lo`, `flxrs0`, `flxrs1`;
+- generic TUN and TAP, an active Android VPN, bridge, bond, veth, dummy, team;
+- tether, downstream and LAN-only interfaces;
+- VLAN, unknown ARPHRD, unknown layout;
+- any interface whose existing TC filters occupy Flux's exact identity;
+- any interface where the ordering constraint of §8.5.0 cannot be satisfied,
+  including a `v4-*` whose conditions do not hold.
 
-一个 interface 失败只排除该 interface，其余继续。候选总数硬限 64；超限时整个新 topology 候选不 promote，保持当前/Direct，**不按名字截断**。`status` 必须逐个列出 `active` 或 `excluded(reason)`。
+One interface failing excludes only that interface; the rest continue. The
+candidate set is hard-limited to 64; exceeding it means the whole new topology
+candidate is not promoted and the current state or Direct is kept — **the list is
+never truncated by name**. `status` MUST list every candidate as either `active`
+or `excluded(reason)`.
 
-## 8.7 有序激活（冷启动，配置有效）
+## 8.7 Ordered activation on a cold start with a valid configuration
 
-严格按序，任一步失败不进入后续；已存在的 control snapshot 保持 `active=0`：
+Strictly in order. A step that fails does not proceed to the next, and any
+control snapshot that already exists stays at `active=0`:
 
-1. 取 daemon lock；检查 `sysconf(_SC_PAGESIZE) == 4096`、netns 一致、运行目录权限；page size 不支持则立即 Inactive/Direct，不启动 engine、不建任何对象。
-2. **清理**：按 ownership 谓词枚举并删除全部残留自有对象（TC filter、RPDB rule、route table 条目、veth）。发现"同名但不匹配"的对象 → 冲突，Inactive 并报告。
-3. 检查 `all.rp_filter`；创建 veth、设置 MTU/sysctl/UP。（**不需要读 MAC**——D17 之后 control 结构里没有 MAC 字段。）
-4. 创建 route table 20260 条目与两条 RPDB 规则。
-5. 加载 BTF 与 12 个 map、4 个 program（含 §8.5.4 的 `flx_verify` 探测程序）；注册 ringbuf 到 epoll；publish 初始 frozen `active=0` leaf。
-6. 解析 `packages.list` 与配置，填充 `uid_policy`、两张 bypass LPM（固定 + 用户 CIDR）与两张 `self_addr` HASH（本机地址，D20）。
-7. 生成 effective JSON → `sing-box check` → 启动 child → 等待 4 个 socket 通过 SOCK_DIAG + PID/inode 核验。
-8. 在 `flxrs1` 创建 `clsact` 并 attach `flx_in`（**先于** egress，保证回送侧就绪）。
-9. 逐个处理可支持的 interface（每个独立，失败只排除该 interface）：按 §8.5.3 dump 该 parent 选出可用 pref → 按 §8.5.4 挂 `flx_verify` 做存活验证 → 通过后卸下探测、在同一 pref 挂 `flx_cap_l2`/`flx_cap_l3`。
-10. 最后一次 `control_root` pointer swap，发布完整 generation snapshot 与 `active=1`。**在此之前 `active` 全程为 0，所以第 9 步的验证不会改变任何流量的走向。**
+1. Take the daemon lock. Check `sysconf(_SC_PAGESIZE) == 4096`, netns identity
+   and the runtime directory permissions. An unsupported page size means
+   Inactive and Direct immediately, with no engine started and no object
+   created.
+2. **Clean up.** Enumerate by the ownership predicate and delete every residual
+   object of our own — TC filters, RPDB rules, route table entries, the veth.
+   An object matching by name but not by predicate is a conflict: Inactive, and
+   report it.
+3. Check `all.rp_filter`. Create the veth, set MTU and sysctls, bring it up. **No
+   MAC is read**, because since D17 the control struct has no MAC field.
+4. Create the route table 20260 entries and the two RPDB rules.
+5. Load the BTF, the 12 maps and the 4 programs, `flx_verify` (§8.5.4) among
+   them. Register the ringbuf with epoll. Publish the initial frozen leaf with
+   `active=0`.
+6. Parse `packages.list` and the configuration; fill `uid_policy`, the two
+   bypass LPM tries (fixed prefixes tagged `RESERVED`, user prefixes tagged
+   `POLICY`, §6.1.1) and the two `self_addr` HASH maps (D20).
+7. Generate the engine configuration (§28.2), run `sing-box check`, start the
+   child, and wait for its 4 sockets to pass SOCK_DIAG plus the PID and inode
+   cross-check.
+8. Create the `clsact` on `flxrs1` and attach `flx_in` — **before** any egress
+   attach, so the return path is ready first.
+9. Process each supportable interface independently, one failure excluding only
+   that interface: dump the parent and select an available preference (§8.5.3),
+   attach `flx_verify` and run liveness verification (§8.5.4), then on success
+   detach the probe and attach `flx_cap_l2` or `flx_cap_l3` at the same
+   preference.
+10. One final `control_root` pointer swap publishes the complete generation
+    snapshot with `active=1`.
 
-正常停止：先 publish `active=0` leaf，再关 engine。
+**`active` is 0 throughout steps 1 to 9**, which is what makes step 9's
+verification safe: no traffic changes course while Flux is still establishing
+whether it can be reached.
 
-## 8.8 崩溃残留
+Normal shutdown reverses only the first half: publish an `active=0` leaf, then
+stop the engine.
 
-`fluxd` 异常死亡后 TC program/map 可能续存，但其直接 child 因 `PR_SET_PDEATHSIG=SIGKILL` 被内核终止，listener 随进程关闭。后果：
+## 8.8 What a crash leaves behind
 
-- 未入场 TCP/UDP 因 `listener_alive()` miss 而 Direct（**这是承担 fail-open 的机制**）；
-- 已有 TCP decision 的包仍会 redirect，随后 ingress lookup miss 而 drop；
-- `service.sh` 重启 fluxd 后走 §8.7 的删除-重建，一切归零。
+If `fluxd` dies abnormally its TC programs and maps may survive, but its direct
+child is killed by the kernel through `PR_SET_PDEATHSIG=SIGKILL`, so the
+listeners close with the process. The consequences follow from that asymmetry:
 
-手工 `disable`/`stop` 同样先 publish `active=0` 再停 engine；对象保留到 daemon 重启或设备重启。卸载后重启，全部非持久内核对象自然消失。
+- unadmitted TCP and UDP go Direct because `listener_alive()` misses — **this is
+  the mechanism that delivers the pre-admission guarantee of §2.2.1**, not a
+  separate safety net;
+- packets on a flow that already holds a TCP decision are still redirected, and
+  then dropped when the ingress lookup misses — which is §2.2.2 behaving as
+  specified rather than a residual defect;
+- once `service.sh` restarts fluxd, §8.7's delete-and-rebuild returns everything
+  to a known state.
 
-## 8.9 netlink 消息级规格
+A manual `disable` or `stop` follows the same order: publish `active=0` first,
+then stop the engine. Objects remain until the daemon restarts or the device
+does. After an uninstall and a reboot, every non-persistent kernel object is gone
+on its own.
 
-因为 §12.8 决定不 shell out 到 `ip`/`tc`，这些消息必须自己编码。这一节把每条消息的**精确字段**写死，避免实现者靠猜。所有属性用标准 `nlattr` TLV（4 字节对齐），所有请求带 `NLM_F_REQUEST | NLM_F_ACK` 并**必须等待并检查 `NLMSG_ERROR`**（`error == 0` 才是成功；忽略 ACK 是最常见的静默失败）。
+## 8.9 netlink messages, field by field
 
-### 8.9.1 创建 veth 对
+§12.8 rules out shelling out to `ip` and `tc`, so these messages are encoded
+here. This section fixes the **exact fields** so that no implementer has to
+guess.
 
-`RTM_NEWLINK`，flags `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`（`EXCL` 让"已存在"变成显式 `EEXIST` 而不是静默改写）：
+Every attribute is a standard `nlattr` TLV on a 4-byte alignment. Every request
+carries `NLM_F_REQUEST | NLM_F_ACK` and **MUST wait for and check
+`NLMSG_ERROR`**: success is `error == 0`, and ignoring the ACK is the single most
+common way for one of these operations to fail silently.
+
+### 8.9.1 Creating the veth pair
+
+`RTM_NEWLINK` with `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`. `EXCL`
+turns "already exists" into an explicit `EEXIST` rather than a silent overwrite:
 
 ```text
 ifinfomsg { ifi_family = AF_UNSPEC, ifi_type = 0, ifi_index = 0, ifi_flags = 0, ifi_change = 0 }
@@ -1255,66 +2183,66 @@ ifinfomsg { ifi_family = AF_UNSPEC, ifi_type = 0, ifi_index = 0, ifi_flags = 0, 
     IFLA_INFO_KIND = "veth"
     IFLA_INFO_DATA (nested)
       VETH_INFO_PEER (nested)          /* = 1 */
-        ifinfomsg { 全零 }             /* 必须有这个内嵌头，长度算在 attr 内 */
+        ifinfomsg { all zero }         /* this embedded header is required; its length counts inside the attr */
         IFLA_IFNAME = "flxrs1"
         IFLA_MTU    = 65535
 ```
 
-**易错点**：`VETH_INFO_PEER` 的 payload **以一个完整的 `struct ifinfomsg` 开头**，之后才是 peer 的属性。漏掉它会得到 `EINVAL`。
+**The trap:** the `VETH_INFO_PEER` payload **begins with a complete `struct ifinfomsg`**, and only then carries the peer's attributes. Omitting it yields `EINVAL`.
 
-alias 与 up 分两条消息（`RTM_NEWLINK`，不带 `CREATE|EXCL`，按 `ifi_index` 定位）：
+The alias and the up transition are two further messages — `RTM_NEWLINK` without `CREATE|EXCL`, addressed by `ifi_index`:
 
 ```text
-/* 打 alias，用于 §8.5 的所有权识别 */
+/* set the alias, used for ownership identification in §8.5 */
 ifinfomsg { ifi_index = <idx> }   IFLA_IFALIAS = "flux-rs:managed:v1:host"
-/* 置 UP */
+/* bring it up */
 ifinfomsg { ifi_index = <idx>, ifi_flags = IFF_UP, ifi_change = IFF_UP }
 ```
 
-`ifi_change` 是掩码，**必须只置要改的位**；置 `~0` 会把其它 flag 一起写成 0。
+`ifi_change` is a mask and **MUST set only the bits being changed**. Passing `~0` writes every other flag to 0 as a side effect.
 
-### 8.9.2 route table 20260 的两条 local 路由
+### 8.9.2 The two local routes in table 20260
 
-`RTM_NEWROUTE`，flags `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`：
+`RTM_NEWROUTE` with `NLM_F_REQUEST|NLM_F_ACK|NLM_F_CREATE|NLM_F_EXCL`:
 
 ```text
 rtmsg {
-  rtm_family   = AF_INET (或 AF_INET6)
+  rtm_family   = AF_INET (or AF_INET6)
   rtm_dst_len  = 0                     /* default */
   rtm_src_len  = 0
   rtm_tos      = 0
-  rtm_table    = RT_TABLE_UNSPEC       /* 0；表号 > 255 必须走 RTA_TABLE */
-  rtm_protocol = 202                   /* FLUX_ROUTE_PROTO，自有标记 */
-  rtm_scope    = RT_SCOPE_HOST         /* RTN_LOCAL 必须是 HOST */
+  rtm_table    = RT_TABLE_UNSPEC       /* 0; a table id > 255 MUST travel in RTA_TABLE */
+  rtm_protocol = 202                   /* FLUX_ROUTE_PROTO, our own marker */
+  rtm_scope    = RT_SCOPE_HOST         /* RTN_LOCAL requires HOST */
   rtm_type     = RTN_LOCAL
   rtm_flags    = 0
 }
   RTA_TABLE = 20260
-  RTA_OIF   = <lo 的 ifindex，通常 1，但必须查>
+  RTA_OIF   = <ifindex of lo: usually 1, but look it up>
 ```
 
-**三个易错点**：① 表号 20260 超过 `rtm_table` 的 8 位，必须用 `RTA_TABLE` 且 `rtm_table` 置 `RT_TABLE_UNSPEC`；② `rtm_type = RTN_LOCAL` 时 `rtm_scope` 必须是 `RT_SCOPE_HOST`，写 `UNIVERSE` 会 `EINVAL`；③ `lo` 的 ifindex **要查不要写死 1**。
+**Three traps.** ① The table id 20260 does not fit the 8 bits of `rtm_table`, so it MUST go in `RTA_TABLE` with `rtm_table` set to `RT_TABLE_UNSPEC`. ② With `rtm_type = RTN_LOCAL`, `rtm_scope` MUST be `RT_SCOPE_HOST`; `UNIVERSE` returns `EINVAL`. ③ Look up the ifindex of `lo` rather than hardcoding 1.
 
-### 8.9.3 两条 RPDB 规则
+### 8.9.3 The two RPDB rules
 
-`RTM_NEWRULE`（=`RTM_NEWROUTE` 的 rule 变体，消息体是 `struct fib_rule_hdr`），flags 同上：
+`RTM_NEWRULE` — the rule variant of `RTM_NEWROUTE`, whose body is a `struct fib_rule_hdr` — with the same flags:
 
 ```text
 fib_rule_hdr {
-  family   = AF_INET (或 AF_INET6)
+  family   = AF_INET (or AF_INET6)
   dst_len  = 0, src_len = 0, tos = 0
-  table    = RT_TABLE_UNSPEC           /* 同样走 FRA_TABLE */
+  table    = RT_TABLE_UNSPEC           /* likewise travels in FRA_TABLE */
   action   = FR_ACT_TO_TBL             /* = 1 */
   flags    = 0
 }
   FRA_PRIORITY = 100                   /* FLUX_RULE_PRIORITY */
   FRA_TABLE    = 20260
-  FRA_IIFNAME  = "flxrs1"              /* 注意是 IIFNAME，不是 OIFNAME */
+  FRA_IIFNAME  = "flxrs1"              /* IIFNAME, not OIFNAME */
 ```
 
-**`FRA_IIFNAME` 是整个设计的关键**：它把这条规则的作用域限制到只有 Flux 注入的包会命中的入口设备。用 `FRA_FWMARK` 会占用 Android fwmark 空间（§3.1）；用 `iif lo` 会灾难性地命中**全部本机发出的流量**（netd 正是用 `iif lo` 表示"本机产生"）。
+**`FRA_IIFNAME` is what makes the whole design safe.** It confines the rule to the one input device only Flux-injected packets can arrive on. `FRA_FWMARK` would consume Android fwmark space (§3.1), and `iif lo` would catastrophically match **every locally generated packet on the device** — `iif lo` is precisely how netd expresses "locally generated".
 
-删除用 `RTM_DELRULE`，**必须带上完全相同的 `FRA_PRIORITY` + `FRA_TABLE` + `FRA_IIFNAME`**；只带 priority 会删掉别人的规则。
+Deletion uses `RTM_DELRULE` and **MUST carry the identical `FRA_PRIORITY`, `FRA_TABLE` and `FRA_IIFNAME`**. Priority alone would delete somebody else's rule.
 
 ### 8.9.4 `clsact` qdisc
 
@@ -1323,7 +2251,7 @@ fib_rule_hdr {
 ```text
 tcmsg {
   tcm_family = AF_UNSPEC
-  tcm_ifindex = <idx>                  /* 操作前一刻重新 if_nametoindex，见 §10.4.1 */
+  tcm_ifindex = <idx>                  /* re-resolve with if_nametoindex immediately before use, §10.4.1 */
   tcm_handle  = 0xFFFF0000             /* TC_H_MAKE(TC_H_CLSACT, 0) */
   tcm_parent  = 0xFFFFFFF1             /* TC_H_CLSACT */
   tcm_info    = 0
@@ -1331,7 +2259,7 @@ tcmsg {
   TCA_KIND = "clsact"
 ```
 
-`EEXIST` **不是错误**：记录"该 clsact 非我创建"，此后**永不删除它**（§8.5）。同时必须 dump 一次确认它没带 `TCA_INGRESS_BLOCK`(13) / `TCA_EGRESS_BLOCK`(14) 且 `TCA_OPTIONS` 为空，否则判 foreign 并排除该 interface。
+`EEXIST` **is not an error.** Record that this clsact was not created by us and **never delete it** (§8.5). Then dump once to confirm it carries neither `TCA_INGRESS_BLOCK` (13) nor `TCA_EGRESS_BLOCK` (14) and that `TCA_OPTIONS` is empty; otherwise it is foreign and the interface is excluded.
 
 ### 8.9.5 BPF filter
 
@@ -1341,127 +2269,223 @@ tcmsg {
 tcmsg {
   tcm_family  = AF_UNSPEC
   tcm_ifindex = <idx>
-  tcm_handle  = 0x1                    /* egress；ingress 用 0x2 */
+  tcm_handle  = 0x1                    /* egress capture; 0x2 = ingress, 0x3 = flx_verify */
   tcm_parent  = 0xFFFFFFF3             /* egress: TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS) */
                                        /* ingress: 0xFFFFFFF2 (TC_H_MIN_INGRESS) */
   tcm_info    = TC_H_MAKE(prio << 16, htons(protocol))
-                                       /* prio = 1；protocol = ETH_P_ALL(0x0003) 或 ETH_P_IP(0x0800) */
+                                       /* prio: selected per interface, §8.5.3 — never a constant */
+                                       /* protocol = ETH_P_ALL(0x0003) or ETH_P_IP(0x0800) */
 }
   TCA_KIND = "bpf"
   TCA_OPTIONS (nested)
     TCA_BPF_FD    = <program fd>       /* = 6 */
-    TCA_BPF_NAME  = "flx_cap_l2"       /* = 7；仅诊断用，不是所有权证明 */
-    TCA_BPF_FLAGS = TCA_BPF_FLAG_ACT_DIRECT (=1)   /* = 8；即 `da` */
+    TCA_BPF_NAME  = "flx_cap_l2"       /* = 7; diagnostic only, never proof of ownership */
+    TCA_BPF_FLAGS = TCA_BPF_FLAG_ACT_DIRECT (=1)   /* = 8; this is `da` */
 ```
 
-**`tcm_info` 的字节序陷阱**：高 16 位是 priority（主机序），低 16 位是 protocol 且必须是**网络字节序**。写成主机序会得到一个匹配不到任何包的 filter，而且不报错——这是最难查的一类错误。
+**The byte-order trap in `tcm_info`:** the high 16 bits are the priority in host
+order, and the low 16 bits are the protocol in **network** order. Writing the
+protocol in host order produces a filter that matches no packet **and reports no
+error** — the hardest class of bug to find here.
 
-dump 用 `RTM_GETTFILTER` + `NLM_F_DUMP`，`tcmsg{ tcm_ifindex, tcm_parent }`。内核在响应里额外返回 `TCA_BPF_ID`(11)、`TCA_BPF_TAG`(10)、`TCA_BPF_FLAGS_GEN`(9)，§8.5 的所有权谓词就靠这三个。**dump 顺序即执行顺序**，first-applicable 判定直接读顺序。
+Dumping uses `RTM_GETTFILTER` with `NLM_F_DUMP` and
+`tcmsg{ tcm_ifindex, tcm_parent }`. The kernel additionally returns
+`TCA_BPF_ID` (11), `TCA_BPF_TAG` (10) and `TCA_BPF_FLAGS_GEN` (9), which are the
+three the ownership predicate of §8.5 rests on.
 
-删除用 `RTM_DELTFILTER`，**必须带完全相同的 `tcm_handle` + `tcm_parent` + `tcm_info` + `TCA_KIND`**。少任何一项都可能删到别人的 filter，或者删掉整条 chain。
+**Dump order is execution order, and that is not the same as being reached.**
+The dump tells you who runs before you; it does not tell you whether they
+terminate the chain, so it cannot establish reachability. Use it for the ordering
+constraint and for selecting a preference (§8.5.3), and use `flx_verify`
+(§8.5.4) for whether Flux actually runs.
+
+Deletion uses `RTM_DELTFILTER` and **MUST carry the identical `tcm_handle`,
+`tcm_parent`, `tcm_info` and `TCA_KIND`**. Omitting any one of them risks
+deleting somebody else's filter, or the entire chain.
 
 ### 8.9.6 sysctl
 
-`rp_filter` / `accept_local` 走 `/proc/sys/net/ipv4/conf/<if>/...` 的普通文件写，不走 netlink。写入前先读原值并记入内存（用于 §23 的诊断），但**不做"恢复原值"**——`flxrs0/1` 是我们每次启动重建的对象，没有需要保护的原值。`all.rp_filter` 只读不写（§8.4）。
+`rp_filter` and `accept_local` are ordinary file writes under `/proc/sys/net/ipv4/conf/<if>/`, not netlink. Read the prior value into memory first, for the diagnostics of §23, but **do not restore it on exit**: `flxrs0` and `flxrs1` are rebuilt by us on every start, so there is no prior value worth protecting. `all.rp_filter` is read and never written (§8.4).
 
 ---
 
-# 第 9 部分：sing-box 集成
+# Part 9: sing-box integration
 
-## 9.0 一个会让 fakeip 完全失效的地址段冲突
+## 9.0 An address-range collision that silently disables fakeip entirely
 
-移植旧版 Flux 的 `conf/template.json` 时发现的，**属于设计缺陷而非配置错误**，因为它源于两边各自都合理的选择。
+Found while porting the older Flux's `conf/template.json`. **It is a design
+defect rather than a misconfiguration**, because it arose from two choices that
+were each individually reasonable.
 
-> **已处置（D21，2026-08-25）。** 本节保留为记录：症状是"DNS 正常、应用连得上、什么都打不开"，几乎不可能靠猜诊断出来，所以值得写下来。
+> **Resolved by D21 on 2026-08-25.** The section is kept as a record: the symptom
+> is "DNS works, the app connects, nothing loads", which is close to impossible
+> to diagnose by guesswork.
 
-sing-box 的 `fakeip` 默认地址段是 `198.18.0.0/15`（v4）与 `fc00::/18`（v6）。而 Flux **当时**的固定 bypass 集（§11.2、D16）包含：
+sing-box's default fakeip ranges are `198.18.0.0/15` for v4 and `fc00::/18` for
+v6. Flux's fixed bypass set **at the time** (§11.2, D16) contained:
 
-- `198.18.0.0/15` —— 因为 listener 曾绑在 `198.18.0.2`，整段进 bypass 以防自环；
-- `fc00::/7` —— 作为 ULA 私有地址段。
+- `198.18.0.0/15`, because the listener was bound at `198.18.0.2` and the whole
+  range was bypassed to prevent self-capture;
+- `fc00::/7`, as ULA private space.
 
-**两边完全重叠。** 后果是致命的：fakeip 的全部意义就是让应用连向那个假地址、然后被代理截获；而被 Flux bypass 意味着**那些包根本不会被捕获**。fakeip 会静默地完全失效——DNS 返回假地址，应用连上去，包直连出去，然后什么都连不上。
+**The two overlap exactly.** The consequence is fatal, because the entire point
+of fakeip is that the app connects to the fake address and the proxy intercepts
+it — and being in Flux's bypass set means **those packets are never captured**.
+fakeip fails silently and completely: DNS returns the fake address, the app
+connects to it, the packets go direct, and nothing works.
 
-### 9.0.1 处置
+### 9.0.1 Resolution
 
-**第一，把 listener 的 bypass 从整个前缀收窄到确切地址。** 原本 bypass 整个 `/15` 与 `/32` 是过度的：防自环只需要"选中 app 不能连上 listener 本身"。这一条独立成立，与 fakeip 无关。
+**First, narrow the listener bypass from a whole prefix to the exact address.**
+Bypassing an entire `/15` was excessive: preventing self-capture only requires
+that a selected app cannot reach the listener itself. This holds independently of
+fakeip.
 
-**第二，listener 地址移出 fakeip 的惯用段。** fakeip 用 `198.18.0.0/15` 是这个生态的既成惯例且更早，用户有肌肉记忆；Flux 原先选 `198.18.0.2` 只是"某个不可路由地址"，任意性更高。**该让的是 Flux。** 已改为：
+**Second, move the listener out of the range fakeip conventionally uses.**
+fakeip's use of `198.18.0.0/15` is the older, established convention in this
+ecosystem and users have muscle memory for it; Flux's original `198.18.0.2` was
+merely "some unroutable address" and far more arbitrary. **Flux is the one that
+should move.** Now:
 
-| | 原 | 现 |
+| | Was | Is |
 |---|---|---|
-| v4 listener | `198.18.0.2` | **`198.51.100.1`**（RFC 5737 TEST-NET-2） |
+| v4 listener | `198.18.0.2` | **`198.51.100.1`** (RFC 5737 TEST-NET-2) |
 | v4 bypass | `198.18.0.0/15` | **`198.51.100.1/32`** |
 | v6 listener | `2001:db8::2` | **`2001:db8:0:1::2`** |
 | v6 bypass | `2001:db8::/32` | **`2001:db8:0:1::2/128`** |
 
-v6 的 fakeip 段则**必须由模板避开 ULA**（`fc00::/7` 作为私有地址段的 bypass 是正当的，不该为 fakeip 让路），建议 `2001:db8:f::/48`。
+The v6 fakeip range instead **MUST avoid ULA in the template**: bypassing
+`fc00::/7` as private space is legitimate and should not yield to fakeip.
+`2001:db8:f::/48` is the recommended value, and §27.2.3 makes it a checked
+property of the shipped default.
 
-**第三——也是最重要的一条：`fluxd check` 必须交叉校验 `fakeip` 段与 bypass 集是否相交，相交即报错。** 前两条只是把默认值调对；用户随时会改这些地址段，而这个冲突的症状是"DNS 正常、应用连得上、但什么都打不开"，几乎不可能靠猜诊断出来。**自动校验才是真正的解法。**
+**Third, and most important: `fluxd check` MUST cross-validate the fakeip ranges
+against the bypass set and report an error when they intersect.** The first two
+points only make the defaults correct. Users change these ranges, and the symptom
+of the collision — "DNS works, the app connects, nothing loads" — is not
+diagnosable by inspection. **The automatic check is the actual fix**; the new
+defaults merely stop shipping the collision.
 
-同类的交叉校验还应覆盖：`fakeip` 段与 `tun` 段（若用户自己加了 tun）、`clash_api` 的监听地址是否为回环、以及用户在 `bypass.files` 里加载的大列表是否意外包含了 fakeip 段。
+That cross-validation applies against `RESERVED` entries only (§6.1.1). A fakeip
+range intersecting a `POLICY` entry is the user's own trade-off; intersecting a
+mechanism invariant is a hard refusal (PHIL-6).
 
-> **状态：已全部落地（2026-08-25 定稿）。** `bpf/include/flux_abi.h` 的 `FLUX_LISTEN_V4_STR` / `FLUX_LISTEN_V6_STR`、`crates/flux-core/src/abi.rs` 的镜像、`crates/flux-core/src/cidr.rs` 的固定 bypass 清单、以及 `module/template.json` 的 fakeip 段全部已改，`FLUX_ABI_MAGIC` 提到 `0xF10C0903`。第三条的交叉校验属于 `fluxd check` 的实现范围。
+Related cross-checks that belong in the same place: fakeip against a `tun` range
+if the user added one; whether `clash_api`'s listen address is loopback; and
+whether a large list loaded through a `@file` reference accidentally contains the
+fakeip range.
 
-## 9.1 注入的 inbound（每 generation 两个，4 个 kernel socket）
+> **Status: fully landed (2026-08-25).** `FLUX_LISTEN_V4_STR` and
+> `FLUX_LISTEN_V6_STR` in `bpf/include/flux_abi.h`, their mirrors in
+> `crates/flux-core/src/abi.rs`, the fixed bypass list in
+> `crates/flux-core/src/cidr.rs` and the fakeip range in `module/template.json`
+> were all changed, and `FLUX_ABI_MAGIC` was raised to `0xF10C0903`. The
+> cross-validation of the third point belongs to `fluxd check`.
 
-| tag | family | listen | listen_port | 说明 |
+## 9.1 The injected inbounds: two per generation, four kernel sockets
+
+| tag | family | listen | listen_port | Notes |
 |---|---|---|---|---|
-| `flux-in-v4` | IPv4 | `198.51.100.1` | 随机 `actual4` | `type: "tproxy"`，TCP+UDP |
-| `flux-in-v6` | IPv6 | `2001:db8:0:1::2` | 随机 `actual6` | `type: "tproxy"`，TCP+UDP |
+| `flux-in-v4` | IPv4 | `198.51.100.1` | random `actual4` | `type: "tproxy"`, TCP and UDP |
+| `flux-in-v6` | IPv6 | `2001:db8:0:1::2` | random `actual6` | `type: "tproxy"`, TCP and UDP |
 
-生成方式：深拷贝用户 `Value`；断言 `inbounds` 缺失或为空数组；写入上述两个对象。**不注入** `route.rules`、不改用户 DNS/outbounds/log。
+**Flux injects these; the template MUST NOT declare them.** Generation deep-copies
+the user's value, asserts that `inbounds` is absent or an empty array, and writes
+the two objects above. It MUST NOT inject `route.rules` and MUST NOT modify the
+user's DNS, outbounds or log configuration.
 
-注入的 JSON 只允许出现这些键：`type`、`tag`、`listen`、`listen_port`。**禁止**出现 `sniff*`、`domain_strategy`、`udp_disable_domain_unmapping`（1.13.0 已移除）、`bind_interface`、`routing_mark`、`reuse_addr`（见 §9.2 与 §9.3）。
+The reason injection wins over prefilling is worth stating, because prefilling
+looks more transparent. A prefilled listener address and port would be a fact
+living in two places — the template and `flux_control` — with no mechanism
+keeping them equal, so it needs a validator to confirm the template still says
+what the data plane believes. Injection makes the question unrepresentable
+instead: there is one writer, and the template that could disagree does not exist
+(PHIL-2, PHIL-4). Transparency is served by `run/sing-box.<gen>.json` being a
+readable file the user can inspect at any time (§28.1).
 
-端口：两个不同的随机值，取自 `61000..=65535`（Android 的 `ip_local_port_range` 通常是 `32768..60999`，因此不与 ephemeral 分配冲突），由 `getrandom()` 生成，在本 generation 内固定。**端口不是身份凭据**，只用于避免碰撞。
+Only these keys may appear in the injected JSON: `type`, `tag`, `listen`,
+`listen_port`. `sniff*`, `domain_strategy`, `udp_disable_domain_unmapping`
+(removed in 1.13.0), `bind_interface`, `routing_mark` and `reuse_addr` MUST NOT
+appear — see §9.2 and §9.3 for why the last three would break delivery.
 
-非本地绑定地址：sing-box 的 tproxy inbound 会在 bind 前设置 `IP_TRANSPARENT`/`IPV6_TRANSPARENT`，而 `inet_can_nonlocal_bind()` 允许 transparent socket 绑定非本地地址（root 有 `CAP_NET_RAW`）。选 `198.18.0.0/15`（RFC 2544）与 `2001:db8::/32`（RFC 3849）是因为它们不会被路由；两个前缀同时进固定 bypass（D16）。
+**Ports:** two distinct random values from `61000..=65535`, generated with
+`getrandom()` and fixed for the generation. Android's `ip_local_port_range` is
+typically `32768..60999`, so this range does not collide with ephemeral
+allocation. **A port is not a credential**; it exists only to avoid collisions,
+and §1.5 states what that does and does not defend against.
 
-## 9.2 硬约束：不得有 `SO_REUSEPORT`
+**Binding a non-local address** works because sing-box's tproxy inbound sets
+`IP_TRANSPARENT` or `IPV6_TRANSPARENT` before binding, and
+`inet_can_nonlocal_bind()` permits a transparent socket to bind a non-local
+address when the process holds `CAP_NET_RAW`, which root does. The documentation
+ranges `198.18.0.0/15` (RFC 2544) and `2001:db8::/32` (RFC 3849) were chosen
+because they are not routed; the exact listener addresses within them enter the
+fixed bypass as `RESERVED` (D16, §6.1.1).
 
-**已核验**：6.5 之前 `bpf_sk_assign()` 对 `sk->sk_reuseport` 为真的 socket 返回 `-ESOCKTNOSUPPORT`。
+## 9.2 Hard constraint: no `SO_REUSEPORT`
 
-- **`SO_REUSEPORT` 在 `SagerNet/sing-box@v1.13.19` 全代码树零命中**（`clone/` 内 `rg` 复核，§0.5.1）。约束成立。
-- 内核侧的精确边界已核对：v6.1 的 `bpf_sk_assign()` 含 `if (unlikely(sk_fullsock(sk) && sk->sk_reuseport)) return -ESOCKTNOSUPPORT;`（`net/core/filter.c:7167-7186`）；该行在 v6.6 / v6.12 已被替换为 `if (sk_unhashed(sk)) return -EOPNOTSUPP;`。**GKI 5.10 / 5.15 / 6.1 全部落在旧行为一侧。**
-- **6.5 之前还缺少 unhashed socket 的拒绝**，因此在"listener 刚被 unhash"的瞬间 assign 会**永久泄漏一次 socket 引用**。本设计靠 §9.4 的顺序把它关掉：候选切换时**先 publish `active=0`**（`flx_in` 在 I0 就 SHOT，不再 lookup/assign），**再**终止旧 child。残余窗口只剩"engine 意外崩溃到 pidfd 唤醒 fluxd 之间"的数百微秒，后果是极少量 socket 对象不被回收。**已知并接受**，不为此增加机制。
-- `redir.TProxy()` 无条件设置 `SO_REUSEADDR`（`common/redir/tproxy_linux.go:16`），这与 `bpf_sk_assign` 无关。因此"不注入 `reuse_addr`"只是为了 effective JSON 最小，不改变 socket 行为。
-- 仍然**禁止**让用户 JSON 影响这两个内部 inbound。
-- Phase 0 仍必须以"assign 实际成功"作为最终证明（§16 Q2）：升级 engine 版本时该零命中结论必须重新核验。
+**Verified:** before 6.5, `bpf_sk_assign()` returns `-ESOCKTNOSUPPORT` for a socket whose `sk->sk_reuseport` is set.
 
-## 9.3 硬约束：actual listener 不得带 mark 或 bind_interface
+- **`SO_REUSEPORT` has zero hits across the whole `SagerNet/sing-box@v1.13.19` tree**, re-checked with `rg` inside `clone/` (`../history/review-log.md` §0.5.1). The constraint holds.
+- The exact kernel boundary was checked: v6.1's `bpf_sk_assign()` contains `if (unlikely(sk_fullsock(sk) && sk->sk_reuseport)) return -ESOCKTNOSUPPORT;` (`net/core/filter.c:7167-7186`), and v6.6 and v6.12 replace that line with `if (sk_unhashed(sk)) return -EOPNOTSUPP;`. **GKI 5.10, 5.15 and 6.1 all fall on the older side.**
+- **Before 6.5 there is also no rejection of an unhashed socket**, so an assign
+  landing in the instant a listener has just been unhashed **leaks a socket
+  reference permanently**. The design closes this by ordering rather than by
+  detection (§9.4): a candidate switch **publishes `active=0` first**, after
+  which `flx_in` returns SHOT at step I0 and performs no lookup or assign, and
+  **only then** terminates the old child. The residual window is the few hundred
+  microseconds between an unplanned engine crash and pidfd waking fluxd, and its
+  consequence is a very small number of unreclaimed socket objects. **Known and
+  accepted**; no mechanism is added for it.
+- `redir.TProxy()` sets `SO_REUSEADDR` unconditionally (`common/redir/tproxy_linux.go:16`), which has nothing to do with `bpf_sk_assign`. Not injecting `reuse_addr` therefore keeps the generated JSON minimal without changing socket behaviour.
+- User JSON MUST NOT be allowed to influence these two internal inbounds.
+- Phase 0 still takes an actually successful assign as the final proof (§16, Q2), and **the zero-hit finding MUST be re-checked whenever the engine version is raised** — it is a property of a specific release, not of sing-box.
 
-- `routing_mark` 会被 accepted child socket 继承（`ireq->ir_mark = inet_request_mark(sk, skb)`），使 SYN-ACK 按 Android fwmark 语义被解读为某个 netId → 大概率 `unreachable`，握手失败。
-- `bind_interface`（`SO_BINDTODEVICE`）会传播到 TCP child 与 UDP 回写 socket，破坏"回程经 `lo` 送达 app"的路径。
+## 9.3 Hard constraint: the listener carries no mark and no bind_interface
 
-## 9.4 engine 候选切换（唯一 commit point）
+- `routing_mark` is inherited by the accepted child socket (`ireq->ir_mark = inet_request_mark(sk, skb)`), so the SYN-ACK is interpreted under Android's fwmark semantics as belonging to some netId — most likely `unreachable`, and the handshake fails.
+- `bind_interface`, which is `SO_BINDTODEVICE`, propagates to the TCP child and to the UDP write-back socket, destroying the return path that delivers to the app through `lo`.
 
-1. 生成 boot 内单调且不复用的新 `generation` 与两个随机端口；以 `O_CREAT|O_EXCL|O_NOFOLLOW` 写入并 `fsync` 权限 `0600` 的 `run/effective-sing-box.<generation>.json`；从该 exact immutable 路径执行 `sing-box check -c`。写入或 check 失败 → 只删除 candidate 文件，**当前 engine 完全不动**。
-2. 保留 current control leaf 与 current generation 文件；publish 同 generation 的 `active=0` leaf。
-3. 正常终止旧 child（`SIGTERM` → 短 deadline → `SIGKILL`，pidfd 确认退出）。**同一时刻最多一个运行中的 sing-box。**
-4. 在 inactive 状态清空 `fault_latch`；启动 candidate child；等待两个 inbound 对应的 4 个 socket 通过 PID/inode 核验。
-5. ready 后创建/freeze 新 generation 的 `active=1` leaf 并执行**单次** `control_root` pointer swap —— **这是唯一 commit point**。旧 generation 的 TCP decision 从此 drop/reset，新连接进入新 generation。随后内存里把 candidate 设为 current，旧 generation 文件 best-effort 删除（删除失败只记控制面错误，不回滚已提交的数据面）。
-6. candidate 启动或 swap 失败 → 停止它，用**始终未改名、未覆盖**的 current generation 文件重启旧 generation 并核验 4 个 socket；恢复成功才重新 publish 旧 `active=1`；恢复失败则保持 `active=0` 并报错。
+## 9.4 The engine candidate switch is the only commit point
 
-不依赖无法同步确认成功的 sing-box `SIGHUP`；不并行运行两个完整 engine（避免端口/cache/log/API 资源冲突）。短暂 inactive 期间新流走 Android 原路径、已入场 TCP 的包 drop 并依赖重传；配置 reload 是低频控制操作，这个确定性窗口比双 child 平台更符合模块复杂度预算。
+1. Allocate a new `generation`, monotonic and never reused within the boot, and two random ports. Write `run/sing-box.<generation>.json` with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fsync` it, mode `0600`, and run `sing-box check -c` against that exact immutable path. A write or check failure deletes only the candidate file; **the running engine is not touched at all**.
+2. Keep the current control leaf and the current generation's file. Publish an `active=0` leaf for the *same* generation.
+3. Terminate the old child normally: `SIGTERM`, a short deadline, then `SIGKILL`, with pidfd confirming exit. **At most one sing-box runs at any instant.**
+4. While inactive, clear `fault_latch`. Start the candidate child and wait for the four sockets of the two inbounds to pass the PID and inode cross-check.
+5. Once ready, create and freeze the new generation's `active=1` leaf and perform **one** `control_root` pointer swap. **That swap is the only commit point.** From it, TCP decisions carrying the old generation are dropped or reset and new flows enter the new generation. Then mark the candidate current in memory and delete the old generation's file best-effort — a failed delete is a control-plane error only and MUST NOT roll back a data plane that has already committed.
+6. If the candidate fails to start or the swap fails, stop it and restart the old generation from its file — which was **never renamed and never overwritten** — then re-verify its four sockets. Only a successful recovery re-publishes the old `active=1`; a failed one stays at `active=0` and reports the error.
 
-## 9.5 listener readiness（不 sleep、不解析日志）
+Flux does not use sing-box's `SIGHUP`, whose success cannot be confirmed synchronously, and does not run two complete engines in parallel, which would contend over ports, cache, logs and the API. During the brief inactive window new flows take Android's own path and packets on admitted TCP flows are dropped and left to retransmission. Configuration reload is an infrequent control operation, and this deterministic window fits the module's complexity budget better than a dual-child platform would.
 
-按 `2 family × 2 protocol` 通过 `NETLINK_SOCK_DIAG`（`SOCK_DIAG_BY_FAMILY`，`inet_diag`）枚举 4 个 exact socket，并把每个 socket 的 inode 与 `/proc/<candidate-pid>/fd/*` 交叉核验。该检查只建立"promote 时这 4 个 socket 确由 candidate 持有"的控制面证据；运行中仍以 BPF 的 `listener_alive()` 逐包准入，**不做周期 diag 轮询**。
+## 9.5 Listener readiness without sleeping or parsing logs
 
-candidate 启动期间允许 timerfd 做有截止时间的短退避重查（10/20/40 ms 递增，封顶 250 ms，总 deadline 5 s）；ready 或失败后立即取消。它不是稳态 polling，也不得被扩展成健康探针。
+Enumerate the four exact sockets — two families by two protocols — through `NETLINK_SOCK_DIAG` (`SOCK_DIAG_BY_FAMILY`, `inet_diag`), and cross-check each socket's inode against `/proc/<candidate-pid>/fd/*`. This establishes control-plane evidence that the four sockets are held by the candidate **at the moment of promotion**, and nothing more. Admission during operation remains per-packet through BPF's `listener_alive()`; there is **no periodic diag polling**.
 
-## 9.6 用户 sing-box.json 边界
+A timerfd MAY re-check with a bounded backoff while the candidate starts — 10, 20, 40 ms rising to a 250 ms cap, with a total deadline of 5 s — cancelled the moment readiness or failure is decided. It is not steady-state polling and MUST NOT be extended into a health probe.
 
-上限 8 MiB；必须是完整官方配置，并满足：
+## 9.6 The boundary around the user's engine configuration
 
-- `inbounds` 缺失或为空数组（两个 tproxy inbound 只由 fluxd 注入）；
-- 不得使用 `flux-` 前缀的 tag；
-- Flux **不改**用户的 `dns` / `outbounds` / `route` / `log` / `experimental`；
-- 用户自设 outbound `routing_mark` / `bind_interface` 的 Android 后果由用户承担，Flux 只在 `status` 告警，不建大而脆弱的 policy validator。
+At most 8 MiB, and a complete official configuration satisfying:
 
-随 module 提供的默认 `sing-box.json` 只有官方 direct outbound 与 `final`、无 inbound，**但必须带上 §1.3.4 的 `sniff` + `hijack-dns` 两条 route rule**，否则被捕获的 :53 会被当普通 UDP 转发、白白丢掉域名分流能力。加上 fresh install 默认 disabled，安装动作本身不会接管任何流量。默认文件是 bootstrap 样例，不是第二权威副本。
+- `inbounds` absent or an empty array, since the two tproxy inbounds are injected by fluxd alone;
+- no tag carrying the `flux-` prefix;
+- Flux MUST NOT modify the user's `dns`, `outbounds`, `route`, `log` or `experimental`;
+- the Android consequences of a user's own outbound `routing_mark` or `bind_interface` are the user's to own. Flux warns in `status` and does not build a large, brittle policy validator (PHIL-6).
 
-`fluxd check` 额外做一项**非阻塞**检查：用户 JSON 的 `route.rules` 里若找不到能处理 :53 的 action（`hijack-dns`，或用户自己写的等价规则），输出警告"selected apps' DNS will be forwarded verbatim; domain rules will not apply"。**只警告，不拒绝**——用户可能就是想让 DNS 原样穿透。
+The shipped default template carries the official direct outbound and a `final`,
+no inbound, **and MUST carry the `sniff` and `hijack-dns` route rules of
+§1.3.4** — without them a captured `:53` datagram is forwarded as ordinary UDP
+and the domain-routing capability is thrown away for nothing. Combined with a
+fresh install being disabled, the installation itself takes over no traffic. The
+default is a bootstrap starting point, **not a second authoritative copy**: the
+user owns it from first edit onward, and §28.1 defines that ownership.
+
+`fluxd check` performs one additional **non-blocking** check: if the user's
+`route.rules` contains no action able to handle `:53` — `hijack-dns` or an
+equivalent the user wrote — it warns that selected apps' DNS will be forwarded
+verbatim and domain rules will not apply. **Warn, never refuse.** A user may
+genuinely want DNS to pass through untouched, and §23 keeps the line between a
+diagnosable difference of intent and an undiagnosable failure.
 
 ## 9.7 engine.lock
 
@@ -1471,87 +2495,87 @@ upstream_commit = "b5ebaa1fc0f2b94256180b95468e73ef53caa27d"
 asset           = "sing-box-1.13.19-android-arm64.tar.gz"
 asset_size      = 18106459
 sha256          = "e737ac40187563673e1fc282aebf1774e09f3b2057203872798968a2126fab53"
-pt_load_align   = "0x1000"   # 四段均为 0x1000 → 0.9.0 只支持 4 KiB base page
+pt_load_align   = "0x1000"   # all four segments; hence 4 KiB base pages only
 ```
 
-构建只下载该官方 asset，校验 size + SHA-256，抽取原 binary；**不 strip、不 patch、不重签**。`xtask` 同时解析 ELF program headers，要求四个 `PT_LOAD` 仍精确为 `0x1000`，防止上游同名资产静默变化。
+The build downloads only that official asset, verifies its size and SHA-256, and extracts the binary unchanged: **no strip, no patch, no re-sign.** `xtask` additionally parses the ELF program headers and requires all four `PT_LOAD` segments to still be exactly `0x1000`, which is what catches an upstream asset changing silently behind an unchanged name.
 
-升级 engine 是显式设计变更：先重核 TProxy listener 选项与 orig-dst 合同、ELF alignment，再更新 lock。0.9.0 release 页必须与 ZIP 同处提供该官方 binary 的 exact Corresponding Source bundle 及构建脚本/依赖来源（GPL 合规），source bundle 不塞进 module ZIP。
+**Raising the engine version is an explicit design change, not a dependency bump.** Re-verify the TProxy listener options, the orig-dst contract and the ELF alignment first, then update the lock — §9.2's zero-hit `SO_REUSEPORT` finding is a property of one release and has to be re-established. Each release page MUST offer, alongside the ZIP, the exact Corresponding Source bundle for that official binary together with its build scripts and dependency sources, for GPL compliance. The source bundle is not packed into the module ZIP.
 
 ---
 
-# 第 10 部分：控制面
+# Part 10: The control plane
 
-## 10.1 状态机
+## 10.1 The state machine
 
-只有三个顶层状态：
+There are exactly three top-level states:
 
-| 状态 | 含义 |
+| State | Meaning |
 |---|---|
-| `Disabled` | `disable` 文件存在（唯一开关真相源，C9，`docs/spec/interaction.md` §27.1）。不启动 engine、不新建或激活数据面。 |
-| `Inactive` | `disable` 文件不存在，但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
-| `Active` | control `active == 1`。 |
+| `Disabled` | the `disable` file exists — the only switch, C9, §27.1. No engine is started and no data plane is created or activated. |
+| `Inactive` | the `disable` file is absent, but Flux is starting or restarting, or is blocked by a definite error. control `active == 0`. |
+| `Active` | control `active == 1`, **and at least one interface has passed the liveness verification of §8.5.4**. An `active` flag with no reachable capture interface is not Active; it is Inactive with a reason. |
 
-hot candidate 无效时**保持当前 `Active` generation**并附带 candidate error，不创造第四种持久状态。daemon 重启后只从权威文件重新求值。
+An invalid hot candidate **keeps the current `Active` generation** and attaches the candidate error to it. It MUST NOT create a fourth persistent state — a state that exists only to describe a failed attempt is a state every transition afterwards has to account for. A daemon restart re-evaluates from the authority files alone.
 
-## 10.2 类型骨架
+## 10.2 Type skeletons
 
 ```rust
 // ---------- flux-core/src/config.rs ----------
 pub struct FluxConfig {
-    pub apps: Vec<AppSelector>,     // canonical、去重、<= 1024
-    pub bypass_v4: Vec<Ipv4Cidr>,   // 不含固定项
+    pub apps: Vec<AppSelector>,     // canonical, deduplicated, <= 1024
+    pub bypass_v4: Vec<Ipv4Cidr>,   // user policy only; fixed RESERVED entries are separate
     pub bypass_v6: Vec<Ipv6Cidr>,
 }
 pub struct AppSelector { pub user_id: u32, pub package: String }   // "10:com.x"
 
 pub enum ConfigError {
     TooLarge, TooManyApps, TooManyCidrs, NotCanonical, Duplicate,
-    AppIdOutOfRange { app_id: u32 },   // 只接受 10000..=19999
+    AppIdOutOfRange { app_id: u32 },   // accepts 10000..=19999 only
     Parse(String),
 }
 impl FluxConfig {
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError>;             // <= 256 KiB
-    /// 固定安全 bypass + listener 前缀；不含本机动态地址（那是 runtime 输入）
+    /// Fixed safety bypass plus listener prefixes, tagged RESERVED (§6.1.1).
     pub fn fixed_bypass() -> (&'static [Ipv4Cidr], &'static [Ipv6Cidr]);
 }
 
 // ---------- flux-core/src/selector.rs ----------
-pub struct PackageIndex { /* 由 /data/system/packages.list 解析 */ }
+pub struct PackageIndex { /* parsed from /data/system/packages.list */ }
 impl PackageIndex {
     pub fn parse(text: &str) -> Self;
     pub fn app_id(&self, package: &str) -> Option<u32>;
-    pub fn shared_with(&self, app_id: u32) -> Vec<&str>;   // 同 UID 的全部 package
+    pub fn shared_with(&self, app_id: u32) -> Vec<&str>;   // every package sharing the UID
 }
 pub fn uid_of(user_id: u32, app_id: u32) -> Result<u32, ConfigError>;   // user*100000 + app_id
 
 // ---------- flux-core/src/engine_config.rs ----------
 pub struct EngineParams { pub generation: u64, pub port_v4: u16, pub port_v6: u16 }
 pub fn build_effective(user: &serde_json::Value, p: &EngineParams)
-    -> Result<serde_json::Value, ConfigError>;   // 纯函数，可在 Windows 上单测
+    -> Result<serde_json::Value, ConfigError>;   // pure; unit-testable on any host
 
 // ---------- fluxd/src/dataplane.rs ----------
 pub struct Dataplane {
-    objs: LoadedObjects,          // 12 个 map + 4 个 prog 的 OwnedFd
+    objs: LoadedObjects,          // OwnedFds for the 12 maps and 4 programs
     control_root: MapFd,
-    leaf: Option<OwnedFd>,        // 当前 frozen leaf
-    veth: VethOwned,              // 两端 ifindex + alias（不含 MAC，见 D17）
+    leaf: Option<OwnedFd>,        // the current frozen leaf
+    veth: VethOwned,              // both ifindexes and the alias; no MAC, see D17
     rpdb: RpdbOwned,
     tc: Vec<TcFilterOwned>,
 }
-pub struct ControlSnapshot { /* flux_control 的 Rust 镜像 */ }
+pub struct ControlSnapshot { /* Rust mirror of flux_control */ }
 
 impl Dataplane {
-    /// §8.7 步骤 2-5：清理残留、建 veth/RPDB、加载 BPF、publish active=0
+    /// §8.7 steps 2-5: clear residue, build veth and RPDB, load BPF, publish active=0
     pub fn bring_up(layout: &Layout) -> Result<Self, DpError>;
     pub fn publish(&mut self, s: &ControlSnapshot) -> Result<(), DpError>;  // §6.4
-    /// §10.5：additive-then-subtractive，不触碰 active
+    /// §10.5: additive then subtractive; never touches `active`
     pub fn apply_policy(&mut self, desired: &DesiredPolicy) -> Result<(), DpError>;
     pub fn attach_capture(&mut self, iface: &AdmittedIface) -> Result<(), DpError>;
     pub fn detach_capture(&mut self, ifindex: u32) -> Result<(), DpError>;
     pub fn drain_faults(&mut self) -> Vec<FaultEvent>;
     pub fn read_counters(&self) -> Counters;
-    pub fn tear_down(self) -> Result<(), DpError>;    // 删除全部自有对象（clsact 除外）
+    pub fn tear_down(self) -> Result<(), DpError>;    // deletes every owned object except clsact
 }
 
 // ---------- fluxd/src/engine.rs ----------
@@ -1566,164 +2590,223 @@ impl EngineChild {
 }
 ```
 
-## 10.3 单实例与控制协议
+## 10.3 Single instance and the control protocol
 
-- daemon 持有 `/data/adb/flux-rs/run/daemon.lock` 的 `flock(LOCK_EX|LOCK_NB)`。第二实例立即退出，**不** unlink 控制 socket、**不**启动第二个 engine、**不**碰第一实例的对象。只有 lock owner 能检查并删除 stale 控制 socket。
-- 控制 socket：`/data/adb/flux-rs/run/control.sock`，`AF_UNIX` + `SOCK_SEQPACKET`，mode `0600`，每个请求额外检查 `SO_PEERCRED.uid == 0`。
-- 编码：**每个 SEQPACKET 报文一条单行 JSON**（SEQPACKET 天然保留消息边界，不需要长度前缀）。单报文上限 64 KiB。类型定义在 `flux-core/src/control_wire.rs`，因此 Windows 上可单测序列化。
-- **不需要 request_id 去重缓存。** 旧协议 v9 为可变命令维护了 128 条 `(peer, request_id)` 去重表加 30 秒重复等待。0.9.0 的六个命令全部按构造幂等（`enable` 写 1 后重新收敛、`reload` 重算期望状态、`stop` 收敛到停机），重放一次与执行一次结果相同，整套去重机制因此删除。**新增命令时必须保持这一性质**，否则要么改成幂等，要么才重新引入去重。
+- The daemon holds `flock(LOCK_EX|LOCK_NB)` on `/data/adb/flux-rs/run/daemon.lock`. A second instance exits immediately: it MUST NOT unlink the control socket, MUST NOT start a second engine, and MUST NOT touch the first instance's objects. **Only the lock owner may inspect or delete a stale control socket** — the alternative is a losing instance destroying a working one's socket on the way out.
+- The control socket is `/data/adb/flux-rs/run/control.sock`: `AF_UNIX` with `SOCK_SEQPACKET`, mode `0600`, and every request additionally checks `SO_PEERCRED.uid == 0`.
+- Encoding is **one single-line JSON document per SEQPACKET datagram**. SEQPACKET preserves message boundaries by construction, so no length prefix is needed. A datagram is at most 64 KiB. The types live in `flux-core/src/control_wire.rs`, so serialisation is unit-testable on any host.
+- **No request_id deduplication cache is needed.** The old v9 protocol maintained a 128-entry `(peer, request_id)` table plus a 30-second duplicate wait for mutating commands. All six commands here are idempotent by construction — `enable` writes the file and reconverges, `reload` recomputes the desired state, `stop` converges to stopped — so replaying one produces the same result as executing it once, and the entire mechanism was deleted. **A new command MUST preserve this property**; if it cannot be made idempotent, deduplication has to come back with it.
 
 ```jsonc
-// Request
+// Request — the whole grammar
 { "op": "status" | "check" | "enable" | "disable" | "reload" | "stop" }
-
-// Response
-{
-  "ok": true,
-  "version": "0.9.0",
-  "state": "Disabled" | "Inactive" | "Active",
-  "generation": 7,
-  "engine": { "running": true, "pid": 1234 },
-  "counts": { "selected": 3, "draining": 1, "bypass_v4": 12, "bypass_v6": 6 },
-  "ifaces": [ { "name": "wlan0", "ifindex": 24, "status": "active" },
-              { "name": "v4-rmnet_data0", "ifindex": 31,
-                "status": "excluded", "reason": "clat_order_unverified" } ],
-  "counters": { "admit_tcp": 41, "admit_udp": 388, "drop_handoff": 0, "…": 0 },
-  "warnings": [ "0:com.foo declares BIND_VPN_SERVICE" ],
-  "last_error": null
-}
 ```
 
-## 10.4 reactor 事件源
+**The response schema is specified once, in §24.1**, and is not repeated here.
+An earlier draft carried an abbreviated copy in this section; it drifted, naming
+a `counts` object where the implementation has `policy`, and omitting fields
+added later. A schema with two homes acquires two meanings (PHIL-4), and the one
+in a section about the *transport* is the copy nobody updates.
 
-单线程 epoll。事件源：
+What belongs here is the transport property that §24.1 cannot state: the
+response is a single JSON document in one SEQPACKET datagram, so a reader never
+has to reassemble it and a truncated response is a delivery failure rather than a
+parse ambiguity.
 
-| 源 | 触发内容 |
+## 10.4 Reactor event sources
+
+One thread, one epoll. The sources:
+
+| Source | What it delivers |
 |---|---|
-| rtnetlink（`RTMGRP_LINK|IPV4_IFADDR|IPV6_IFADDR|IPV4_ROUTE|IPV6_ROUTE|IPV4_RULE|IPV6_RULE` + TC） | interface admission、**捕获侧漂移**（qdisc/filter 被 netd 删，§8.5.1）、**核心漂移**（veth/rule/route/ingress filter）、本机地址 bypass 更新。两类漂移的处置**不同**，见 §26 不变量 4 |
-| inotify | 状态根的 `disable` 开关文件（C9）；`config/` 目录与两个配置文件的原子替换；`/data/system/packages.list` |
-| pidfd | sing-box 退出 |
-| BPF ringbuf | 已去重的 listener/assign fault |
-| signalfd | `SIGTERM`/`SIGINT`（停机）、`SIGHUP`（reload） |
-| 控制 socket | CLI 请求 |
-| timerfd | 配置 debounce、readiness 退避、1/2/4/8/30 s crash backoff |
-| 子进程 stdout pipe | `sing-box check` 的输出（**非阻塞**，带 deadline） |
+| rtnetlink (`RTMGRP_LINK|IPV4_IFADDR|IPV6_IFADDR|IPV4_ROUTE|IPV6_ROUTE|IPV4_RULE|IPV6_RULE` plus TC) | interface admission; **capture-side drift** when netd deletes a qdisc or filter (§8.5.1); **core drift** of the veth, rule, route or ingress filter; self-address bypass updates. **The two kinds of drift are handled differently** — see §26 invariant 4 |
+| inotify | the `disable` switch in the **module** directory (C9, §27.1.1); atomic replacement of `config/` and the files in it; `/data/system/packages.list` |
+| pidfd | sing-box exiting |
+| BPF ringbuf | deduplicated listener and assign faults |
+| signalfd | `SIGTERM` and `SIGINT` to stop, `SIGHUP` to reload |
+| control socket | CLI requests |
+| timerfd | configuration debounce, readiness backoff, the 1/2/4/8/30 s crash backoff, and the subscription refresh of §29.3 |
+| child stdout pipe | output of `sing-box check`, **non-blocking**, with a deadline |
 
-**无每秒轮询、无 busy loop、无 BPF timer、无周期 counter 采集、无 heartbeat。** backoff 在 child 稳定 60 s 后复位；只要 `enabled` 为真就持续低频恢复，不设"失败 N 次永久锁死"。
+**No per-second polling, no busy loop, no BPF timer, no periodic counter sampling, no heartbeat.** §29.3 records the one deliberate exception and why a one-shot timer is not polling. Backoff resets once a child has been stable for 60 s, and recovery continues at a low rate for as long as the switch is on: there is **no "failed N times, locked out permanently"** state, because a user who fixes the cause deserves the next attempt to succeed.
 
-**所有外部命令（`sing-box check`）必须以子进程 + epoll 管道 + deadline 的方式执行，禁止在 reactor 里阻塞 `wait()`。**
+**Every external command — `sing-box check` is the only one — MUST run as a child process read through an epoll pipe with a deadline. Blocking on `wait()` inside the reactor is forbidden**: one hung child would otherwise freeze every other event source, including the switch.
 
-### 10.4.1 rtnetlink 的三条硬规则
+### 10.4.1 Three hard rules for rtnetlink
 
-Android 在网络切换时会产生事件风暴，增量处理一个被截断的批次是产生不一致状态的标准方式。三条规则来自 `clone/asteriskd/asteriskd_network.c:147-164` 的实践：
+Android produces event storms on a network change, and incrementally processing a truncated batch is the standard way to arrive at inconsistent state. These three rules come from the practice in `clone/asteriskd/asteriskd_network.c:147-164`:
 
-1. **1500 ms 尾随 debounce。** 每一条**新的、去重后不同**的事件都**重新武装**截止时间（trailing，不是 leading）。批次容量有上限；超限置 `truncated`。数值取 1500 ms 与 asteriskd 一致（`asteriskd.h:35`），它是在真机 Wi-Fi↔蜂窝切换上调出来的。
-2. **`ENOBUFS` / `NLMSG_OVERRUN` ⇒ 放弃增量，做全量重新 dump。** netlink socket 溢出或收到 overrun 消息时，**不得**相信已收到的部分事件；置 `integrity_loss`，丢弃批次，重新 `RTM_GETLINK`/`GETADDR`/`GETROUTE`/`GETRULE`/`GETTFILTER` 全量快照后再收敛。这与 `flux-core` 的 inventory 快照替换语义一致：**宁可重算，不可拼接。**
-3. **每次 TC 操作前重新 `if_nametoindex()`。** Android 上 interface 被改名与重新分配 ifindex 是常态。dump 里看到的 ifindex 与几毫秒后执行 `RTM_NEWTFILTER` 时的 ifindex 可能已不是同一个设备（`asteriskd_runtime.c:3806`、`:3818`）。名字与 ifindex **两者都必须**在操作前一刻复核一致，不一致则放弃本轮，等下一个事件。
+1. **A 1500 ms trailing debounce.** Every **new, post-deduplication distinct** event **re-arms** the deadline — trailing, not leading. The batch has a capacity ceiling, and exceeding it sets `truncated`. The 1500 ms matches asteriskd (`asteriskd.h:35`), which tuned it against real Wi-Fi to cellular handovers.
+2. **`ENOBUFS` or `NLMSG_OVERRUN` means abandon the increment and re-dump everything.** When the netlink socket overflows or reports an overrun, the events already received **MUST NOT** be trusted: set `integrity_loss`, discard the batch, take a fresh full snapshot with `RTM_GETLINK`, `GETADDR`, `GETROUTE`, `GETRULE` and `GETTFILTER`, and converge from that. This matches the snapshot-replacement semantics of `flux-core`'s inventory: **recompute rather than splice.**
+3. **Re-resolve `if_nametoindex()` immediately before every TC operation.** Interfaces being renamed and ifindexes being reassigned is routine on Android. The ifindex seen in a dump and the ifindex a few milliseconds later at `RTM_NEWTFILTER` may no longer be the same device (`asteriskd_runtime.c:3806`, `:3818`). **Both** the name and the ifindex MUST be re-checked for agreement in the instant before the operation; a mismatch abandons this round and waits for the next event.
 
-socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**先订阅再取初始快照**，然后把 socket 读到 `EAGAIN`——顺序反了会丢掉快照与首个事件之间的变化。
+The socket is `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`, and it **subscribes before taking the initial snapshot**, then drains to `EAGAIN`. Reversing that order loses every change occurring between the snapshot and the first delivered event.
 
-## 10.5 两个独立事务域
+## 10.5 Two independent transaction domains
 
-`flux.toml`（policy）与 `sing-box.json`（engine）是两个独立权威域，**不做跨文件分布式事务**。只改一个就只触发对应流程；`reload` 依次处理二者，各自独立 promote 并在 `status` 报告。允许一个成功另一个保持旧状态；禁止半写一张 map 或半启动一个 generation。
+`flux.toml` (policy) and `config/template.json` with its generated output (engine) are two independent authority domains, and Flux **does not attempt a distributed transaction across them**. Changing one triggers only that flow. `reload` processes both in turn, promoting each independently and reporting both in `status`. One succeeding while the other keeps its old state is allowed; **half-writing a map or half-starting a generation is not.**
 
-**policy 更新（D5，不触碰 `active`、不换 generation）**：
+**A policy update (D5) touches neither `active` nor the generation:**
 
-1. 在内存中完整解析、canonicalize、算 UID、检查硬上限；任一失败 → 保持当前策略，报 candidate error。
-2. 计算 desired 集合：`selected_uids`、`bypass_v4/v6`（固定项 + 本机地址 + 用户项）。
-3. **先加**：写入新的 `SELECTED` entry；插入新增 LPM 前缀。
-4. **后减**：把"曾 SELECTED 但不再选中"的 UID 改为 `DRAINING`（**不删除**）；删除不再需要的 LPM 前缀。
-5. 更新 control leaf 里的诊断计数（这**不**需要新 leaf；诊断字段允许滞后一个周期，或在下次 leaf 发布时顺带更新）。
-6. 任一 map 操作失败：记录错误并**重新入队一次完整收敛**（level-triggered），不做快照回滚。
+1. Parse, canonicalise, resolve UIDs and check the hard ceilings entirely in memory. Any failure keeps the current policy and reports a candidate error.
+2. Compute the desired sets separately: `selected_uids`, the `RESERVED` and `POLICY` LPM prefixes, and the dynamic self-address set (§6.1.1).
+3. **Add first:** write the new `SELECTED` entries and insert the new LPM prefixes.
+4. **Subtract second:** change UIDs that were `SELECTED` and no longer are to `DRAINING` — **never delete them** (§7.6) — and remove LPM prefixes no longer needed.
+5. Leave the diagnostic counts in the control leaf alone. They refresh when the next legitimate leaf is published (§6.4); a frozen leaf is not rewritten, and `status` computes live counts from the data plane instead.
+6. If any map operation fails, record the error and **re-queue one complete convergence**. The reactor is level-triggered, so recomputing the desired state is both simpler and safer than unwinding a snapshot.
 
-窗口内后果的正确性论证：先加后减意味着窗口内策略只会"更宽松地保持旧行为"或"提前生效新行为"，两者都只影响**尚无决策的新连接**；已有 `DIRECT`/`CAPTURED` decision 不可变，不受影响。
+Why the window is safe: adding before subtracting means that during it the policy either keeps the old behaviour more permissively or applies the new behaviour early. Both affect **only flows that have no decision yet**, because an existing `DIRECT` or `CAPTURED` decision is immutable (§6.2).
 
 ## 10.6 CLI
 
-| 命令 | 行为 |
+| Command | Behaviour |
 |---|---|
-| `fluxd daemon` | `service.sh` 调用；进入 reactor |
-| `fluxd status` | 输出 §10.3 的 Response（人类可读 + `--json`） |
-| `fluxd check` | 只读校验两份配置、package 解析、engine `check`；不改任何状态 |
-| `fluxd enable` | 删除 `disable` 文件并请求激活。**只是开关文件的前端**（C9），不是第二个真相源 |
-| `fluxd disable` | 创建 `disable` 文件、publish `active=0`、停 engine；daemon 继续等待命令 |
-| `fluxd reload` | 触发 policy 与 engine 候选流程 |
-| `fluxd stop` | service/uninstall 用：publish `active=0`、停 child、daemon 正常退出（exit 0） |
+| `fluxd daemon` | invoked by `service.sh`; enters the reactor |
+| `fluxd status` | prints the response of §24.1, human-readable or `--json` |
+| `fluxd check` | read-only validation of both configurations, package resolution and the engine `check`; changes no state |
+| `fluxd enable` | deletes the `disable` file and requests activation. **A front end to the switch file** (C9), never a second source of truth |
+| `fluxd disable` | creates the `disable` file, publishes `active=0`, stops the engine; the daemon keeps waiting for commands |
+| `fluxd reload` | triggers the policy and engine candidate flows |
+| `fluxd stop` | for service and uninstall paths: publish `active=0`, stop the child, exit cleanly with 0 |
 
-无 `toggle` 隐藏状态；`action.sh` 先读 `status` 再明确调用 `enable` 或 `disable`。
+**There is no `toggle`.** A toggle hides the current state from the caller, so two clients racing on it can each invert the other's intent; `enable` and `disable` are idempotent statements of a desired state, which is what §10.3 relies on to need no deduplication. There is also no `action.sh` (§27.1.3).
 
 ---
 
-# 第 11 部分：配置与持久状态
+# Part 11: Configuration and persistent state
 
-## 11.1 唯一权威源
+## 11.1 The authority for each fact
 
-| 路径 | 权威内容 | 失败行为 |
+| Path | What it is authoritative for | On failure |
 |---|---|---|
-| `disable`（状态根直下） | 唯一持久开关：**存在 = 停用，不存在 = 启用**（C9，`docs/spec/interaction.md` §27.1）。由既有 inotify 源监视，运行时立即生效 | 只看存在性，不读内容 |
-| `config/flux.toml` | package 选择与 CIDR bypass | cold 无效 → Direct；hot 无效 → 保留当前 |
-| `config/sing-box.json` | 唯一用户 engine 配置 | cold 无效 → Direct；hot 无效 → 保留当前 |
-| `run/effective-sing-box.<generation>.json` | 对应 child 的一次性 immutable 生成物；事务中最多 current + candidate 两份 | 非权威源；daemon 重启后精确清理并从用户配置重建 |
-| `run/daemon.lock` / `run/control.sock` | 单实例与 IPC | — |
+| `/data/adb/modules/flux_rs/disable` | The only persistent switch: **present means disabled, absent means enabled** (C9, §27.1.1). It lives in the **module** directory, owned by the manager, and is watched by the existing inotify source so a toggle takes effect during the current boot | Existence is the whole signal; the contents are never read |
+| `config/flux.toml` | app selection, CIDR policy, interface and SSID dimensions, subscription parameters | invalid at cold start means Direct; invalid on reload keeps the current policy |
+| `config/template.json` | the user-owned engine template (§28.1) | invalid at cold start means Direct; invalid on reload keeps the current generation |
+| `run/sing-box.<generation>.json` | the immutable generated artifact for one child; at most current plus candidate exist during a transaction | Not authoritative for anything. A daemon restart deletes them precisely and rebuilds from the template |
+| `run/daemon.lock`, `run/control.sock` | single-instance enforcement and IPC | — |
 
-不使用 last-known-good 持久副本；不在 TOML 里重复 `enabled`；不从 `module.prop` 推断运行状态；**Flux 从不反写用户配置**。fresh install 默认 disabled（由安装脚本创建 `disable` 文件，§13.2 的职责）。
+**No last-known-good persistent copy is kept**, `enabled` is not duplicated into the TOML, and runtime state is never inferred from `module.prop` — that file is an output of the daemon, not an input to it (§27.1.3). **Flux never writes back to a user-owned file.** A fresh install is disabled by default, with the installer creating the `disable` file (§13.2).
 
-daemon 冷启动确认没有自己的存活 child 后，只枚举并删除 `run/` 中严格匹配 `effective-sing-box.<u64>.json` 格式且属 root 的普通文件。
+After a cold start confirms it has no surviving child of its own, the daemon enumerates and deletes only the regular, root-owned files in `run/` matching exactly the `sing-box.<u64>.json` form. Anything else in that directory is left alone, because a pattern loose enough to catch a stranger's file is loose enough to delete one.
 
-权限：状态根与子目录 `root:root 0700`；用户 config、generation effective 文件 `0600`；控制 socket `0600`。
+Permissions: the state root and its subdirectories are `root:root 0700`; user configuration and generated engine configs are `0600`; the control socket is `0600`.
 
-## 11.2 `flux.toml` 唯一 schema
+## 11.2 The `flux.toml` schema
+
+Three dimensions, **one idiom**: a mode and a list.
 
 ```toml
-apps = [
-  "0:com.example.browser",
-  "10:com.example.chat",
-]
+[apps]
+# whitelist = proxy only what is listed; blacklist = proxy everything except
+mode = "whitelist"
+list = ["0:com.twitter.android", "@apps.txt"]
 
-bypass_cidrs = [
-  "192.168.0.0/16",
-  "fd00::/8",
-]
+[cidr]
+# blacklist = listed destinations go direct (the ordinary use)
+# whitelist = capture only the listed destinations
+mode = "blacklist"
+list = ["100.64.0.0/10", "@chnroute.txt"]
+
+[interfaces]
+# blacklist with an empty list = take over every supported physical interface
+mode = "blacklist"
+list = []
 ```
 
-硬限：文件 256 KiB；`apps` ≤ 1024；解析后总 UID entry ≤ 4096；IPv4/IPv6 LPM 各 ≤ 65536（**本机地址不占 LPM**，见 D20）；package 字符串与 CIDR 必须 canonical 且无重复。超限是清晰的配置错误，**不截断、不部分应用**。
+§29.1 adds `[ssid]` as a fourth dimension in the same shape.
 
-**固定安全 bypass（硬编码注入）**，权威清单在 `crates/flux-core/src/cidr.rs`：
+### 11.2.1 Why one idiom rather than several switches
 
-- IPv4：`0.0.0.0/8`、`10.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`、`198.51.100.1/32`（listener 本身）、`224.0.0.0/4`、`255.255.255.255/32`
-- IPv6：`::/128`、`::1/128`、`fc00::/7`、`fe80::/10`、`ff00::/8`、`2001:db8:0:1::2/128`（listener 本身）
+The shape is taken from `box_for_magisk`'s `package.list.cfg`, which is **one
+list plus one mode line** rather than two lists, and which reuses the same idiom
+for package names, Wi-Fi SSIDs and interface toggles. **Uniformity is itself a
+user-facing property:** learn it once, apply it everywhere.
 
-两点说明：
+**`mode = "blacklist"` with an empty list is the automatic mode**, and it needs
+no third enum value. Every third-party app is proxied, and a newly installed one
+joins automatically because the inotify watch on `packages.list` already exists
+(§29.6). An explicit `auto` would be a second way to express a state the two
+existing values already reach, and states reachable two ways drift.
 
-- **listener 只 bypass 确切地址，不是整段前缀**（D21）。原先保留整个 `/15` 与 `/32` 是过度的——防自环只需要"选中 app 不能连上 listener 本身"——而那个过度保留正好和 sing-box 的 fakeip 惯用段重叠，会让 fakeip 静默完全失效（§9.0）。
-- **RFC1918 与 ULA 是硬编码 bypass。** 它们是私有地址，代理它们没有意义，且 `ip_is_private` 那类规则在 sing-box 侧也一样会判 direct——在内核里提前放行省掉一次无用的用户态往返（§1.6.2 的同一个理由）。
+**`bypass` was renamed `[cidr]`** because once a mode exists, "bypass" names only
+one of the two directions. The new name also blocks a known misreading head-on:
+**this dimension sees destination IPs and never domain names.** Domain routing is
+sing-box's job (§1.4).
 
-**动态本机地址 bypass**：reactor 把每个 live 的本机单播地址注入**专用的 `self_addr_v4` / `self_addr_v6` HASH map**，不进 LPM（D20：本机地址永远是全长前缀，用 trie 做精确匹配是浪费；HASH 删除干净；且规避 6.6.0–6.6.46 的 LPM trie 崩溃）。容量 `FLUX_SELF_ADDR_MAX_ENTRIES = 256`，按 `IFA_FLAGS` 过滤并对 IPv6 隐私地址做最久未见淘汰（§1.6.4）。
+The whitelist direction costs the data plane one branch — whether to invert after
+an LPM hit — which is cheap for three consistent shapes. But **a single mistyped
+entry in whitelist mode sends everything direct, silently**, so `status` MUST
+print the mode in force and not merely the entry count.
 
-## 11.3 package 解析（无 binder）
+### 11.2.2 `@file` references
 
-`/data/system/packages.list` 每行形如：
+Any list entry beginning with `@` is a file reference: one entry per line, `#`
+starting a comment.
+
+Neither a CIDR nor an Android package name can begin with `@`, so no guessing is
+involved. **Determining whether an entry is a path by testing whether it parses
+as a CIDR is forbidden** — that turns one mistyped CIDR into a silent filename.
+
+Three constraints:
+
+- **No recursion.** A referenced file MUST NOT itself contain `@`. This bounds
+  the failure modes and removes cycles and unbounded expansion outright.
+- **Paths resolve inside `config/`** and nowhere else. The inotify watch on the
+  configuration directory then covers list files for free, with no dynamic watch
+  set to maintain.
+- **A missing file is a `check` error.** At run time the new policy is refused,
+  the current one is kept, and the existing level-triggered convergence retries.
+
+This replaces the `[bypass] files` key of earlier drafts, which split one concept
+into two knobs and gave the CIDR dimension a capability the others lacked.
+
+### 11.2.3 Limits
+
+The file is at most 256 KiB. At most 1024 apps may be simultaneously selected;
+total UID entries after resolution are at most 4096; each of the IPv4 and IPv6
+LPM tries holds at most 65536 (**local addresses do not consume LPM capacity**,
+D20). Package strings and CIDRs MUST be canonical and free of duplicates.
+
+Exceeding a limit is a plain configuration error. Flux **MUST NOT truncate and
+MUST NOT partially apply**: a silently truncated selection is a policy the user
+never wrote and cannot see.
+
+**The fixed safety bypass**, injected regardless of configuration and tagged `RESERVED` (§6.1.1). The authoritative list is `crates/flux-core/src/cidr.rs`:
+
+- IPv4: `0.0.0.0/8`, `10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.51.100.1/32` (the listener itself), `224.0.0.0/4`, `255.255.255.255/32`
+- IPv6: `::/128`, `::1/128`, `fc00::/7`, `fe80::/10`, `ff00::/8`, `2001:db8:0:1::2/128` (the listener itself)
+
+Two notes:
+
+- **The listener bypasses its exact address, never a whole prefix** (D21). Reserving the entire `/15` was more than self-capture prevention required — that needs only "a selected app cannot reach the listener itself" — and the excess overlapped exactly with sing-box's conventional fakeip range, silently disabling fakeip altogether (§9.0).
+- **RFC 1918 and ULA are bypassed unconditionally.** They are private addresses, proxying them is meaningless, and an `ip_is_private` rule on the sing-box side would judge them direct anyway — releasing them in the kernel saves a userspace round trip already known to be useless (§1.6.2).
+
+**Dynamic local-address bypass:** the reactor injects every live local unicast address into the dedicated `self_addr_v4` and `self_addr_v6` HASH maps, never into the LPM (D20). A local address is always a full-length prefix, so a trie would be waste; a HASH deletes cleanly, which matters for IPv6 privacy rotation; and it avoids the 6.6.0–6.6.46 LPM trie crash entirely (§1.6.3a). Capacity is 256 per family, filtered by `IFA_FLAGS` with least-recently-seen eviction for IPv6 privacy addresses (§1.6.4).
+
+## 11.3 Resolving packages without binder
+
+Each line of `/data/system/packages.list` looks like:
 
 ```text
 com.example.browser 10231 0 /data/user/0/com.example.browser default:targetSdkVersion=34 none 0
 ```
 
-第 2 列是 user 0 下的 uid，`app_id = uid % 100000`。解析规则：
+The second column is the uid under user 0, and `app_id = uid % 100000`. The rules:
 
-1. 读整文件（上限 8 MiB），按行解析出 `package -> app_id` 与 `app_id -> [package]`。
-2. 对配置里的每个 `userId:package`：查 `app_id`；校验 `app_id ∈ [10000, 19999]`；`uid = userId * 100000 + app_id`。
-3. package 不存在 → 候选配置失败（明确报错，不静默忽略）。
-4. 同 `app_id` 的其它 package 一并列入 `status` 的 shared-UID 提示。
-5. inotify 监视该文件及其 parent（Android 以原子替换方式重写它）；事件 → debounce → 重新收敛。
-6. 该文件不可读或格式异常 → 保持当前策略并报错，**不轮询**。
+1. Read the whole file, at most 8 MiB, and parse both directions: `package -> app_id` and `app_id -> [package]`.
+2. For each `userId:package` in the configuration, look up the `app_id`, check `app_id ∈ [10000, 19999]`, and compute `uid = userId * 100000 + app_id`.
+3. A package that does not exist fails the candidate configuration with an explicit error. **Silently ignoring it is forbidden**: the user asked for an app to be proxied and would otherwise believe it is.
+4. Other packages sharing the same `app_id` are listed in the shared-UID note in `status` (§1.4).
+5. inotify watches the file **and its parent**, because Android rewrites it by atomic replacement and a watch on the inode alone would follow the file that was replaced. Event, debounce, reconverge.
+6. If the file is unreadable or malformed, keep the current policy and report the error. **Do not poll for it to come back**; the inotify watch already covers its return.
 
-VPN provider 告警是 best-effort：可选地在 `check` 时执行一次 `cmd package` 查询，失败不影响任何门禁。
+The VPN provider warning is best-effort: `check` MAY run one `cmd package` query, and a failure MUST NOT affect any gate. D8 rejected `cmd package` as a *dependency* for the same reason §29.2 rejects binder — it may not be up when needed — and using it for an advisory warning that degrades to silence does not reintroduce that dependency.
 
 ---
 
-# 第 12 部分：BPF 构建与最小加载器
+# Part 12: Building the BPF object and the minimal loader
 
-## 12.1 编译
+## 12.1 Compilation
 
 `crates/fluxd/build.rs`：
 
@@ -1734,24 +2817,24 @@ clang -target bpf -O2 -g -Wall -Wextra -Werror \
       -c bpf/flux.bpf.c -o $OUT_DIR/flux.bpf.o
 ```
 
-**关于"不用 libbpf"的精确含义**：不链接 libbpf 库，因此不需要 libelf/zlib，`fluxd` 是纯 Rust + libc 的单二进制。但 BPF **侧**仍 vendor libbpf 的三个 **header-only** 文件（`bpf_helpers.h`、`bpf_helper_defs.h`、`bpf_endian.h`，BSD-2）以获得 `SEC`/`__uint`/`__type` 宏与 helper 原型。这些头文件只在编译 BPF object 时使用，不进入运行时依赖。手写这些宏也可行（约 60 行），但没有收益。
+**What "no libbpf" precisely means.** The libbpf *library* is not linked, so libelf and zlib are not needed and `fluxd` is a single binary of Rust plus libc. The BPF **side** still vendors three **header-only** libbpf files — `bpf_helpers.h`, `bpf_helper_defs.h`, `bpf_endian.h`, BSD-2 — for the `SEC`, `__uint` and `__type` macros and the helper prototypes. They are used only while compiling the BPF object and are not a runtime dependency. Hand-writing those macros is possible, roughly 60 lines, and buys nothing.
 
-- `-g` 必需（产生 `.BTF`，我们只用它与手写 BTF blob 做交叉核对，见 §12.3）。
-- 不使用 `vmlinux.h`、不访问内核私有 struct、不使用 CO-RE relocation。只用 `linux/bpf.h` UAPI 与固定 helper 原型。
-- `include_bytes!(concat!(env!("OUT_DIR"), "/flux.bpf.o"))` 内嵌进 `fluxd`。最终 module **只有一个** `fluxd` binary，不散放 `.o`。
-- CI 用固定 clang 版本确定性重建并比对 object 的 SHA-256。
+- `-g` is required: it produces the `.BTF` section, which is used **only** to cross-check the hand-written BTF blob (§12.3), never loaded.
+- No `vmlinux.h`, no access to private kernel structs, no CO-RE relocation. Only the `linux/bpf.h` UAPI and fixed helper prototypes.
+- The object is embedded with `include_bytes!(concat!(env!("OUT_DIR"), "/flux.bpf.o"))`. The shipped module contains **one** `fluxd` binary and no loose `.o` file.
+- CI rebuilds deterministically with a pinned clang version and compares the object's SHA-256.
 
-## 12.2 map 创建
+## 12.2 Map creation
 
-**由 Rust 侧显式创建，不从 ELF 推断。** `fluxd/src/bpf/maps.rs` 用一张常量表描述 12 个 map（清单与顺序见 `flux-core::abi::MAP_NAMES`）的 `map_type`、`key_size`、`value_size`、`max_entries`、`map_flags`、`name`，逐个 `BPF_MAP_CREATE`。这样 C 文件里的 map 定义只是符号占位，参数的唯一真相源在 Rust（并由 `flux_abi.h` 约束 value 布局）。
+**Maps are created explicitly from Rust and never inferred from the ELF.** `fluxd/src/bpf/maps.rs` holds a constant table describing all 12 maps — the list and its order are `flux-core::abi::MAP_NAMES` — with `map_type`, `key_size`, `value_size`, `max_entries`, `map_flags` and `name`, and issues one `BPF_MAP_CREATE` each. The map definitions in the C file are therefore symbol placeholders, and the single source of truth for the parameters is Rust, with `flux_abi.h` constraining the value layouts.
 
-`control_leaf` 的 inner map 先创建，再以其 fd 作为 `inner_map_fd` 创建 `control_root`。
+The `control_leaf` inner map is created first, and its fd becomes the `inner_map_fd` used to create `control_root`.
 
-## 12.3 SK_STORAGE 需要的 BTF
+## 12.3 The BTF that SK_STORAGE requires
 
-**已核验**：`bpf_sk_storage_map_alloc_check()` 要求 `btf_key_type_id` 与 `btf_value_type_id` 均非零。
+**Verified:** `bpf_sk_storage_map_alloc_check()` requires both `btf_key_type_id` and `btf_value_type_id` to be non-zero.
 
-实现方式（**建议**，因为它把兼容性风险降到零）：在 Rust 里**手工构造**一个最小 BTF blob 并 `BPF_BTF_LOAD`：
+The approach — **SHOULD**, because it reduces the compatibility surface to nothing — is to **construct a minimal BTF blob by hand** in Rust and `BPF_BTF_LOAD` it:
 
 ```text
 BTF header (magic 0xeb9f, version 1, hdr_len 24, type_off/len, str_off/len)
@@ -1764,114 +2847,141 @@ types:
         members: magic:[2]@0, mode:[u8]@32, reserved:[4]@40, generation:[3]@64
 ```
 
-（`u8` 需要一条自己的 `BTF_KIND_INT`；实际实现按 `bpf/include/flux_abi.h` 的最终布局生成。）
+(`u8` needs a `BTF_KIND_INT` of its own; the real implementation generates this from the final layout in `bpf/include/flux_abi.h`.)
 
-然后以 `btf_fd = <该 blob>`、`btf_key_type_id = 1`、`btf_value_type_id = 5` 创建 `tcp_decision`。
+`tcp_decision` is then created with `btf_fd` set to that blob, `btf_key_type_id = 1` and `btf_value_type_id = 5`.
 
-理由：只用 clang 产出的 `.BTF` 也可行，但 5.15 的 BTF 校验对未知 kind 严格，而 clang 版本升级可能引入 `DECL_TAG`/`FLOAT`/`ENUM64` 等新 kind（libbpf 正是为此做 sanitization）。我们只需要两个类型 ID，手工构造 100 余字节比引入 sanitizer 更小更稳。`xtask` 在 CI 里用 `bpftool btf dump`（或直接比对 clang 的 `.BTF`）核对手写 blob 与 C 结构一致。
+Why not simply load clang's `.BTF`: it would work today, but 5.15's BTF validation is strict about unknown kinds, and a clang upgrade can introduce new ones such as `DECL_TAG`, `FLOAT` or `ENUM64` — sanitizing exactly this is why libbpf carries that code. Flux needs two type IDs, and hand-building a hundred-odd bytes is smaller and more stable than adopting a sanitizer. `cargo xtask btf-check` compares the hand-written blob against clang's `.BTF` in CI, so the two cannot drift apart silently.
 
-## 12.4 program 加载与重定位
+## 12.4 Program loading and relocation
 
-1. 解析内嵌 ELF（用 `object` crate 或约 200 行手写解析）：取 `.text`/各 `SEC("tc")` 程序节的指令字节、`.symtab`、以及对应的 `.rel<section>`。
-2. 对每条 `BPF_LD | BPF_DW | BPF_IMM` 双字指令上的重定位：按符号名在 §12.2 的 map 表里查到 fd，把 `insn.src_reg = BPF_PSEUDO_MAP_FD`、`insn.imm = map_fd`。
-3. `BPF_PROG_LOAD`：`prog_type = BPF_PROG_TYPE_SCHED_CLS`、`license = "GPL"`、`prog_name` 为程序名、`log_level = 1` 且 `log_buf` ≥ 256 KiB。**加载失败必须把 verifier log 的前 N 行写进 `status`/日志**——这是唯一能让实机问题可诊断的东西。
-4. 不加载 `func_info`/`line_info`/`.BTF.ext`。
-5. 加载成功后用 `BPF_OBJ_GET_INFO_BY_FD` 记录 program **id 与 8 字节 tag**，供 §8.5 的 ownership 谓词与 `status` 使用。
+1. Parse the embedded ELF — the `object` crate, or roughly 200 lines by hand — taking the instruction bytes of `.text` and each `SEC("tc")` program section, the `.symtab`, and the matching `.rel<section>`.
+2. For each relocation landing on a `BPF_LD | BPF_DW | BPF_IMM` wide instruction, resolve the symbol name against the map table of §12.2 to obtain an fd, then set `insn.src_reg = BPF_PSEUDO_MAP_FD` and `insn.imm = map_fd`.
+3. `BPF_PROG_LOAD` with `prog_type = BPF_PROG_TYPE_SCHED_CLS`, `license = "GPL"`, `prog_name` set to the program's name, `log_level = 1` and a `log_buf` of at least 256 KiB. **On failure the first lines of the verifier log MUST reach `status` and the log** — on an unfamiliar device that output is the only thing that makes the failure diagnosable at all.
+4. Do not load `func_info`, `line_info` or `.BTF.ext`.
+5. After a successful load, record the program's **id and 8-byte tag** through `BPF_OBJ_GET_INFO_BY_FD`, for the ownership predicate of §8.5 and for `status`.
 
-## 12.7 加载器加固清单
+## 12.7 Loader hardening
 
-以下每一条都来自 `clone/bpf2socks` 在真机 Android 上踩出来的坑（`bpf_util.c`、`bpf_object.c`）。它们不是"最佳实践"，是**必须实现的项**——每一条对应一类会在特定设备上直接失败的情况。
+Every item below comes from a failure `clone/bpf2socks` hit on a real Android device (`bpf_util.c`, `bpf_object.c`). These are not best practices; they are **required**, because each corresponds to a class of outright failure on some device.
 
-| # | 措施 | 为什么 | 来源 |
+| # | Measure | Why | Source |
 |---:|---|---|---|
-| 1 | `__NR_bpf` 按架构硬编码兜底（aarch64 **280**） | Android NDK 的 UAPI 头有时不定义 `__NR_bpf`，编译期就断 | `bpf_util.c:26-36` |
-| 2 | `BPF_F_NO_PREALLOC`、`BPF_OBJ_NAME_LEN`、`BPF_F_MARK_MANGLED_0` 全部 `#define` 兜底 | 同上，旧 NDK 头缺常量 | `bpf_util.c:16-24`、`tc_checksum_flags.h:11-13` |
-| 3 | **verifier log 重试**：`BPF_PROG_LOAD` 因 log buffer 返回 `EAGAIN`/`ENOSPC` 时，用 `log_level = 0` 重载一次；若仍失败，**恢复原始 errno 再报告** | 大程序的 verifier log 会超出缓冲区，此时真正的加载错误会被 `ENOSPC` 掩盖。不做这一步会得到误导性的诊断 | `bpf_util.c:177-189` |
-| 4 | ELF 解析前先做 sanity gate：`ELFCLASS64` + `ELFDATA2LSB` + `e_machine == EM_BPF` | 防止把任何别的文件当 BPF object 解析 | `bpf_object.c:250-257` |
-| 5 | 只处理 `R_BPF_64_64` 重定位；按 **map 符号名 → fd 绑定表**打补丁，逐项做边界检查 | 这是 §12.4 的具体形态。bpf2socks 用同样方式在 Android 上加载成功，无需 libbpf | `bpf_object.c:23-172`，绑定表 `:78-96` |
-| 6 | `BPF_PROG_GET_FD_BY_ID` 之后**重新核对 id**（`BPF_OBJ_GET_INFO_BY_FD` 得到的 id 必须等于请求的 id） | program id 会被复用。不复核就可能操作到另一个程序 | `bpf_util.c:352-370` |
-| 7 | `BPF_PROG_QUERY` / TC dump 的 `ENOSPC` 规范化为 `E2BIG`，并在返回后**重新检查 count > capacity** | 内核会在缓冲区不足时返回真实条目数；不复检会静默截断 | `bpf_util.c:306-315` |
-| 8 | 自有对象按 **program name 前缀**识别（我们用 `flx_`），但**只作为筛选，不作为所有权证明**——所有权仍需 §8.5 的 id + tag | 前缀可伪造；它的作用是把候选集缩小 | `bpf_util.c:384-386` |
-| 9 | 若使用 pin（0.9.0 不用），`BPF_OBJ_PIN` 前先 `mkdir -p` 父目录（mode `0700`）并 `unlink` 旧 pin | — | `bpf_util.c:89-122` |
-| 10 | **不维护"已知损坏内核"表，不按版本放行。** 一切能力判定都是"尝试真实操作、报告 errno" | Android 厂商内核的 BPF 特性开关高度分散，版本字符串没有预测力。这与 §3.7 同源 | `bpf2socks` 全树无版本门禁 |
+| 1 | Hardcode `__NR_bpf` per architecture as a fallback — aarch64 is **280** | Android NDK UAPI headers sometimes do not define `__NR_bpf`, breaking the build outright | `bpf_util.c:26-36` |
+| 2 | `#define` fallbacks for `BPF_F_NO_PREALLOC`, `BPF_OBJ_NAME_LEN` and `BPF_F_MARK_MANGLED_0` | Same cause: older NDK headers lack the constants | `bpf_util.c:16-24`, `tc_checksum_flags.h:11-13` |
+| 3 | **Verifier log retry:** when `BPF_PROG_LOAD` returns `EAGAIN` or `ENOSPC` because of the log buffer, reload once with `log_level = 0`; if it still fails, **report the original errno**, not the second one | A large program's verifier log exceeds the buffer, and the real load error is then masked by `ENOSPC`. Skipping this step produces a diagnosis that points at the wrong thing | `bpf_util.c:177-189` |
+| 4 | A sanity gate before ELF parsing: `ELFCLASS64`, `ELFDATA2LSB`, `e_machine == EM_BPF` | Stops any other file being parsed as a BPF object | `bpf_object.c:250-257` |
+| 5 | Handle only `R_BPF_64_64` relocations, patching from a **map symbol name to fd table** with bounds checks on each | This is the concrete form of §12.4. bpf2socks loads successfully on Android this way with no libbpf | `bpf_object.c:23-172`, binding table `:78-96` |
+| 6 | **Re-verify the id** after `BPF_PROG_GET_FD_BY_ID`: the id from `BPF_OBJ_GET_INFO_BY_FD` must equal the one requested | Program ids are reused. Without the re-check you may be operating on a different program entirely | `bpf_util.c:352-370` |
+| 7 | Normalise `ENOSPC` from `BPF_PROG_QUERY` and TC dumps to `E2BIG`, and **re-check `count > capacity`** after the call returns | The kernel returns the true entry count when the buffer is too small; not re-checking truncates silently | `bpf_util.c:306-315` |
+| 8 | Identify our own objects by the **program name prefix** `flx_`, but **as a filter only, never as proof of ownership** — ownership still requires the id and tag of §8.5 | A prefix can be forged. Its job is to narrow the candidate set | `bpf_util.c:384-386` |
+| 9 | If pinning is ever used — it is not — `mkdir -p` the parent at mode `0700` and `unlink` any old pin before `BPF_OBJ_PIN` | — | `bpf_util.c:89-122` |
+| 10 | **Maintain no "known-broken kernel" table and admit nothing by version.** Every capability decision is "attempt the real operation, report the errno" | BPF feature switches in vendor Android kernels are highly scattered, and a version string has no predictive power. Same reasoning as §3.7 | `bpf2socks` has no version gate anywhere |
 
-**第 11 条是我们自己加的**：加载失败时，**verifier log 的前 N 行必须进入 `status` 与日志**（§12.4 第 3 步）。这是实机问题唯一可诊断的东西；把它吞掉等于放弃现场。
+**Item 11 is ours rather than inherited:** on a load failure the **first lines of the verifier log MUST reach `status` and the log** (§12.4 step 3). It is the only diagnosable artefact a device failure produces, and swallowing it discards the scene.
 
-## 12.8 为什么不 shell out 到 `tc` / `ip`
+## 12.8 Why nothing shells out to `tc` or `ip`
 
-`clone/asteriskd` 的分工是"netlink 验证 + `tc` 二进制变更"（`asteriskd_runtime.c:3587`/`3605` 对 `:3824`/`3834`）。0.9.0 **全部走 netlink**，理由是一条具体的连锁后果：
+`clone/asteriskd` splits the work: verify through netlink, mutate through the `tc` binary (`asteriskd_runtime.c:3587`, `3605` against `:3824`, `:3834`). Flux uses **netlink for both**, and the reason is a concrete chain of consequences rather than a preference:
 
-Android 上 `tc` / `ip` 运行在 `netutils_wrapper` / `netd` 的 SELinux 域，而 stock sepolicy **不允许这些域碰别人的 BPF 对象**。所以 asteriskd 必须先注入策略：
+On Android, `tc` and `ip` run in the `netutils_wrapper` and `netd` SELinux domains, and stock sepolicy **does not let those domains touch another party's BPF objects**. So asteriskd has to inject policy first:
 
 ```text
 allow netd * bpf { prog_run map_read map_write }
 allow netutils_wrapper * bpf { prog_run map_read map_write }
 ```
 
-并跨六个候选路径去找 `magiskpolicy` / `supolicy` / `ksud`（`asteriskd_capability.c:9-12`、`:97-154`），失败还只能降级为警告（`:181-206`）。**这正是 §1.3 非目标里"宽泛 SELinux patch"要避免的东西。**
+— then search six candidate paths for `magiskpolicy`, `supolicy` or `ksud` (`asteriskd_capability.c:9-12`, `:97-154`), and degrade to a warning when that fails (`:181-206`). **This is exactly the "broad SELinux patch" that §1.3 lists as a non-goal.**
 
-从 `fluxd` 自己的进程发 netlink 与 `bpf(2)`，绕开整个 `netutils_wrapper` 域问题：我们只需要**自己所在的域**有 `bpf` 权限，而 Magisk 与 KernelSU 的 root 域本来就有。代价是要自己写 `RTM_NEWTFILTER` 的 `TCA_BPF_*` 属性编码（§8.9），大约两百行——比注入 sepolicy 便宜得多，且不改变系统安全姿态。
+Issuing netlink and `bpf(2)` from `fluxd`'s own process sidesteps the `netutils_wrapper` domain entirely: the only domain needing `bpf` permission is **our own**, and the root domains of Magisk and KernelSU already have it. The price is encoding the `TCA_BPF_*` attributes of `RTM_NEWTFILTER` ourselves (§8.9), roughly two hundred lines — far cheaper than injecting sepolicy, and **it leaves the device's security posture unchanged**, which the alternative does not.
 
-**Phase 0 必须在 Magisk 与 KernelSU 上分别验证**：两者的策略路径不同（asteriskd 为此写了两套发现逻辑），"root 就一定能 load BPF"不能假设。
+**Phase 0 MUST verify this separately on Magisk and on KernelSU.** Their policy paths differ — asteriskd carries two discovery implementations for exactly this reason — and "root implies the ability to load BPF" is an assumption, not a fact.
 
 ## 12.5 TC attach
 
-用 rtnetlink，不调用 `tc` 二进制：
+Through rtnetlink, never the `tc` binary:
 
-- `clsact`：`RTM_NEWQDISC`，`NLM_F_EXCL|NLM_F_CREATE`，`tcm_parent = TC_H_CLSACT`，`tcm_handle = TC_H_MAKE(TC_H_CLSACT, 0)`，`TCA_KIND = "clsact"`。已存在（`EEXIST`）视为成功且记录"非我创建"。
-- filter：`RTM_NEWTFILTER`，`NLM_F_EXCL|NLM_F_CREATE`，`tcm_parent = TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS|TC_H_MIN_INGRESS)`，`tcm_info = TC_H_MAKE(prio << 16, protocol)`，`tcm_handle = 0x1 / 0x2`，`TCA_KIND = "bpf"`，options 内 `TCA_BPF_FD`、`TCA_BPF_NAME`、`TCA_BPF_FLAGS = TCA_BPF_FLAG_ACT_DIRECT`。
-- ownership 校验：`RTM_GETTFILTER` dump 后逐项比对 §8.5 的完整谓词，**包括 dump 顺序**（first-applicable）。
-- 删除：`RTM_DELTFILTER` 且必须带精确 `prio`/`protocol`/`handle`/`kind`。
+- **`clsact`:** `RTM_NEWQDISC` with `NLM_F_EXCL|NLM_F_CREATE`, `tcm_parent = TC_H_CLSACT`, `tcm_handle = TC_H_MAKE(TC_H_CLSACT, 0)`, `TCA_KIND = "clsact"`. `EEXIST` counts as success and records "not created by us" (§8.9.4).
+- **Filter:** `RTM_NEWTFILTER` with `NLM_F_EXCL|NLM_F_CREATE`, `tcm_parent = TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_EGRESS|TC_H_MIN_INGRESS)`, `tcm_info = TC_H_MAKE(prio << 16, protocol)` where the preference is selected per interface (§8.5.3), `tcm_handle` of `0x1`, `0x2` or `0x3`, `TCA_KIND = "bpf"`, and `TCA_BPF_FD`, `TCA_BPF_NAME` and `TCA_BPF_FLAGS = TCA_BPF_FLAG_ACT_DIRECT` inside the options.
+- **Ownership check:** dump with `RTM_GETTFILTER` and compare every item of the §8.5 predicate. **Dump order establishes the ordering constraint, not reachability** — reachability comes from `flx_verify` (§8.5.4), and treating dump position as proof was the claim R091-05 overturned.
+- **Deletion:** `RTM_DELTFILTER`, carrying the exact `prio`, `protocol`, `handle` and `kind` (§8.9.5).
 
-## 12.6 ringbuf 消费
+## 12.6 Consuming the ringbuf
 
-`fault_events` 的 map fd 可直接 `epoll` 注册（ringbuf map fd 支持 `EPOLLIN`）。消费用 `mmap` 的 consumer/producer 页 + 记录头解析（约 80 行），不引入 libbpf。事件固定 32 字节，解析平凡。
+The `fault_events` map fd registers directly with `epoll`, because a ringbuf map
+fd supports `EPOLLIN`. Consumption is the `mmap`ed consumer and producer pages
+plus record-header parsing, roughly 80 lines, with no libbpf. Events are a fixed
+32 bytes, so the parsing is trivial and the fault path adds no dependency to a
+binary whose whole point is not having one.
 
 ---
 
-# 第 13 部分：模块封装与构建
+# Part 13: Module packaging and the build
 
-## 13.1 同一个最小 ZIP
+## 13.1 One minimal ZIP
 
 ```text
 module.prop
-skip_mount                  # 空文件，不做 system overlay
+skip_mount                  # empty file; no system overlay
 customize.sh
 service.sh
-action.sh
 uninstall.sh
+webroot/index.html          # the redirect shell of §28.8, not a WebUI
 bin/fluxd
 bin/sing-box
 etc/default-flux.toml
-etc/default-sing-box.json
+etc/default-template.json
 engine.lock
 LICENSE
 THIRD_PARTY_NOTICES.md
 licenses/{sing-box-LICENSE, DEPENDENCIES.md}
 ```
 
-`module.prop` 由 xtask 生成：`id=flux_rs`、`name=Flux-rs`、`author=Flux-rs contributors`、`version=v0.9.0`、`versionCode=9000`，description 一句话且**不夸大 fail-open**。0.9.0 不放 `updateJson`。
+**The list is an allowlist, and packaging is built from it rather than by
+excluding paths from the working tree.** An exclusion list fails open: a file
+added to the tree ships unless someone remembers to exclude it. `xtask` holds
+this list as a constant and stages exactly these entries; §13.4 makes two
+consecutive runs byte-identical so the property is checkable rather than
+asserted.
 
-**禁止**：`post-fs-data.sh`、recovery `META-INF`、`service.d`、WebUI、APK、SEPolicy、multi-ABI 目录、已编译 `.o`、逐文件安装 hash 清单。
+**There is no `action.sh`** (§27.1.3). The switch is the manager's own module
+toggle, so a second button would be a second way to express one state — and it
+would additionally impose a Magisk v28+ floor for no gain.
 
-注意：由于删掉了 libbpf/libelf/zlib（D10），`licenses/` 只需 sing-box 与 Rust 依赖的许可证。
+`module.prop` is generated by xtask: `id=flux_rs`, `name=Flux-rs`,
+`author=Flux-rs contributors`, with the version and `versionCode` derived from
+the single version source (§13.4). Its `description` is one sentence that **MUST
+NOT overstate the failure semantics** — §2.2 is the contract it has to be
+consistent with — and `fluxd` rewrites that line at runtime to carry live status
+(§27.1.3). No `updateJson` is shipped.
 
-## 13.2 脚本职责（薄）
+**Forbidden:** `post-fs-data.sh`, a recovery `META-INF`, `service.d`, a WebUI,
+an APK, SEPolicy, multi-ABI directories, compiled `.o` files, and a per-file
+installation hash manifest.
 
-全部脚本以 `MODDIR=${0%/*}` 定位自身，不硬编码管理器临时目录。
+Since libbpf, libelf and zlib were removed (D10), `licenses/` needs only the
+sing-box licence and the Rust dependency licences.
 
-### 13.2.0 三管理器的实际差异（会改变脚本内容，不是理论问题）
+## 13.2 Scripts stay thin
 
-| 项 | Magisk | KernelSU | APatch |
+Every script locates itself with `MODDIR=${0%/*}` and MUST NOT hardcode a
+manager's temporary directory.
+
+### 13.2.0 The three managers really do differ
+
+| Item | Magisk | KernelSU | APatch |
 |---|---|---|---|
 | `service.sh` | ✓ | ✓ | ✓ |
-| `post-fs-data.sh` | ✓（阻塞，40 s 上限） | **late-load 模式完全跳过** | ✓ |
-| `boot-completed.sh` | **无** | ✓ | ✓ |
-| `action.sh` | ≥ v28.0 / canary 27008 | ✓ | ✓ |
+| `post-fs-data.sh` | ✓, blocking, 40 s ceiling | **skipped entirely in late-load mode** | ✓ |
+| `boot-completed.sh` | **absent** | ✓ | ✓ |
 
-**全部启动逻辑只放 `service.sh`。** 我们本来就不出 `post-fs-data.sh`——这条恰好是对的，因为 KernelSU 的 late-load 模式会静默跳过它，依赖它的模块在那种设备上无声失效。Magisk 没有 `boot-completed.sh`；不过 §11.3 已消除对 `sys.boot_completed` 的依赖，我们不需要等它。
+**All startup logic lives in `service.sh` alone.** Flux ships no
+`post-fs-data.sh`, which turns out to be exactly right rather than merely
+minimal: KernelSU's late-load mode skips it silently, so a module depending on
+it fails invisibly on those devices. Magisk has no `boot-completed.sh`, and §11.3
+removed the dependency on `sys.boot_completed`, so there is nothing to wait for.
 
-**管理器识别禁止用 `MAGISK_VER_CODE`**——KernelSU 报 `25200`/`v25.2`，APatch 报 `27000`/`v27.0`，KernelSU 文档明确写了"请不要用这两个变量判断是否运行在 KernelSU"。用正向标记：
+**Manager detection MUST NOT use `MAGISK_VER_CODE`.** KernelSU reports `25200` and `v25.2`, APatch reports `27000` and `v27.0`, and KernelSU's own documentation states plainly that these two variables must not be used to decide whether you are running under KernelSU. Use the positive markers:
 
 ```sh
 if   [ "$KSU"    = "true" ]; then MANAGER=kernelsu
@@ -1879,18 +2989,38 @@ elif [ "$APATCH" = "true" ]; then MANAGER=apatch
 else                              MANAGER=magisk; fi
 ```
 
-KernelSU 另外导出 `KSU_RUNTIME_MODE`（`built-in` / `lkm` / `late-load`）。**这个值应当进 `status`**：LKM 与 late-load 跑在**厂商原版内核**上，BPF 特性缺失的概率显著更高，出问题时它是第一条排查线索。
+KernelSU additionally exports `KSU_RUNTIME_MODE` as `built-in`, `lkm` or `late-load`. **This value belongs in `status`**: LKM and late-load run on the **vendor's own kernel**, where missing BPF features are substantially more likely, so it is the first thing worth knowing when something fails.
 
-**BusyBox 路径不同**（`/data/adb/magisk/busybox` vs `/data/adb/ksu/bin/busybox`），**禁止硬编码**；三者都用 BusyBox `ash` + Standalone Mode，靠 PATH 选工具同样不可靠。`module.prop` 必须 LF 行尾，`id` 匹配 `^[a-zA-Z][a-zA-Z0-9._-]+$`。
+**The BusyBox path differs** — `/data/adb/magisk/busybox` against `/data/adb/ksu/bin/busybox` — and **MUST NOT be hardcoded**. All three managers use BusyBox `ash` in Standalone Mode, so relying on `PATH` to select tools is equally unreliable. `module.prop` MUST use LF line endings, and `id` MUST match `^[a-zA-Z][a-zA-Z0-9._-]+$`.
 
-### 13.2.1 `action.sh` 的三条硬约束
+### 13.2.1 The status display does not depend on a button
 
-Magisk 自 canary 27008 / v28.0 起支持 `action.sh`。它的行为约束是：**STDOUT 显示在管理器 UI 里，STDERR 被丢弃，STDIN 不可用**，并且**脚本结束后管理器会重新读取 `module.prop`**。
+`module.prop`'s `description=` is the only graphical status surface this product
+has under the no-WebUI constraint, and it MUST be used fully.
 
-因此：① 所有输出走 STDOUT，**禁止**把任何信息放 STDERR；② **禁止**设计需要交互输入的动作；③ **利用 `module.prop` 的重读**——`action.sh` 在结束前把一行状态写进 `description=`（例如 `description=[Active] gen 7 · 3 apps · 41 tcp / 388 udp`），用户在管理器列表里就能直接看到运行状态，不必进终端。这是本产品在"无 WebUI"约束下唯一的图形化状态出口，应当用满。
+An earlier design had `action.sh` write that line when the user pressed the
+manager's Action button, exploiting the fact that Magisk re-reads `module.prop`
+after the script exits. **That is the wrong writer.** A status line refreshed
+only when a button is pressed shows a stale value at every other moment, which
+is worse than no status at all — it looks current.
+
+`fluxd` writes it instead, after each pass of the event loop, with three
+properties the button-driven version could not have: it compares before writing
+and skips an unchanged render; it replaces the file atomically through a
+temporary file in the same directory plus `rename`, so the manager never reads a
+half-written file; and the render is idempotent, so repeated writes cannot make
+`description=` grow without bound. A write failure loses only the status display
+and MUST NOT affect the daemon — the file belongs to the manager.
+
+The reference implementation reached the same conclusion: `Flux-original` has its
+daemon call `sync_prop` on every state transition (`scripts/log:104-152`), with
+the same deduplication, idempotent stripping and atomic replacement.
+
+The formats are specified in §27.1.3, and the split lives in
+`flux-core::version` so it can be unit-tested on any host.
 
 ```sh
-# service.sh（late_start；业务全在 fluxd）
+# service.sh (late_start; all logic lives in fluxd)
 MODDIR=${0%/*}
 n=0
 while :; do
@@ -1903,225 +3033,271 @@ while :; do
 done
 ```
 
-- `customize.sh`：只检查 arm64 与 payload 完整性、创建目录、设置 mode/owner；**只在文件缺失时**复制默认配置（普通重装不覆盖用户配置）；不在安装时跑 BPF 资格测试。
-- `action.sh`：先读 `status`，再明确调用 `enable`/`disable`，输出简短结果。
-- `uninstall.sh`：同步请求 `fluxd stop`，成功后只删除 `/data/adb/flux-rs`；不扫描/读取/删除任何旧 Flux 路径，也不 flush 网络对象（管理器要求重启后非持久内核对象自然消失）。
+- **`customize.sh`** checks arm64 and payload integrity, creates directories and
+  sets modes and owners; copies a default configuration **only when the file is
+  absent**, so an ordinary reinstall never overwrites a user's configuration;
+  and runs no BPF capability test at install time — capability is decided by
+  activation actually working (§3.7), and an install-time test would report a
+  verdict that may not hold at boot.
+- **`uninstall.sh`** requests `fluxd stop` synchronously and, on success, deletes
+  only `/data/adb/flux-rs`. It MUST NOT scan for, read or delete any older Flux
+  path, and MUST NOT flush network objects: the manager requires a reboot, after
+  which non-persistent kernel objects are gone by themselves (§8.8).
 
-## 13.3 child 进程与 orphan 防护
+## 13.3 The child process and orphan prevention
 
-`fluxd` 只直接 `fork/exec` 不 daemonize 的官方 sing-box。`exec` 前的顺序是固定的（参照 `clone/asteriskd/asteriskd_process.c:332-344`）：恢复信号处置（`SIGKILL`/`SIGSTOP` 跳过）→ `setsid()` → 清空 supplementary groups → `PR_SET_PDEATHSIG` → **复查 parent PID**（关闭"父进程在 PDEATHSIG 生效前就已死"的窗口）→ 准备 fd → `execve`。`setsid()` 让 child 成为进程组 leader，从而可以对整组发信号。
+`fluxd` `fork`s and `exec`s the official sing-box directly, never daemonized. The pre-`exec` order is fixed (compare `clone/asteriskd/asteriskd_process.c:332-344`): restore signal dispositions, skipping `SIGKILL` and `SIGSTOP`; `setsid()`; clear supplementary groups; `PR_SET_PDEATHSIG`; **re-check the parent PID**, closing the window where the parent died before PDEATHSIG took effect; prepare fds; `execve`. `setsid()` makes the child a process group leader so the whole group can be signalled.
 
-父进程存活时的正常停止用 `SIGTERM` → 短 deadline → `SIGKILL`，并用 pidfd 确认退出。
+While the parent is alive, normal termination is `SIGTERM`, a short deadline, then `SIGKILL`, with pidfd confirming the exit.
 
-**PDEATHSIG 取 `SIGKILL` 而不是 `SIGTERM`**（asteriskd 选后者）。理由：父进程异常死亡后已无人能执行 graceful deadline，`SIGTERM` 若被 engine 忽略或处理缓慢就会留下 orphan，与 supervisor 拉起的新 engine 争抢同一批端口。而本设计里 engine **不拥有任何内核状态**——没有 TUN、没有 BPF、没有 iptables，只有 listener socket——所以没有需要 graceful 清理的东西，`SIGKILL` 严格更强。附带好处：listener 立即关闭，正是 §2.2.1 fail-open 想要的效果。
+**PDEATHSIG is `SIGKILL`, not `SIGTERM`** — asteriskd chose the latter. Once the parent has died abnormally nobody is left to enforce a graceful deadline, so a `SIGTERM` the engine ignores or handles slowly leaves an orphan contending for the same ports with whatever engine a supervisor starts next. And this engine **owns no kernel state at all** — no TUN, no BPF, no iptables, only listener sockets — so there is nothing to clean up gracefully and `SIGKILL` is strictly stronger. It also closes the listeners immediately, which is exactly what §2.2.1 wants: the next new flow misses the listener lookup and goes Direct.
 
-**child 身份必须验证而不是假设**：记录 pid 之外，还要读 `/proc/<pid>/stat` 的 `starttime` 与 `/proc/<pid>/exe`，构成 `(pid, starttime)` 复合身份。解析 `stat` 时**以最后一个 `)` 定位**（comm 里可能含括号），并拒绝 `Z`/`X` 状态。pid 复用在长时间运行的设备上是真实的（`asteriskd_process.c:370-390`）。
+**The child's identity MUST be verified rather than assumed.** Beyond the pid, read `starttime` from `/proc/<pid>/stat` and `/proc/<pid>/exe` to form a composite `(pid, starttime)` identity. When parsing `stat`, **locate fields from the last `)`**, because a comm may contain parentheses, and reject `Z` and `X` states. pid reuse is real on a device that runs for weeks (`asteriskd_process.c:370-390`).
 
-**engine 的 stdout/stderr 必须被捕获**（pipe 到 fluxd，写入 §11.1 的日志，并保留最后若干行进 `status.last_error`）。丢弃它等于放弃 `sing-box check` 之外唯一的 engine 侧诊断，而 §24.4 的 hint 依赖它。
+**The engine's stdout and stderr MUST be captured** — piped to fluxd, written to the log, with the last lines retained in `status.last_error`. Discarding them abandons the only engine-side diagnostic other than `sing-box check`, and the hints of §24.4 depend on it.
 
-## 13.4 单一版本源与可复现打包
+## 13.4 One version source, and reproducible packaging
 
 ```toml
 [workspace.package]
 version = "0.9.0"
 ```
 
-xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_000 + minor*1_000 + patch = 9000`；ZIP 名 `Flux-rs-v0.9.0-arm64.zip`；CLI/build metadata。Git commit hash 只做 provenance，不参与 versionCode。只有签出的 `v*` tag 触发 release workflow，workflow 只校验 tag 去掉 `v` 后等于 workspace version，**不维护第二份版本文件**。
+Everything else is derived by xtask: `module.prop`'s version line, `versionCode = major*1_000_000 + minor*1_000 + patch`, the ZIP name, and the CLI and build metadata. The VCS revision hash is provenance only and never enters `versionCode`. Only a signed `v*` tag triggers the release workflow, which verifies that the tag with its `v` removed equals the workspace version. **No second version file is maintained** — a version in two places is a version that disagrees with itself at exactly the wrong moment (PHIL-4).
 
-`cargo xtask package` 是本地与 CI 的唯一打包入口：
+`cargo xtask package` is the only packaging entry point, locally and in CI:
 
-1. 从空 staging 目录开始。
-2. 用 `rust-toolchain.toml`、`Cargo.lock`、固定 NDK 与固定 LLVM/clang 交叉构建 `fluxd` 与 BPF object；target 固定 `aarch64-linux-android` API 31；`fluxd` 链接 `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384` 并静态检查每个 `PT_LOAD` 的 `p_align >= 0x4000`；构建路径 remap、不嵌 wall-clock。
-3. 下载并校验 engine.lock（size + SHA-256 + 四个 `PT_LOAD` 仍精确 `0x1000`）。
-4. 生成 `module.prop`。
-5. 按 allowlist 复制文件、统一 LF 与 mode。
-6. 固定排序 + `SOURCE_DATE_EPOCH` + 无额外属性地打 ZIP。
-7. 输出 ZIP 与 `SHA256SUMS`。
+1. Start from an empty staging directory.
+2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock`, the pinned NDK and the pinned LLVM/clang, targeting `aarch64-linux-android` API 31. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. No build path is remapped and no wall-clock value is embedded.
+3. Download and verify against `engine.lock`: size, SHA-256, and all four `PT_LOAD` alignments exactly `0x1000`.
+4. Generate `module.prop`.
+5. Copy files by the allowlist, normalising line endings to LF and fixing modes.
+6. Build the ZIP with a fixed entry order, `SOURCE_DATE_EPOCH`, and no extra attributes.
+7. Emit the ZIP and `SHA256SUMS`.
 
-不生成 SBOM、签名、逐文件 hash 或多层 manifest，除非未来真实分发渠道明确要求。
+No SBOM, signature, per-file hash or layered manifest is produced unless a real distribution channel actually requires one.
 
 ---
 
-# 第 14 部分：性能与能效预算
+# Part 14: Performance and power budget
 
-## 14.1 热路径静态成本
+## 14.1 Static hot-path cost
 
-| 路径 | 主要工作 |
+| Path | Work performed |
 |---|---|
-| UID 未选（绝大多数流量） | 1 次 TC invocation + `bpf_get_socket_uid` + 1 次 HASH miss。**不解析 packet、不读 control** |
-| 已有 `DIRECT` TCP | 上述 + `bpf_sk_fullsock` + 1 次 SK_STORAGE 查。**不解析、不读 control** |
-| 新 selected direct TCP 首 SYN | 上述 + 1 次 control（2 map 查）+ 1 次 LPM + 1 次 listener lookup + 1 次 storage create。此后零写入 |
-| 新 captured TCP 首 SYN | 同上 + `bpf_redirect`（L2 零写入 / L3 写 2 字节）；ingress 再 1 次 `change_type` + 1 次 control + 1 次 listener lookup + `bpf_sk_assign` |
-| captured TCP 稳态（L2） | `bpf_sk_fullsock` + 1 次 storage 查 + 1 次 control + `bpf_redirect`。**零 packet 写入、零 clone 复制、零解析** |
-| captured TCP 稳态（L3/rmnet） | 同上 + `bpf_skb_change_head(14)` + 写 2 字节 EtherType |
-| selected UDP 每 datagram | UID 查 + 有界解析 + 1 次 control + 1 次 LPM + 1 次 listener lookup + redirect；ingress 1 次 change_type + 1 次 control + 1 次 lookup/assign |
+| Unselected UID — the overwhelming majority of traffic | one TC invocation, `bpf_get_socket_uid`, one HASH miss. **No packet parsing, no control read** (§2.2.4) |
+| TCP holding a `DIRECT` decision | the above plus `bpf_sk_fullsock` and one SK_STORAGE lookup. **No parsing, no control read** |
+| First SYN of a selected-but-direct TCP flow | the above plus one control read (two map lookups), one LPM lookup, one listener lookup, one storage create. Nothing is written afterwards |
+| First SYN of a captured TCP flow | the above plus `bpf_redirect` — zero writes on L2, two bytes on L3 — then on ingress one `change_type`, one control read, one listener lookup and `bpf_sk_assign` |
+| Captured TCP, steady state, L2 | `bpf_sk_fullsock`, one storage lookup, one control read, `bpf_redirect`. **Zero packet writes, zero clone copies, zero parsing** |
+| Captured TCP, steady state, L3 or rmnet | the above plus `bpf_skb_change_head(14)` and a two-byte EtherType write |
+| Selected UDP, per datagram | UID lookup, bounded parse, one control read, one LPM lookup, one listener lookup, redirect; on ingress one `change_type`, one control read, one lookup and assign |
 
-与前两版蓝图相比，captured TCP 的 L2 稳态少了：一次 socket hash 查找（D1）、一次 sentinel lookup（D2）、一次 6 字节 MAC 比对（D3）、一次 12 字节 `bpf_skb_store_bytes` 及其对 clone 的 `skb_ensure_writable()` 复制（D17），并且完全不解析 L3/L4（D6 的副产品）。**结果是该路径上 Flux 一个字节都不碰 packet。**
+Against the two earlier blueprints, the L2 steady state for a captured TCP flow lost: one socket hash lookup (D1), one sentinel lookup (D2), one 6-byte MAC comparison (D3), and one 12-byte `bpf_skb_store_bytes` together with the `skb_ensure_writable()` copy it forced on a cloned skb (D17) — and it parses no L3 or L4 at all, as a by-product of D6. **On that path Flux does not touch a single byte of the packet.**
 
-`bpf_redirect()` 把 skb 所有权转交 veth，不复制一份继续走原路径；内核仍可能因 shared skb、headroom 或 GSO 做 unshare/segment，本文**不**虚构"绝对零拷贝"。
+`bpf_redirect()` transfers ownership of the skb to the veth rather than copying it and continuing along the original path. The kernel may still unshare or segment for a shared skb, insufficient headroom or GSO, and **this document does not claim absolute zero-copy** — a claim that would be false in exactly the cases hardest to observe.
 
-## 14.2 用户态预算
+## 14.2 Userspace budget
 
-- `fluxd` 单线程，steady target RSS ≤ 8 MiB（**实现目标，不是既测事实**）。
-- idle 时无周期 timer，只有 epoll 等待 + 一个阻塞在 `wait` 上的 supervisor shell。
-- 只有 interface / package / config / child / fault 变化才唤醒控制面。
-- 生产环境无 per-packet log/telemetry；唯一 ringbuf 只在已去重的 fault 上唤醒；`counters` 只被 `status` 主动读取。
-- sing-box 的内存/CPU 由用户完整配置主导，单列报告，不用 fluxd 的小 RSS 掩盖 engine 成本。
+- `fluxd` is single-threaded with a steady-state target RSS of 8 MiB. **This is a target, not a measurement**, and must not be reported as one.
+- At idle there is no periodic timer: an epoll wait, plus a supervisor shell blocked in `wait`.
+- Only an interface, package, configuration, child or fault change wakes the control plane.
+- Production carries no per-packet logging or telemetry. The one ringbuf wakes only on a deduplicated fault, and `counters` is read only when `status` asks.
+- sing-box's memory and CPU are dominated by the user's own configuration and MUST be reported separately. **`fluxd`'s small RSS MUST NOT be used to present the engine's cost as smaller than it is.**
 
-## 14.3 如何证明"高性能/高能效"
+## 14.3 What counts as evidence of efficiency
 
-0.9.0 以静态路径计数、算法复杂度、分配生命周期、copy/wakeup 边界与 BPF verifier 输出为主要证据。Phase 0 与发布前只做**一次**短 sanity：确认未选流量不进用户态、idle 无周期唤醒、选择路径无明显循环或上报。不做数日 A/B、不建机型性能 catalog、不宣传未测得的百分比提升。
-
----
-
-# 第 15 部分：验证策略
-
-## 15.1 日常静态检查
-
-- `cargo fmt --check`；`cargo clippy` 高价值 lint；`cargo build --target aarch64-linux-android`。
-- `cargo test -p flux-core`（**必须能在 Windows 主机上跑**）。
-- BPF：`-Wall -Wextra -Werror` 编译通过；在 CI 的 Linux runner 上实际 `BPF_PROG_LOAD` 到 verifier 通过。
-
-  **在更新的内核上通过，不代表 5.15 的 verifier 会通过。** CI 用的是 `ubuntu-latest`，内核远新于基线，所以这一关只证明"程序在某个现代 verifier 下成立"。**基线 verifier 的证据来自设备**：Phase 3–8 的真机套件在 SM-S9180（5.15.211）上加载同一批程序，那才是 5.15 的一手结论。CI 这一关的作用是早失败，不是终局判据；两者都通过才算数（GOV-4.1 的分层）。
-
-- shell：CI 用 `shellcheck --shell=sh --severity=warning` 检查 `module/*.sh`。**目标运行时是 BusyBox `ash`，而 shellcheck 不是 `ash`**，因此它查的是可移植性问题而非目标解释器的语法接受度；`tools/**` 下的脚本目前不在检查范围内，它们只在开发机与设备上手工执行。
-- ELF 静态检查：`fluxd` 每个 LOAD `p_align >= 0x4000`；官方 engine 精确匹配 engine.lock 且仍是 `0x1000`。
-- clean staging allowlist、版本一致性、两次打包 hash 一致。
-
-## 15.2 必须保留的八个逻辑测试（全部在 `flux-core`）
-
-1. `userId:package` canonical 解析、`appId` 范围拒绝、shared UID 列举、硬上限。
-2. IPv4/IPv6 CIDR canonicalize、固定 bypass 注入、LPM key 编码、上限。
-3. 用户 JSON 禁止自带 inbound；effective JSON 恰好注入两个 tproxy inbound 且**不含**任何被移除/禁止的键。
-4. 随模块分发的 `etc/default-sing-box.json` 通过 `sing-box check`，且**含 `sniff` 与 `hijack-dns` 两条 route rule**；缺失 :53 处理时 `check` 产生警告而非错误。
-5. `flux_abi.h` 与 Rust 镜像的 `size_of` / 字段 offset 逐项一致。
-6. 手写 BTF blob 的字节布局与结构定义一致（与 clang `.BTF` 交叉核对）。
-7. 控制协议请求/响应的 round-trip。
-8. SemVer → `versionCode` / `module.prop` / artifact 名。
-
-## 15.3 明确不做
-
-多日 soak；跨几十台 OEM 的资格 catalog；每 commit 的三 root-manager 真机矩阵；mock kernel/platform framework；production canary/proof daemon 与 packet token 自洽证明；为未来 backend/兼容层写未使用的测试；把性能阈值写成 CI 无法稳定复现的硬门禁。
-
-这些是**最低基线**，不禁止在出现真实回归后为该不变量加一个聚焦测试；禁止的是为每个 wrapper/getter/枚举堆测试。
-
-## 15.4 从旧审计继承的四条硬规则
-
-前几轮审计里有四类缺陷与具体架构无关、换成新架构照样会复发。它们在 0.9.0 是**实现合同**，不是建议。
-
-1. **状态报告诚实性。** 旧代码在 rollback 路径吞掉全部错误，然后向控制面发布 `attached=false`（F-05）；promote journal 在 restore 失败时仍被删除（F-03）。规则：`status` **禁止**报告比已证明状态更干净的结果。宣布"已清理 / Inactive / 无残留"之前必须有一次新的实际枚举（TC dump、`ip rule`、`ip route`、BPF program info）证明对象确实不在。无法证明时报告 `unknown(cleanup_required)` 并附第一个具体错误。
-2. **ABI 测试对着产物，不对着源码字符串。** 旧仓库有一个 token-map 测试断言 C 源文件里的字面量（`token_map.rs:907` vs `flx_sock_addr.c:409`），helper 改名就红（F-10）。规则：`flux_abi.h` 一致性、BTF blob、map 参数一律对编译产物（ELF section / `.BTF` / `BPF_OBJ_GET_INFO_BY_FD`）断言，禁止 grep C 源。
-3. **CI、文档与实际命令必须机械一致。** 旧 CI 调用两个已删除的 xtask 子命令，`development.md` 与 README 还在列退役命令与旧协议版本（F-09、F-13、设计审计 P0 #4）。规则：CI 加一条自检，遍历 workflow 与 docs 中出现的每个 `cargo xtask <sub>`，断言它能被 xtask 解析；版本号只有 workspace 一个来源。
-4. **只有一份权威架构文档。** 旧设计语料里同一份文件同时规定了三种互不兼容的 attach 策略（PromoteThenAppend / 禁止 DETACH / KD 35 fail-open），实现者照着任一段写都会错（设计审计 P0 #1）；18 个 ADR 的 YAML 状态与正文互相矛盾（P1 #20）。规则：0.9.0 **没有 ADR 目录**，只有一份 `docs/guide/architecture.md`（本蓝图的落地版）。任何第二份文档若与它冲突，删掉第二份，而不是加一句"以后者为准"。
+The evidence is static path counts, algorithmic complexity, allocation lifetimes, copy and wakeup boundaries, and BPF verifier output. Phase 0 and pre-release each run **one** short sanity check: unselected traffic does not enter userspace, idle produces no periodic wakeups, and the selection path contains no obvious loop or upload. No multi-day A/B, no per-device performance catalogue, and **no advertised percentage improvement that was never measured.**
 
 ---
 
-# 第 16 部分：Phase 0
+# Part 15: Verification strategy
 
-> **已移出本文** → `docs/history/phase0.md`。章节编号未变。工具在 `tools/phase0/`。
-# 第 17 部分：实施阶段
+## 15.1 Static checks, and which platform proves what
 
-> **已移出本文** → `docs/plan/implementation.md`。章节编号未变。
+- `cargo fmt --check`; the high-value `cargo clippy` lints; `cargo build --target aarch64-linux-android`.
+- `cargo test -p flux-core`, which **MUST run on a Windows host**. That constraint is what keeps the pure logic free of libc and syscalls (§5).
+- BPF: compiles clean under `-Wall -Wextra -Werror`, and a real `BPF_PROG_LOAD` passes the verifier on the Linux CI runner.
+
+  **Passing on a newer kernel does not mean passing on 5.15.** CI runs `ubuntu-latest`, whose kernel is far newer than the baseline, so this gate proves only that the programs hold under some modern verifier. **The baseline verifier evidence comes from the device**: the Phase 3-8 device suites load the same programs on SM-S9180 running 5.15.211, and that is the first-hand result for 5.15. The CI gate exists to fail early, not to be the verdict; both must pass (GOV-4.1).
+
+- Shell: CI runs `shellcheck --shell=sh --severity=warning` over `module/*.sh`. **The target runtime is BusyBox `ash` and shellcheck is not `ash`**, so it checks portability rather than what the target interpreter accepts. Scripts under `tools/**` are outside that scope and are executed by hand on a development host or a device.
+- ELF checks: every `LOAD` segment of `fluxd` has `p_align >= 0x4000`, and the official engine matches `engine.lock` exactly and is still `0x1000`.
+- Clean staging from the allowlist, version consistency, and two packaging runs hashing identically.
+
+## 15.2 Eight logic tests that MUST exist, all in `flux-core`
+
+1. Canonical `userId:package` parsing, `appId` range rejection, shared-UID enumeration, hard ceilings.
+2. IPv4 and IPv6 CIDR canonicalisation, fixed bypass injection with its `RESERVED` tag, LPM key encoding, ceilings.
+3. The template MUST NOT declare an inbound; the generated config injects exactly two tproxy inbounds and contains **none** of the removed or forbidden keys (§9.1).
+4. The shipped `etc/default-template.json` has the shape §27.2.3 requires — no inbound, no `clash_api`, non-empty selector groups, a fakeip range clear of the fixed bypass — and **carries the `sniff` and `hijack-dns` route rules**; a missing `:53` handler produces a warning rather than an error. **The real `sing-box check` against that file is `cargo xtask template-check`, not this test**: a flux-core test cannot run the engine binary, and conflating the two overstates what the host suite proves.
+5. `size_of` and every field offset agree between `flux_abi.h` and the Rust mirror. **The cross-language comparison is `cargo xtask abi-check`, which has clang compute the C side**; this test guards the mirror.
+6. The hand-written BTF blob's byte layout matches the struct definition, cross-checked against clang's `.BTF` by `cargo xtask btf-check`.
+7. Control protocol request and response round-trip.
+8. SemVer to `versionCode`, `module.prop` and the artifact name.
+
+## 15.3 Deliberately not done
+
+Multi-day soaks; a qualification catalogue across dozens of OEMs; a three-manager device matrix on every commit; a mock kernel or platform framework; a production canary or proof daemon with packet-token self-consistency proofs; unused tests written for a future backend or compatibility layer; and performance thresholds turned into hard gates CI cannot reproduce stably.
+
+These are a **floor, not a ceiling.** Adding a focused test for an invariant after a real regression is encouraged; what is forbidden is piling tests onto every wrapper, getter and enum, which produces a suite that is expensive to run and proves nothing anyone doubted.
+
+## 15.4 Four rules inherited from the old audits
+
+Four classes of defect from the earlier audits are independent of any particular architecture and will recur under this one. They are **implementation contract**, not advice.
+
+1. **Status reporting MUST be honest.** The old code swallowed every error on the rollback path and then published `attached=false` to the control plane (F-05), and deleted the promote journal even when the restore had failed (F-03). The rule: **`status` MUST NOT report a state cleaner than the one it has proven.** Before claiming "cleaned", "Inactive" or "no residue" there MUST be a fresh actual enumeration — a TC dump, `ip rule`, `ip route`, BPF program info — showing the objects are absent. When that cannot be shown, report `unknown(cleanup_required)` with the first concrete error attached.
+2. **ABI tests assert against artefacts, never against source strings.** The old repository had a token-map test asserting a literal in a C source file (`token_map.rs:907` against `flx_sock_addr.c:409`), which turned red when a helper was renamed (F-10). The rule: `flux_abi.h` consistency, the BTF blob and map parameters are asserted against **compiled artefacts** — an ELF section, `.BTF`, `BPF_OBJ_GET_INFO_BY_FD` — and grepping C source is forbidden.
+3. **CI, documentation and the real command set MUST agree mechanically.** The old CI invoked two deleted xtask subcommands while `development.md` and the README still listed retired commands and an obsolete protocol version (F-09, F-13, design audit P0 #4). The rule: a self-check walks every `cargo xtask <sub>` appearing in a workflow or a document and asserts that xtask can resolve it, and the version has exactly one source in the workspace. **This is implemented** as the commands check of `cargo xtask doc-check`.
+4. **One authoritative architecture document.** The old design corpus specified three mutually incompatible attach strategies in a single file — PromoteThenAppend, forbidden DETACH, KD 35 fail-open — so an implementer following any one passage was wrong (design audit P0 #1), and eighteen ADRs had YAML statuses contradicting their own bodies (P1 #20). The rule: **there is no ADR directory.** There is one blueprint, edited in place, with `../guide/architecture.md` as its reader-facing projection. A second document that conflicts with it is deleted, **not annotated with "the later one wins"** — the same reasoning that retired the incremental blueprints (`../authoring.md` AUTH-7.2).
+
+---
+
+# Part 16: Phase 0
+
+> **Moved out of this document** → `../history/phase0.md`. The section number is unchanged; the tools are in `tools/phase0/`.
+# Part 17: Implementation phases
+
+> **Moved out of this document** → `../plan/implementation.md`. The section number is unchanged.
 >
-> 移出的同时**修掉了一个循环依赖**：旧版阶段 0 的退出条件写着「§16 全部关键 seam 通过」，而 §16 的 Q5 / Q7 / Q8 只能由阶段 5–7 产出的代码来测。新版 §17.2 把剩余问题逐条分配给**真正能跑它们的阶段**，每个阶段的退出条件都由该阶段自己满足。
+> Moving it also **fixed a circular dependency**: the old Phase 0 exit condition required "every critical seam in §16 passes", while §16's Q5, Q7 and Q8 can only be tested by code that phases 5 to 7 produce. §17.2 now assigns each remaining question to **the phase that can actually run it**, so every phase's exit condition is satisfiable by that phase.
 
 ---
 
-# 第 18 部分：从当前仓库过渡
+# Part 18: Transition from the previous repository
 
-> **已移出本文** → `docs/history/migration.md`。章节编号未变。
+> **Moved out of this document** → `../history/migration.md`. The section number is unchanged.
 >
-> 迁移已于 2026-08-25 执行完毕，是记录而非计划；本文只保留约束当前代码的内容。
+> The migration was executed on 2026-08-25 and is a record rather than a plan. This document keeps only what constrains current code.
 ---
 
-# 第 19 部分：被拒绝的替代方案
+# Part 19: Rejected alternatives
 
-> **已移出本文** → `docs/history/rejected-and-deferred.md`。章节编号未变。
-# 第 20 部分：发布前最终验收
+> **Moved out of this document** → `../history/rejected-and-deferred.md`. The section number is unchanged.
+# Part 20: Pre-release acceptance
 
-打 `v0.9.0` tag 需以下条件**同时**成立：
+Tagging a release requires **all** of the following simultaneously. The list is
+a conjunction: a release blocked by one unmet item is blocked, and the remedy is
+to meet it rather than to argue it is minor.
 
-1. Phase 0 记录证明核心 seam（真实 engine 观察到的原目的），而非 map 自洽。
-2. 仓库只含 §5 允许的结构，无旧 code/artifact。
-3. 官方 sing-box version/commit/asset digest 完全匹配 `engine.lock`，且四个 `PT_LOAD` 仍为 `0x1000`。
-4. 发行说明与 runtime 都把 `base page == 4096` 写成 0.9.0 边界；`fluxd` 自身 LOAD ≥ 16 KiB 对齐；非 4096 设备保持 Inactive/Direct 且不启动 engine。
-5. 未选 UID 的静态热路径确为"UID helper + 1 次 HASH miss"，无解析、无用户态。
-6. 双栈 TCP/UDP 原目的由官方 sing-box 实际观察一致。
-7. engine 退出后新 SYN/datagram 在下一次 listener lookup 就 Direct；已入场 TCP 的可解析包在仍经过 managed hook 时不因 Flux 内部状态丢失而直连。
-8. Android VPN/TUN 未被 attach；CLAT 未确认时 Direct；netd fwmark/rules/sysctl 未被修改。
-9. `stop`/`uninstall` 不 flush 系统对象；重启后无 Flux 内核残留。
-10. Magisk、KernelSU、APatch 各完成一次 `install → boot → action/status → disable → uninstall/reboot` smoke。
-11. `Flux-rs-v0.9.0-arm64.zip` 与 `SHA256SUMS` 由同一 xtask 生成，两次 clean build 一致。
-12. **DNS 精准性已实测**：选中 app 的系统解析器 DNS 被捕获，未选中 app 的不被捕获（§16 Q9 第 1、3 条）。
-13. `README.md` 逐字采用 §1.3、§2.2、§3 的边界；**明确写出 §1.3.3 的三条 DNS 残余边界（Private DNS 不经过 Flux、`enforce_dns_uid` 设备退化、mDNS 直连）**，以及 §1.3.4 需要 `hijack-dns` 才能生效域名规则；不使用"任何故障都无感直连""全 Android 通用"等夸张表述。
+1. Phase 0 records prove the core seam through **an original destination
+   observed by the real engine**, not through a map agreeing with itself.
+2. The repository contains only the structure §5 permits, with no old code or
+   artefacts.
+3. The official sing-box version, commit and asset digest match `engine.lock`
+   exactly, and all four `PT_LOAD` segments are still `0x1000`.
+4. The release notes and the runtime both state `base page == 4096` as a product
+   boundary; `fluxd`'s own LOAD segments are 16 KiB aligned; a device with any
+   other page size stays Inactive and Direct and starts no engine.
+5. The static hot path for an unselected UID is exactly the UID helper plus one
+   HASH miss — no parsing, no userspace (§2.2.4).
+6. Dual-stack TCP and UDP original destinations agree with what the official
+   sing-box actually observes.
+7. After the engine exits, a new SYN or datagram goes Direct at the next
+   listener lookup, and a parseable packet on an admitted TCP flow does **not**
+   go direct because Flux lost internal state while still passing through a
+   managed hook (§2.2.2).
+8. No Android VPN or TUN has been attached; an unconfirmed CLAT is Direct; netd
+   fwmark, rules and sysctls are unmodified.
+9. `stop` and `uninstall` flush no system object, and a reboot leaves no Flux
+   kernel residue.
+10. Magisk, KernelSU and APatch have each completed one
+    `install → boot → status → disable → uninstall/reboot` smoke run.
+11. The module ZIP and `SHA256SUMS` come from the same xtask invocation and two
+    clean builds agree byte for byte.
+12. **DNS precision is measured**: a selected app's system-resolver DNS is
+    captured and an unselected app's is not (§16, Q9 items 1 and 3).
+13. `../guide/` adopts the boundaries of §1.3, §2.2 and §3 verbatim, **stating
+    the three residual DNS boundaries of §1.3.3 explicitly** — Private DNS does
+    not pass through Flux, `enforce_dns_uid` devices degrade, mDNS is direct —
+    together with §1.3.4's requirement that `hijack-dns` is what makes domain
+    rules take effect. Phrases such as "any failure falls back invisibly" or
+    "works on all of Android" MUST NOT appear.
+14. The gap table of `../plan/implementation.md` §17.0.2 is empty. The blueprint
+    is a target contract, so a release while it is non-empty would ship
+    something the contract does not describe.
 
 ---
 
-# 第 21、22 部分：待确认事项与延期项
+# Part 21, 22: Owner confirmations and deferred items
 
-> **已移出本文** → `docs/history/rejected-and-deferred.md`。章节编号未变。
-# 第 23、24 部分：失败矩阵与 status 规格
+> **Moved out of this document** → `../history/rejected-and-deferred.md`. The section number is unchanged.
+# Part 23, 24: Failure matrix and the status specification
 
-> **已移出本文** → `docs/spec/failures.md`。章节编号未变。
-# 第 25 部分：启动时序与边界条件
+> **Moved out of this document** → `failures.md`. The section number is unchanged.
+# Part 25: Startup timing and boundary conditions
 
-`service.sh` 在 late_start 触发，此时 Android 还没准备好。这一节把每个"太早"的情况写清楚，因为它们全都会在真机首次开机时命中。
+`service.sh` fires at late_start, when Android is not yet ready. This section enumerates every "too early" condition, because **all of them are hit on a real device's first boot** — they are the normal case, not edge cases.
 
-| 时点问题 | 表现 | 处置 |
+| Timing problem | How it presents | Handling |
 |---|---|---|
-| `/data` 尚未解密（FBE，用户未解锁） | `/data/adb/flux-rs` 可访问（`/data/adb` 属 device-encrypted），但**用户配置若放在 credential-encrypted 区会读不到** | 状态根固定在 `/data/adb/flux-rs`（DE 区），因此不受影响。**禁止**把配置放到 `/data/user/0/...` |
-| 网络还没起来 | 没有任何候选 interface | 正常进入 `Inactive`，等 rtnetlink 事件。**不是错误**，`last_error` 保持 null，`ifaces` 为空数组 |
-| `packages.list` 还没写出 | 首次开机极早期可能缺失 | 保持 `Inactive` + `packages_list:ENOENT`；inotify 监视其 **parent 目录**（文件是原子替换，只监视文件会丢事件） |
-| `sys.boot_completed` 未置位 | 与我们无关——§11.3 已消除对 binder / `cmd package` 的依赖 | 无需等待。**这是 D8 的主要收益** |
-| SELinux 还在 permissive→enforcing 过渡 | BPF load 可能先成功后失败（或反之） | 不做特殊处理；失败即 `Inactive`，rtnetlink/inotify 事件会触发重试 |
-| engine binary 的 `PT_LOAD` 校验 | 不在运行期做（xtask 打包时已校验） | 运行期只查 page size |
-| 时钟未同步 | 只影响日志时间戳 | 不用 wall-clock 做任何判定（generation 是单调计数器，不是时间） |
-| 反复重启（crash loop） | backoff 1/2/4/8/30 s；child 稳定 60 s 后复位 | **不设"失败 N 次永久锁死"**：只要 `enabled` 为真就持续低频恢复。`status` 暴露 `backoff_seconds` 便于人工判断 |
+| `/data` not yet decrypted — FBE, user has not unlocked | `/data/adb/flux-rs` is reachable because `/data/adb` is device-encrypted, but **configuration in the credential-encrypted area would be unreadable** | The state root is fixed at `/data/adb/flux-rs`, in the DE area, so this cannot arise. Placing configuration under `/data/user/0/...` is **forbidden** |
+| Network not up yet | no candidate interface at all | Enter `Inactive` normally and wait for rtnetlink. **This is not an error**: `last_error` stays null and `ifaces` is an empty array |
+| `packages.list` not yet written | may be absent very early on a first boot | Stay `Inactive` with the reason recorded; inotify watches its **parent directory**, because the file is replaced atomically and a watch on the file alone would miss the event |
+| `sys.boot_completed` not set | irrelevant here — §11.3 removed the dependency on binder and `cmd package` | Nothing to wait for. **This is D8's principal benefit**, and it is why no retry state machine exists for startup ordering |
+| SELinux still moving permissive to enforcing | a BPF load may succeed then fail, or the reverse | No special handling. A failure means `Inactive`, and the next rtnetlink or inotify event retries |
+| The engine binary's `PT_LOAD` check | not performed at runtime; xtask verified it at packaging time | At runtime only the page size is checked |
+| Clock not synchronised | affects log timestamps only | **No decision uses wall-clock time.** The generation is a monotonic counter, not a timestamp |
+| Repeated restarts, a crash loop | backoff of 1/2/4/8/30 s, reset after the child is stable for 60 s | **There is no "failed N times, locked out permanently".** Recovery continues at a low rate for as long as the switch is on, and `status` exposes `backoff_seconds` so a human can tell the difference between waiting and stuck |
 
-**冷启动的正确姿态是"能做多少做多少，剩下等事件"**：page size 与 netns 检查失败是终局（不重试有意义），其它一切失败都只是当前收敛周期的结果，下一个 rtnetlink / inotify / timerfd 事件会重新收敛。
+**The correct posture at cold start is to do what can be done and wait for events for the rest.** Only the page size and netns checks are terminal, because retrying them cannot change the answer. Every other failure is merely the outcome of the current convergence round, and the next rtnetlink, inotify or timerfd event converges again. This is what makes the daemon level-triggered rather than a startup sequence with error handling bolted on.
 
 ---
 
-# 第 26 部分：reactor 状态机
+# Part 26: The reactor state machine
 
-三个顶层状态（§10.1）× 事件 → 动作。这张表是实现 `reactor.rs` 的直接依据；**表里没有的组合就是不该发生的组合**，遇到应记录并忽略，不得自行发明处理。
+Three top-level states (§10.1) by event, giving the action. This table is the direct basis for implementing `reactor.rs`. **A combination absent from the table is a combination that should not occur**: log it and ignore it, and MUST NOT invent handling for it.
 
-| 事件 | `Disabled` | `Inactive` | `Active` |
+| Event | `Disabled` | `Inactive` | `Active` |
 |---|---|---|---|
-| 启动完成（bootstrap） | 停在 Disabled | 尝试完整激活序列（§8.7） | — |
-| `enable`（删除 `disable` 文件） | 尝试激活 | 幂等，无操作 | 幂等，无操作 |
-| `disable`（创建 `disable` 文件） | 幂等 | 停 engine → Disabled | publish `active=0` → 停 engine → Disabled |
-| `reload` | 只重新校验配置，报告结果 | 重新尝试激活 | policy 域：§10.5 的加减法（**不动 `active`**）；engine 域：§9.4 的候选切换 |
-| `stop` | 正常退出(0) | publish `active=0` → 停 engine → 退出(0) | 同 Inactive |
-| `status` / `check` | 只读 | 只读 | 只读 |
-| rtnetlink：新 interface | 忽略 | 重新评估 admission，若已就绪则激活 | debounce → admission → attach（失败只排除该 interface） |
-| rtnetlink：interface 消失 | 忽略 | 更新候选集 | 从 active 集移除；若归零则 → Inactive |
-| rtnetlink：地址变化 | 忽略 | 更新期望 bypass 集 | 更新本机地址 bypass（加减法，不动 `active`） |
-| rtnetlink：**捕获侧**漂移（某物理 interface 的 `clsact` 或我们的 egress filter 被删） | 忽略 | 重新收敛 | **不动 `active`**：debounce → 在该 interface 上重建 clsact（若需）+ 重挂 egress filter。失败只把该 interface 移出 active 集 |
-| rtnetlink：**核心**漂移（`flxrs0/1`、ingress filter、rule、local 路由被删或改） | 忽略 | 重新收敛 | **先 publish `active=0`** → 按谓词重新收敛 → 成功则 `active=1` |
-| rtnetlink：`ENOBUFS`/overrun | 忽略 | 全量重 dump | 全量重 dump（§10.4.1 第 2 条） |
-| inotify：`flux.toml` 变 | 只更新校验结果 | 重新尝试激活 | policy 事务（加减法） |
-| inotify：`sing-box.json` 变 | 只更新校验结果 | 重新尝试激活 | engine 候选切换 |
-| inotify：`packages.list` 变 | 忽略 | 重新解析 | 重新解析 → policy 事务 |
-| pidfd：engine 退出 | 不应发生 | 记录 → backoff 重启 | publish `active=0` → backoff 重启 → 新 generation |
-| ringbuf：current-gen fault | 不应发生 | 清 latch | publish `active=0` → 重启 generation |
-| ringbuf：旧 gen / 重复 fault | 忽略 | 忽略 | **只清 latch，忽略**（handler 按 generation 幂等） |
-| timerfd：debounce 到期 | — | 执行待处理的收敛 | 同 |
-| timerfd：backoff 到期 | — | 重试激活 | 重试 engine 启动 |
-| timerfd：readiness 退避 | — | 重查 SOCK_DIAG | 同 |
-| `SIGHUP` | 等价 `reload` | 等价 `reload` | 等价 `reload` |
-| `SIGTERM`/`SIGINT` | 退出(0) | publish `active=0` → 停 engine → 退出(0) | 同 |
+| Bootstrap complete | stay Disabled | attempt the full activation sequence (§8.7) | — |
+| `enable`, deleting the `disable` file | attempt activation | idempotent, no action | idempotent, no action |
+| `disable`, creating the `disable` file | idempotent | stop the engine, go Disabled | publish `active=0`, stop the engine, go Disabled |
+| `reload` | re-validate the configuration and report; change nothing | attempt activation again | policy domain: the add-then-subtract of §10.5, **leaving `active` untouched**; engine domain: the candidate switch of §9.4 |
+| `stop` | exit cleanly with 0 | publish `active=0`, stop the engine, exit 0 | as Inactive |
+| `status`, `check` | read-only | read-only | read-only |
+| rtnetlink: new interface | ignore | re-evaluate admission and activate if otherwise ready | debounce, admit, attach; a failure excludes only that interface |
+| rtnetlink: interface gone | ignore | update the candidate set | remove from the active set; if it becomes empty, go Inactive |
+| rtnetlink: address change | ignore | update the desired self-address set | update the self-address maps additively, **leaving `active` untouched** |
+| rtnetlink: **capture-side** drift — a physical interface's `clsact` or our egress filter was deleted | ignore | reconverge | **leave `active` untouched**: debounce, recreate the clsact on that interface if needed, re-attach the egress filter. A failure removes only that interface from the active set |
+| rtnetlink: **core** drift — `flxrs0`/`flxrs1`, the ingress filter, the rule or the local route was deleted or altered | ignore | reconverge | **publish `active=0` first**, reconverge by the predicate, and set `active=1` only on success |
+| rtnetlink: `ENOBUFS` or overrun | ignore | full re-dump | full re-dump (§10.4.1 rule 2) |
+| inotify: `flux.toml` changed | update the validation result only | attempt activation again | policy transaction, add then subtract |
+| inotify: `template.json` or a `@file` list changed | update the validation result only | attempt activation again | regenerate (§28.2), then the engine candidate switch |
+| inotify: `packages.list` changed | ignore | re-parse | re-parse, then a policy transaction |
+| pidfd: engine exited | should not occur | record, restart with backoff | publish `active=0`, restart with backoff, new generation |
+| ringbuf: current-generation fault | should not occur | clear the latch | publish `active=0`, restart the generation |
+| ringbuf: old-generation or duplicate fault | ignore | ignore | **clear the latch and ignore** — the handler is idempotent per generation |
+| timerfd: debounce expired | — | run the pending convergence | same |
+| timerfd: backoff expired | — | retry activation | retry starting the engine |
+| timerfd: readiness backoff | — | re-check SOCK_DIAG | same |
+| `SIGHUP` | equivalent to `reload` | equivalent to `reload` | equivalent to `reload` |
+| `SIGTERM`, `SIGINT` | exit 0 | publish `active=0`, stop the engine, exit 0 | same |
 
-**四条不变量**：
+**Four invariants:**
 
-1. **进入 `Active` 的唯一途径**是 §8.7 步骤 10 的那一次 `control_root` pointer swap；**离开 `Active` 的第一个动作**永远是 publish `active=0`。中间没有其它路径。
-2. **policy 事务不改变顶层状态**（§10.5，D5）。只有 engine generation 切换、**核心**拓扑漂移、engine 退出才会离开 `Active`。
-3. **事务期间到达的事件不丢弃、不递归**：记入待处理集合，当前事务结束后由一次收敛统一消化。禁止在事务内部重入 reactor。
-4. **捕获侧漂移必须局部处理，禁止升级为全局事务。** 上表把捕获侧与核心漂移分成两行，理由见 §8.5.1：netd 在每次 interface 加入/离开网络时删 `clsact`，system_server 崩溃后 netd 重启还会清空**所有** interface 的 clsact。如果对这类事件也走"publish `active=0` → 重收敛 → `active=1`"，那么**每一次 Wi-Fi 重连都会让全设备的代理流量瞬断一次**。正确处置是只重挂那个 interface 上的 filter，`active` 全程不动，其它 interface 不受影响。这是本状态机里最容易写错、代价也最直观的一处。
+1. **The only way into `Active`** is the single `control_root` pointer swap of §8.7 step 10, and **the first action on leaving `Active`** is always publishing `active=0`. There is no other path in either direction, which is what lets every other rule reason about `active` without enumerating cases.
+2. **A policy transaction never changes the top-level state** (§10.5, D5). Only an engine generation switch, **core** topology drift, or the engine exiting leaves `Active`.
+3. **Events arriving during a transaction are neither dropped nor recursed into.** Record them in a pending set and consume them in one convergence after the current transaction ends. Re-entering the reactor from inside a transaction is forbidden.
+4. **Capture-side drift MUST be handled locally and MUST NOT escalate into a
+   global transaction.** The table gives capture-side and core drift separate
+   rows for the reason in §8.5.1: netd deletes the `clsact` every time an
+   interface joins or leaves a network, and a netd restart after a
+   system_server crash clears the clsact of **every** interface.
+
+   Routing those events through "publish `active=0`, reconverge, `active=1`"
+   would mean **every Wi-Fi reconnection briefly cuts proxied traffic across the
+   whole device**. The correct handling re-attaches the filter on that one
+   interface with `active` untouched throughout, leaving every other interface
+   unaffected.
+
+   **This is the easiest thing in the state machine to get wrong, and the
+   consequence is the most visible** — which is why the distinction is a row in
+   the table rather than a note under it.
 
 ---
 
-# 第 28 部分：订阅与配置生成
+# Part 28: Subscription and configuration generation
 
 > **New numbering in 0.9.5**, folding R092-01, R092-05 and R092-08. C11
 > (subscription) moved from deferred into scope with the owner's confirmation on
@@ -2314,7 +3490,7 @@ rather than redirects.
 
 ---
 
-# 第 29 部分：条件激活
+# Part 29: Conditional activation
 
 > **New numbering in 0.9.5**, folding R092-07 and the automation half of
 > R092-06.
@@ -2414,6 +3590,6 @@ worse than having none.
 
 ---
 
-- 文档结束。字段与不变量以本文为实现合同。
-- ABI 真相源：`bpf/include/flux_abi.h`；数据面骨架：`bpf/flux.bpf.c`。
-- 一手依据索引见同目录 `README.md`。
+- The language a document is written in, and the names of its fields, do not change what it binds.
+- ABI source of truth: `bpf/include/flux_abi.h`; data-plane skeleton: `bpf/flux.bpf.c`.
+- For terminology, see `../README.md`.

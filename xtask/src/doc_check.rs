@@ -123,7 +123,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<Vec<u32>
         } else {
             failures.push(format!(
                 "docs/index.md:{line}: §{number} maps to `{file}`, but that file has no \
-                 `# 第 {number} 部分：…` heading"
+                 `# 第 {number} 部分：…` or `# Part {number}: …` heading"
             ));
         }
     }
@@ -482,26 +482,41 @@ fn cited_sections(line: &str) -> Vec<u32> {
 
 /// Does `text` contain a level-1 heading `# 第 <numbers> 部分：<title>` whose
 /// number list (`、`-separated) contains `part` and whose title is non-empty?
+/// Whether `text` carries the top-level heading for `part`, in either language.
+///
+/// `docs/authoring.md` AUTH-0.4 makes the contract layer English and the record
+/// and plan layers Chinese, and a part heading follows its own document rather
+/// than the numbering. So §23 in `spec/failures.md` reads `# Part 23, 24: …`
+/// while §18 in `history/migration.md` reads `# 第 18 部分：…`, and both are
+/// correct. The part *number* is the identifier and is identical either way.
 fn heading_for_part(text: &str, part: u32) -> bool {
     for line in text.lines() {
-        let Some(rest) = line.trim_end().strip_prefix("# 第 ") else {
-            continue;
+        let line = line.trim_end();
+        let matched = match line.strip_prefix("# 第 ") {
+            Some(rest) => rest
+                .split_once(" 部分")
+                .filter(|(numbers, _)| covers_part(numbers, '、', part))
+                .map(|(_, tail)| tail),
+            None => line
+                .strip_prefix("# Part ")
+                .and_then(|rest| rest.split_once(':'))
+                .filter(|(numbers, _)| covers_part(numbers, ',', part))
+                .map(|(_, tail)| tail),
         };
-        let Some((numbers, tail)) = rest.split_once(" 部分") else {
-            continue;
-        };
-        if !numbers
-            .split('、')
-            .any(|n| n.trim().parse::<u32>() == Ok(part))
-        {
-            continue;
-        }
-        let title = tail.trim_start_matches(['：', ':']).trim();
-        if !title.is_empty() {
-            return true;
+        if let Some(tail) = matched {
+            if !tail.trim_start_matches(['：', ':']).trim().is_empty() {
+                return true;
+            }
         }
     }
     false
+}
+
+/// `23, 24` or `23、24` contains `part`.
+fn covers_part(numbers: &str, separator: char, part: u32) -> bool {
+    numbers
+        .split(separator)
+        .any(|n| n.trim().parse::<u32>() == Ok(part))
 }
 
 // --------------------------------------------------------------- 3. links
