@@ -57,7 +57,7 @@
 | 14 | 订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试 | 未实现 | §29.3、§29.4 |
 | ~~15~~ | ~~`config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代~~ | ~~未实现~~ | ~~§29.6~~ |
 | 16 | 面向用户的文案按 §27 过一遍（`module.prop`、guide） | 未做 | §27.1.3 |
-| 17 | 换代的判据是**生成物变了**，不是"哪个文件被改了" | `config_event_domains` 按文件名路由，`flux.toml` 只进策略域 | §28.2、§10.5 |
+| 17 | 换代的判据是**生成物变了**，不是"哪个文件被改了" | `config_event_domains` 按文件名路由，`flux.toml` 只进策略域 | §28.6 第 3 条、§28.2 |
 
 第 8 项是本表里唯一改 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 必须 bump magic，并同步 `flux_abi.h` 与 `abi.rs` 两侧。
 
