@@ -91,24 +91,53 @@ See §28 for generation rules, the subscription pipeline, and failure handling; 
 
 ### 27.2.2 The only `flux.toml` schema
 
-```toml
-# Format: userId:packageName. A shared UID also captures packages with the same UID.
-apps = [
-  "0:com.example.browser",
-]
+Every dimension has the same shape: a mode and a list. The full schema and the
+reasoning behind it are §11.2; this section states the user-visible contract.
 
-# Additional destination subnets to send Direct. Do not repeat the fixed safety bypasses.
-bypass_cidrs = [
-  "192.168.0.0/16",
-]
+```toml
+[apps]
+# whitelist = proxy only what is listed; blacklist = proxy everything except
+# Format: userId:packageName. A shared UID also captures packages with that UID.
+mode = "whitelist"
+list = ["0:com.example.browser", "@apps.txt"]
+
+[cidr]
+# blacklist = listed destinations go Direct (the ordinary use)
+# whitelist = capture only the listed destinations
+mode = "blacklist"
+list = ["192.168.0.0/16", "@chnroute.txt"]
+
+[interfaces]
+# blacklist with an empty list = take over every supported physical interface
+mode = "blacklist"
+list = []
+
+[ssid]
+# blacklist = do not activate on a listed Wi-Fi network
+mode = "blacklist"
+list = []
+
+[subscription]
+url = ""            # empty disables subscription entirely; no fetch, no timer
+interval = 86400    # seconds; 0 = manual only
 ```
 
 Rules:
 
-- Reject unknown keys and report the closest valid key;
-- package/CIDR MUST be canonical, deduplicated, and within capacity;
-- A missing package or shared UID expansion MUST be shown explicitly by `check`;
-- There is no `bypass_v4`, `bypass_v6`, `bypass.files`, subscription, or `enabled`.
+- Unknown keys are rejected, with the closest valid key reported.
+- Packages and CIDRs MUST be canonical, deduplicated and within capacity.
+- A missing package, or a shared-UID expansion, MUST be shown explicitly by
+  `check`.
+- A list entry beginning with `@` names a file inside `config/`, one entry per
+  line, `#` starting a comment. **Whether an entry is a path is decided by the
+  leading `@` alone** — never by testing whether it parses as a CIDR, which
+  would turn one mistyped CIDR into a silent filename.
+- `mode = "blacklist"` with an empty list is the automatic mode. There is no
+  third enum value, because a state reachable two ways drifts.
+- **`status` MUST print the mode in force, not merely the entry count.** In
+  whitelist mode a single mistyped entry sends everything Direct, silently.
+- There is no `apps`, `bypass_cidrs`, `bypass_v4`, `bypass_v6`, `bypass.files`
+  or `enabled` key.
 
 ### 27.2.3 Bootstrap engine configuration
 
@@ -123,17 +152,33 @@ Four properties MUST hold for the defaults (`cargo xtask template-check` checks 
 | Every selector/urltest has at least one member | An empty selector cannot resolve, causing `check` to fail before the user has edited anything |
 | fakeip ranges avoid the fixed bypasses | Flux unconditionally bypasses the entire ULA `fc00::/7`; a fakeip inside it is sent Direct, silently breaking all IPv6 fakeip. Determine containment from parsed prefixes and `flux_core::cidr::fixed_bypass`, not string prefixes—both `fd00::/8` and `FD00::/8` MUST be rejected |
 
-The template contains no server, subscription, or credential: `PROXY` initially points only to `DIRECT`. Users then replace it with their own complete sing-box JSON. Flux does not generate nodes, rule groups, or subscription content for users.
+The template ships with no server, no subscription and no credential: `PROXY`
+initially points only at `DIRECT`.
+
+**The user edits this template; they do not replace it with a finished config.**
+Flux generates `run/sing-box.<generation>.json` from the template plus the
+subscription (§28), filling empty selector groups and appending refined nodes.
+Everything else in the template passes through byte for byte, so what the user
+writes is what the engine runs.
 
 ### 27.2.4 Optional `clash_api`
 
-Flux does not package a WebUI or manage zashboard. If a user configures `experimental.clash_api`:
+Flux packages no WebUI and manages no zashboard. `webroot/index.html` is a
+twelve-line redirect to whatever controller the user configured, carrying the
+secret so it need not be typed (§28.8); when no `clash_api` is configured the
+page says so rather than redirecting into a connection failure.
 
-- `external_controller` MUST listen on loopback;
-- `secret` MUST be non-empty;
-- The user is responsible for UI downloads, TLS, updates, and access control.
+If a user configures `experimental.clash_api`:
 
-`fluxd check` treats an unsafe controller/secret as an error instead of modifying the configuration automatically.
+- `external_controller` SHOULD listen on loopback;
+- `secret` SHOULD be non-empty;
+- UI downloads, TLS, updates and access control are the user's responsibility.
+
+**`fluxd check` warns about an unsafe controller or an empty secret; it does not
+refuse to start, and it never edits the configuration.** The distinction is §23's:
+an unsafe control port is a diagnosable difference of intent, visible in `status`
+and correctable by the user, not an undiagnosable failure. Refusing would also
+make Flux the arbiter of a decision inside sing-box's own authority (§9.6).
 
 ---
 
@@ -146,20 +191,23 @@ Flux does not package a WebUI or manage zashboard. If a user configures `experim
 | `fluxd daemon` | Foreground reactor; `start` and `run` are aliases |
 | `fluxd status [--json]` | Human-readable or raw JSON status |
 | `fluxd check` | Read-only validation of configuration, package resolution, and engine configuration |
-| `fluxd enable` | Delete runtime `disable` and request convergence |
+| `fluxd enable` | Delete the module-directory `disable` and request convergence |
 | `fluxd disable` | Create `disable`, publish inactive, and stop the engine |
 | `fluxd reload` | Process the policy and engine candidate separately |
 | `fluxd stop` | Publish inactive, stop the child, and exit the daemon |
 | `fluxd bugreport` | Generate a diagnostic ZIP |
 | `fluxd version` | Version, ABI magic, and build information |
+| `fluxd subscribe` | Fetch the subscription once and rotate if the result differs (§28.7) |
 
-Version 0.9.1 has no `explain`, `watch`, or `subscribe`. Documentation MUST NOT show commands that do not exist.
+There is no `explain` and no `watch`: `status` is made complete and honest first, and an explainer built on an incomplete status would explain the wrong thing. **Documentation MUST NOT show a command that does not exist.**
 
 ### 27.3.2 Socket interface
 
-`/data/adb/flux-rs/run/control.sock` is a root-only `SOCK_SEQPACKET` with mode 0600, carrying six idempotent requests: `status/check/enable/disable/reload/stop`.
+`/data/adb/flux-rs/run/control.sock` is a root-only `SOCK_SEQPACKET` with mode 0600, carrying seven idempotent requests: `status`, `check`, `enable`, `disable`, `reload`, `stop` and `subscribe`.
 
-Version 0.9.1 has no separate `wire_version`. Responses already include the product `version` and `abi_magic`, and the CLI is currently the only real client; design an actual compatibility policy when a second independent client exists.
+Idempotence is load-bearing rather than incidental: because replaying a request produces the same result as issuing it once, the protocol needs no request-id deduplication cache (§10.3). **A new command MUST preserve that property.**
+
+There is no separate `wire_version`. Responses already carry the product `version` and `abi_magic`, and the CLI is the only real client; a compatibility policy gets designed when a second independent client exists, not in anticipation of one.
 
 ### 27.3.3 The minimum `status` must report
 
@@ -175,15 +223,27 @@ Human-readable output MUST include at least:
 
 `Active` requires the engine generation to be committed, `control.active=1`, and at least one physical capture interface to be active. When the last active interface disappears, the top-level state becomes `Inactive`; if only part of the coverage is lost, it remains `Active` and explains the loss in per-interface status.
 
-In JSON, `ifaces[].pref` is the preference actually occupied by that interface's capture filter, selected per interface; it MUST NOT be cached as a device-wide constant. Under R091-05, the existing `first_applicable` field means "reachability has been verified and the preceding snapshot has not drifted," not "the first classifier in the dump":
+In JSON, `ifaces[].pref` is the preference actually occupied by that interface's
+capture filter, selected per interface (§8.5.3). **It MUST NOT be cached as a
+device-wide constant** — on one device cellular and Wi-Fi can differ.
+
+The field naming reachability is `reachable`, and it is **tri-state: absent is
+not `false`**.
 
 | Value | Meaning | Human-readable output |
 |---|---|---|
-| Absent (`None`) | No conclusion yet: `flx_verify` has no result, or even the dump failed | `reachability unverified` |
-| `true` | Liveness verification received a packet, or an existing owned filter passed the identity + preceding-snapshot review | `reachable` |
+| absent | No conclusion yet: `flx_verify` has no result, or the dump itself failed | `reachability unverified` |
+| `true` | Liveness verification saw a packet, or an existing owned filter passed the identity and preceding-snapshot review | `reachable` |
 | `false` | Definitively unreachable: chain shadowing, identity drift, or attach failure | `not reachable` |
 
-Human-readable output consistently uses the reachable / reachability terminology and MUST NOT contain "first applicable."
+The distinction between absent and `false` is what keeps "the user was not online
+during the window" from being reported as "a vendor filter is shadowing us"
+(§8.5.4). Collapsing them would make the most common benign case
+indistinguishable from the failure the check exists to find.
+
+Human-readable output uses the reachability wording throughout and **MUST NOT
+contain "first applicable"** — dump position never established this, and the
+earlier field name asserted that it did.
 
 ---
 

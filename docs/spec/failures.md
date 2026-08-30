@@ -2,7 +2,7 @@
 
 > Former Parts 23 and 24 of blueprint.md. **Section numbers are unchanged**: every §N.x here is the same §N.x cited throughout the repository (see AUTH-1.1).
 >
-> Audience: anyone looking up the meaning of an error code. This document projects 0.9.1; the normative contract is the frozen `docs/spec/blueprint.md` plus `docs/history/blueprint-0.9.1.md`, with the latter taking precedence in a conflict.
+> Audience: anyone looking up the meaning of an error code. The normative contract is `blueprint.md`, which is complete on its own.
 
 ---
 
@@ -31,9 +31,11 @@ Every possible failure point specifies **how it is detected, what action is take
 | A configured package does not exist | Table lookup misses after parsing | Reject the entire candidate configuration; **do not apply it partially** | `"selector_invalid"` + detail identifying the entry |
 | `appId` is out of range | Range check | Same as above | `"selector_invalid"` + detail |
 | Engine binary is missing (incomplete module installation / test environment) | `stat` the engine path | `Inactive`; do not enter the §9.4 transaction | `"engine_binary_missing:<path>"` |
-| `config/sing-box.json` is missing or unreadable | errno from `open` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
-| The user's sing-box.json fails to parse (non-UTF-8, invalid JSONC syntax) | `parse_jsonc` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_invalid"` + specific reason in warnings |
-| The user's sing-box.json fails validation (contains an inbound, uses a reserved tag, or is not an object) | `build_effective` in `flux-core` | Same as above | `"flux_config_invalid"` + specific reason in warnings |
+| `config/template.json` is missing or unreadable | errno from `open` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
+| The template fails to parse: non-UTF-8, or invalid JSONC syntax | `parse_jsonc` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_invalid"` + specific reason in warnings |
+| The template fails validation: declares an inbound, uses a reserved tag, or is not an object | `build_effective` in `flux-core` | Same as above | `"flux_config_invalid"` + specific reason in warnings |
+| Subscription fetch fails: DNS, TLS, HTTP status, timeout | the fetch itself | Keep the current generation; **retry when rtnetlink reports a usable default route**, never on a fixed interval (§29.4) | `"subscription_fetch_failed:<reason>"` |
+| Subscription content yields zero non-infrastructure outbounds | count after refinement (§28.4) | Refuse the candidate, keep the current generation | `"subscription_empty"` — an error page can be valid JSON and can pass `check` while containing no node |
 | `sing-box check` fails | Child exit code + stderr | Cold start: `Inactive`; hot update: retain the current generation | `"engine_check_failed"` + first several lines of stderr |
 | Engine fails to start | pidfd becomes readable immediately | Retry with backoff (1/2/4/8/30 s) | `"engine_exited:code=1"` |
 | The 4 sockets do not appear before the deadline | Timed-out SOCK_DIAG rechecks with backoff | Stop the candidate; `Inactive` | `"engine_not_ready:2/4 sockets"` |
@@ -42,7 +44,7 @@ Every possible failure point specifies **how it is detected, what action is take
 | No usable pref (1–3 are all occupied on `v4-*`) | Dump + §8.5.3 | Exclude that interface | `excluded(tc_no_usable_pref)` |
 | The acquired pref is shadowed by an earlier filter | §8.5.4 liveness verification: tx increases but `SAW_PACKET` does not | Exclude that interface and identify the shadowing filter | `excluded(tc_chain_shadowed)` |
 | No traffic during the liveness verification window | tx does not increase either | Retry with backoff; if there is still no traffic at the limit, permit activation and annotate it | `warn(tc_verify_no_traffic)` |
-| Flux filter reachability cannot be proven | Identity/relative-order checks + positive `flx_verify` liveness verification | Exclude that interface; MUST NOT exclude it merely because it is not the first dump entry | tx increases but the probe does not: `excluded(tc_chain_shadowed)`; identity/preceding-snapshot drift retains the compatibility token `excluded(not_first_applicable)`, whose name is no longer interpreted literally |
+| Flux filter reachability cannot be proven | Identity and relative-order checks plus positive `flx_verify` liveness verification | Exclude that interface. **MUST NOT exclude it merely because it is not the first dump entry** | tx increases while the probe does not: `excluded(tc_chain_shadowed)`; identity or preceding-snapshot drift: `excluded(identity_drift)` |
 | More than 64 candidate interfaces | Count | **Do not promote the entire new topology**; retain the current topology/Direct, and do not truncate by name | `"too_many_interfaces:71"` |
 
 ## 23.2 Runtime: already active
@@ -109,7 +111,7 @@ Every possible failure point specifies **how it is detected, what action is take
   },
   "policy": {
     "selected": 3, "draining": 1,
-    "bypass_v4": 12, "bypass_v6": 6,  // Fixed entries + user bypass_cidrs; excludes local addresses
+    "bypass_v4": 12, "bypass_v6": 6,  // RESERVED + POLICY prefixes; local addresses are separate
     "self_addresses": 4               // Total dynamic local addresses in the two exact HASH maps
   },
   "ifaces": [
@@ -117,10 +119,10 @@ Every possible failure point specifies **how it is detected, what action is take
       "entry": "flx_cap_l2", "status": "active",
       "prog_id": 118, "prog_tag": "a1b2c3d4e5f60718",
       "pref": 2,                       // Preference actually occupied on this interface; selected per interface
-      "first_applicable": true },      // Compatibility field: reachability verified; does not mean first in the dump
+      "reachable": true },             // Verified by flx_verify; never means first in the dump
     { "name": "rmnet_data0", "ifindex": 30, "arphrd": "rawip",
       "entry": "flx_cap_l3", "status": "admitted",
-      "pref": 2, "…": null },          // No first_applicable: liveness verification is not yet conclusive
+      "pref": 2, "…": null },          // reachable absent: liveness verification is not yet conclusive
     { "name": "v4-rmnet_data0", "ifindex": 31, "arphrd": "none",
       "status": "excluded", "reason": "clat_order_unverified" }
   ],
@@ -158,9 +160,9 @@ Four prefix classes support routing:
 | `*_failed` / `<syscall>:<errno>` | Operation failed and may be retryable | `prog_load:flx_cap_l2:EACCES` |
 | `excluded(<reason>)` | One interface is excluded while the others continue working | `excluded(tc_chain_shadowed)` |
 
-`not_first_applicable` is a compatibility token published in 0.9.0. Version 0.9.1 retains the encoding but narrows its meaning to "the attachment identity or a verified preceding-filter snapshot no longer holds"; human-facing text consistently says "unreachable/reverification required" and MUST NOT use the field name to claim that Flux has to be the first dump entry.
+`identity_drift` means the attachment identity, or a previously verified snapshot of the filters ahead of ours, no longer holds. It replaces the token `not_first_applicable`, whose name asserted something dump position never established. Human-facing text says "unreachable" or "reverification required", and **MUST NOT claim Flux has to be the first dump entry**.
 
-`ifaces[].first_applicable` is tri-state, and omission is meaningful: an absent field means no conclusion has been reached (`flx_verify` has no result yet, or the interface was never observed because of a condition such as `tc_dump_failed`); `true` means reachability has been verified; `false` means it was definitively found unreachable (shadowing, identity drift, or attach failure). **MUST NOT interpret absence as `false`.**
+`ifaces[].reachable` is tri-state, and omission carries meaning: an absent field means no conclusion has been reached — `flx_verify` has no result yet, or the interface was never observed because of a condition such as `tc_dump_failed`; `true` means reachability was verified; `false` means it was definitively found unreachable through shadowing, identity drift or attach failure. **Absence MUST NOT be read as `false`**, because that would report "the user was not online during the window" as "a vendor filter is shadowing us" — the benign case and the failure the check exists to find.
 
 ## 24.3 Warnings that MUST be produced
 
@@ -183,7 +185,7 @@ The opposite of zero observability is not "print more numbers"; it is to **perfo
 | `admit_* > 0` and `in_drop_assign > 0` | `"assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"` |
 | `admit_* > 0` and `in_drop_no_listener > 0` | `"packets reached the veth but no listener was found; engine may be restarting"` |
 | `egress_listener_miss > 0` and `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
-| `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"` |
+| `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check the [cidr] mode and list, and active"` |
 | All counters are 0 and `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
 | `drop_udp_frag > 0` | `"fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
 | `in_pass_established` is much greater than `in_assign_tcp` | Normal (one assign and many passes per connection). **Produce no hint**; this row exists only to prevent a false positive |
