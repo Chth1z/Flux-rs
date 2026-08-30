@@ -61,26 +61,33 @@ description=Transparent per-app proxying via eBPF and an unmodified official sin
 
 ```text
 /data/adb/modules/flux_rs/
-└── disable                          管理器拥有；唯一开关（§27.1.1）
+├── disable                          管理器拥有；唯一开关（§27.1.1）
+└── webroot/index.html               管理器那个按钮的跳转壳（§28.8）
 
 /data/adb/flux-rs/
-├── config/
+├── config/                          用户权威，Flux 永不反写
 │   ├── flux.toml
-│   └── sing-box.json
+│   ├── template.json
+│   └── *.txt                        被 @ 引用的列表文件（§27.2.2）
 ├── fluxd.log
-└── run/
+└── run/                             机器产物，随时可删可重建
     ├── daemon.lock
     ├── control.sock
-    └── effective-sing-box.<generation>.json
+    ├── subscription.raw
+    └── sing-box.<generation>.json
 ```
 
 **状态根下没有 `disable`。** 开关只有一个，在模块目录里，由 root 管理器创建和删除。
 
-- `config/flux.toml`：选择 app 与 CIDR bypass；
-- `config/sing-box.json`：用户拥有的完整官方 sing-box 配置；
-- `run/effective-*.json`：Flux 注入内部 TProxy inbound 后的一次性生成物，不是用户配置。
+**`config/` 下的都是你的，`run/` 下的都不是。** 这条边界是整个配置模型的全部内容：
 
-Flux 永不反写两份 authority file。安装或升级只在文件缺失时复制 `etc/default-flux.toml` 与 `etc/default-sing-box.json`。
+- `config/flux.toml`：选谁、哪些目的地直连、哪些接口、订阅参数；
+- `config/template.json`：sing-box 配置模板——DNS、路由规则、selector 骨架。**你编辑的是它**，不是引擎实际跑的那份；
+- `run/sing-box.<gen>.json`：由模板 + 订阅原文生成，每代一份，只读，换代即删。
+
+Flux 永不写 `config/` 下的任何文件。安装或升级只在文件缺失时复制 `etc/default-flux.toml` 与 `etc/default-template.json`。
+
+生成规则、订阅流水线与失败处置见 §28；**本节只描述边界，不重复那边的算法**。
 
 ### 27.2.2 `flux.toml` 唯一 schema
 
@@ -105,7 +112,7 @@ bypass_cidrs = [
 
 ### 27.2.3 bootstrap engine 配置
 
-包内路径是 `etc/default-sing-box.json`；仓库源文件是 `module/template.json`。它取自原版 Flux 的 `conf/template.json`，因此两个项目对用户是同一套形状：DNS 分流与 fakeip、`clash_mode` 规则、远程 rule-set、`PROXY`/`GLOBAL` 选择器。
+包内路径是 `etc/default-template.json`；仓库源文件是 `module/template.json`；装到设备上是 `config/template.json`。它取自原版 Flux 的 `conf/template.json`，因此两个项目对用户是同一套形状：DNS 分流与 fakeip、`clash_mode` 规则、远程 rule-set、`PROXY`/`GLOBAL` 选择器。
 
 默认值必须成立的四条性质（`cargo xtask template-check` 逐条检查，再用官方 sing-box 跑一次真实 `check`）：
 
@@ -185,7 +192,7 @@ JSON 里的 `ifaces[].pref` 是该接口 capture filter 实际占用的 preferen
 `fluxd bugreport` 默认生成脱敏 ZIP：
 
 - 包含 status、版本/ABI、root manager、有限日志尾部、网络/BPF 枚举和配置 shape；
-- 不包含原始 `flux.toml` 或 `sing-box.json`；
+- 不包含原始 `flux.toml`、`template.json` 或生成的 `sing-box.<gen>.json`；
 - 地址、接口敏感值默认稳定脱敏；
 - logcat 默认不含，`--with-logcat` 才显式加入并警告；
 - `--raw` 关闭地址脱敏并警告；
@@ -201,7 +208,7 @@ fresh install 的确定顺序：
 
 1. 安装器创建状态根和两份缺失的 bootstrap config；
 2. 在模块目录创建 `disable`，因此**装完模块在管理器里就是关的**，安装动作本身不捕获流量；
-3. 用户编辑 `config/flux.toml` 与 `config/sing-box.json`；
+3. 用户编辑 `config/flux.toml` 与 `config/template.json`；
 4. 运行 `fluxd check`；
 5. 检查通过后在管理器里打开这个模块（或运行 `fluxd enable`，两者写同一个文件）；
 6. 用 `fluxd status` 或管理器列表里的描述确认 engine 与逐接口 coverage。

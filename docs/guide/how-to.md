@@ -22,8 +22,12 @@
 
 | 文件 | 干什么 |
 |---|---|
-| `flux.toml` | 挑哪些应用走代理。带注释，照着填 |
-| `sing-box.json` | 代理本身的完整配置。安装时仅在缺失时复制模板，之后 Flux 永不改写 |
+| `flux.toml` | 挑哪些应用走代理、订阅地址。带注释，照着填 |
+| `template.json` | 代理配置的**模板**：DNS、路由规则、节点分组的骨架 |
+
+**你编辑模板，不编辑引擎实际跑的那份。** Flux 拿模板加上订阅内容，生成 `run/sing-box.<代数>.json` 交给 sing-box。`config/` 下的都是你的，Flux 永不改写；`run/` 下的都是机器产物，随时可以删掉重建。
+
+这样订阅更新才不需要你手工合并——填空和追加节点是 Flux 的活。
 
 ### 2. 自检
 
@@ -70,6 +74,10 @@ Transparent per-app proxying via eBPF and an unmodified official sing-box.
 
 Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用哪个服务器、按什么规则——由 [sing-box](https://github.com/SagerNet/sing-box) 负责，Flux **原封不动**用官方版本，不打补丁。
 
-订阅内容需要你先转换成完整的 sing-box 配置，再用 `fluxd check` 校验；Flux 永不自动替换它。要用外部控制面板，就在自己的配置里启用 `clash_api`——Flux 只要求控制器监听回环且 secret 非空。
+订阅在 `flux.toml` 的 `[subscription]` 里填地址就行，Flux 自己抓取、解析并填进模板的节点分组；`fluxd subscribe` 手动触发一次。抓回来的原始响应存在 `run/subscription.raw`，精修规则（排除公告条目、改名、剥 emoji、截断）都在 `flux.toml` 里，**改这些规则不需要重新联网**。
+
+更新永远先过官方 `sing-box check` 才部署，不过就保留当前配置并报错——订阅更新不会把你的网络搞没。
+
+要用外部控制面板，就在模板里启用 `clash_api`——Flux 只要求控制器监听回环且 secret 非空。管理器里那个按钮会跳过去，URL 自带 secret。
 
 哪些能力现在还没有、计划在后续版本做，以 [`../history/rejected-and-deferred.md`](../history/rejected-and-deferred.md) §21.0 的状态登记为准。

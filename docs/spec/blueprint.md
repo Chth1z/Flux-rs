@@ -2123,17 +2123,294 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 
 # 第 28 部分：订阅与配置生成
 
-> **本部分是 0.9.5 新开的编号**，折叠 R092-01、R092-05 与 R092-08。C11（订阅）已由所有者于 2026-08-30 从延期转入本版范围；C8（Flux 自建 WebUI）与 C10（开箱即用控制面）**仍然延期**，见 `../history/rejected-and-deferred.md` §21.0。
+> **New numbering in 0.9.5**, folding R092-01, R092-05 and R092-08. C11
+> (subscription) moved from deferred into scope with the owner's confirmation on
+> 2026-08-30. C8 (a Flux-built WebUI) and C10 (an out-of-the-box control plane)
+> **remain deferred** — see `../history/rejected-and-deferred.md` §21.0.
 
-**留空待写。** 本部分将规定：模板 + 订阅原文 → 生成 `sing-box.<gen>.json` 的流水线、`fluxd subscribe` 的合同、缓存与原子替换、以及 `webroot` 重定向外壳的边界。
+## 28.1 Who owns which file
+
+The engine config is **generated**, not owned. The user edits a template; Flux
+produces the file sing-box actually runs, and rebuilds it whenever an input
+changes.
+
+| Path | Owner | Notes |
+|---|---|---|
+| `config/flux.toml` | user | Flux's own behaviour: who is selected, what bypasses, which interfaces, subscription parameters |
+| `config/template.json` | user | sing-box config template: DNS, route rules, selector skeleton |
+| `config/*.txt` | user | list files referenced by `@` (§11.2) |
+| `run/subscription.raw` | machine | the **raw** subscription response, the only network artifact |
+| `run/sing-box.<gen>.json` | machine | one per generation, read-only, deleted on rotation |
+
+Flux MUST NOT write to any user-owned path. It MUST NOT edit `template.json` in
+place, and it MUST NOT treat a generated file as an input on the next run.
+
+`config/template.json` carries the same name and meaning as `Flux-original`'s
+`conf/template.json`, so a cross-reference between the two projects needs no
+explanation. **`Flux-original`'s `config.json` is a machine artifact**, and this
+project deliberately does not reuse that name for a user-owned file: one name
+meaning opposite things across two closely related projects is worse than a
+slightly longer one.
+
+The 0.9.0 name `effective-sing-box.<gen>.json` becomes `sing-box.<gen>.json`.
+The file lives in `run/`, so "effective" carried no information.
+
+### 28.1.1 Why the user does not own the engine config
+
+0.9.1 had this relationship backwards: it copied the template once at install
+time and handed ownership of the result to the user. The consequence only became
+visible on a real device — applying a subscription update meant merging it into
+the user's file **by hand with `jq`**. A step that must happen on every
+subscription refresh, performed manually, is a missing product feature rather
+than a workflow.
+
+The reference implementation resolves it the other way and has for years:
+`Flux-original`'s `scripts/updater.sh:139-149` (Phase C) takes the template,
+fills each empty selector with the matching regional group, appends the refined
+nodes, and writes the runtime config. The user edits only the template.
+
+## 28.2 Generation is a pure function
+
+```
+template.json  +  subscription.raw  +  flux.toml refinement rules
+  → sing-box.<gen>.json
+```
+
+Generation MUST do exactly two things, matching `updater.sh` Phase C:
+
+1. **Fill.** Every `selector` or `urltest` in the template whose `outbounds` is
+   an empty array is filled with the regional group its tag matches. Tags
+   `PROXY`, `GLOBAL` and `AUTO` are filled with every node.
+2. **Append.** The refined nodes are appended to `outbounds`.
+
+Everything else MUST pass through byte for byte.
+
+That last sentence is a testable claim, not a statement of intent: **substitute
+the template's `outbounds` back into the generated file and the result MUST be
+deeply equal to the template.** An implementation that reorders keys, drops a
+comment-stripped field, or normalises a number fails it. This test is required
+(§15.2).
+
+### 28.2.1 Subscription parameters
+
+These live in `flux.toml` and belong to its schema (§11.2); their meaning is
+defined here, where it is used, so that neither section restates the other.
+
+```toml
+[subscription]
+url = ""
+interval = 86400          # seconds; 0 = manual refresh only
+timeout = 10
+retries = 2
+exclude_pattern = "(expire|traffic|官网|到期|流量|剩余|套餐|重置|联系|群组|通知|平台|网站|时间|建议|反馈|版本|更新)"
+rename = [
+  { match = "【(亚洲|北美洲|欧洲|南美洲|非洲|大洋洲|南极洲)】", replace = "" },
+]
+strip_emoji = true
+max_tag_length = 32
+```
+
+An empty `url` disables subscription entirely: no fetch, no timer, and
+`run/subscription.raw` is never created. That is the default, so a fresh install
+makes no network request of its own.
+
+## 28.3 Subscription input formats
+
+Two, distinguished **by content**, never by file extension, URL suffix or the
+`Content-Type` header:
+
+- **Already sing-box JSON** — take `.outbounds`. Measured: providers return a
+  complete config when the request carries a `sing-box` user agent.
+- **Base64-encoded URI list** — decode, then parse each line as `vmess`,
+  `vless`, `trojan`, `hysteria`, `hysteria2`, `tuic`, `ss`, `socks`, `http` or
+  `snell`.
+
+URI parsing MUST live in `flux-core`: pure logic, no libc, no syscalls.
+It therefore has unit tests that run on any development host with no device and
+no network. This is a direct improvement on the reference implementation, which
+hand-writes a base64 decoder, a URL decoder and a JSON field extractor in awk
+(`updater.sh:175-245`) — in Rust all three are library calls, and every
+hand-rolled version of them is a source of defects.
+
+## 28.4 Node refinement
+
+Fixed order, matching `updater.sh` Phase A/B:
+
+1. drop infrastructure types (`selector`, `urltest`, `direct`, `block`, `dns`);
+2. discard entries matching `exclude_pattern`;
+3. rewrite tags by the `rename` rules;
+4. optionally strip emoji;
+5. normalise multiplier notation (`$2.0`, `2.0倍率`, `2.0X` all become `2.0x`)
+   and collapse runs of whitespace;
+6. truncate to `max_tag_length`;
+7. group by region regex, for the fill step of §28.2.
+
+**Step 2 is the one that earns its place.** Providers put announcements —
+expiry dates, traffic quotas, contact links — into the node list as fake
+outbounds. Without this step the user's selector fills up with entries that can
+never connect, and every one of them looks like a node.
+
+Generation MUST fail when the refined non-infrastructure outbound count is zero.
+A fetch that returned an error page can still be syntactically valid JSON and
+can still pass `sing-box check`, while containing no node at all; the count is
+what distinguishes the two.
+
+## 28.5 The cache holds the raw response
+
+`run/subscription.raw` stores the response exactly as received, **before**
+refinement.
+
+The refinement rules (`exclude_pattern`, `rename`, `strip_emoji`,
+`max_tag_length`) live in `flux.toml`, so editing them is a purely local
+operation. Caching the refined output would force a network round trip to see
+the effect of a local edit, which fails offline and is slow when it does not.
+Keeping the raw copy also keeps the network artifact single-purpose: exactly one
+file in the tree came from the network, which matters for both diagnosis and
+trust.
+
+## 28.6 A subscription update must never take the network down
+
+The transaction is the three-stage form of `updater.sh:421-450`, joined to the
+existing engine candidate switch (§9.4):
+
+1. the merged result MUST pass the official `sing-box check` before anything is
+   deployed; on failure the current generation is kept and the error reported;
+2. deployment is a backup plus an atomic `rename`;
+3. if the new content is identical to the current generation, skip the rotation
+   entirely rather than restarting the engine for no reason.
+
+This is not a new guarantee. §9.4 already requires it of every candidate switch;
+subscription refresh is simply routed through the same transaction rather than
+being given a path of its own.
+
+## 28.7 `fluxd subscribe`
+
+Triggers one fetch and, if it produces a different result, one rotation.
+
+It is the first CLI command added since R091-11 froze the set, and it is added
+for the reason that freeze allowed: there is now an implementation behind it.
+Refresh is otherwise driven by the timer of §29.3 and by network recovery,
+never by polling.
+
+## 28.8 `webroot` is a redirect, not a UI
+
+`Flux-original`'s `webroot/index.html` is 12 lines that redirect to
+`http://127.0.0.1:9090/ui/`. **It is not a WebUI.** It is the target of the
+button the root manager shows next to a module, and it lands on sing-box's own
+`clash_api` interface.
+
+C8 defers *a Flux-built WebUI*. A redirect shell is not that, and its cost is
+close to zero, so it ships while C8 stays deferred. Two improvements over the
+reference:
+
+- the redirect URL carries the secret generated at install time, so the user
+  does not have to type it;
+- when `check` finds no `clash_api` configured, the page says so instead of
+  redirecting into a connection failure.
+
+`webroot/index.html` joins the packaging allowlist (§13.1). Flux still enables
+no control port by default (§27.2.3), so on a default install this page explains
+rather than redirects.
 
 ---
 
 # 第 29 部分：条件激活
 
-> **本部分是 0.9.5 新开的编号**，折叠 R092-07。
+> **New numbering in 0.9.5**, folding R092-07 and the automation half of
+> R092-06.
 
-**留空待写。** 本部分将规定：以 SSID 等网络条件驱动激活/停用的机制，其事件来源（nl80211）、去抖、以及它与 §26 顶层状态机的关系。
+## 29.1 The SSID dimension
+
+Some networks do not want proxying: the home or office network the user already
+trusts. `box_for_magisk` covers this with `use_ssid_matching`,
+`use_wifi_list_mode` and `wifi_ssids_list` (`settings.ini:204-212`).
+
+```toml
+[ssid]
+mode = "blacklist"        # blacklist = do not activate on a listed SSID
+list = ["MyHome", "@ssid.txt"]
+```
+
+This is the fourth dimension to reuse the same allow/deny idiom of §11.2, with
+the same `@file` reference and the same meaning for an empty list. A user who
+has understood one of them has understood all four, which is the point of
+spending a fourth dimension on the same shape rather than inventing a switch.
+
+## 29.2 SSID comes from nl80211, never from binder
+
+Flux MUST read the SSID over generic netlink (`NL80211_CMD_GET_INTERFACE`). It
+MUST NOT call into binder and MUST NOT shell out to `dumpsys`.
+
+The reasoning is the same one that rejected `cmd package` in D8: binder may not
+be up during `late_start`, so depending on it introduces a start-ordering
+dependency and a retry state machine — two mechanisms bought for one field.
+Flux already speaks netlink, so another generic netlink family is the capability
+it has, not a new one. This is a case where the design can be **cleaner than the
+reference implementation** rather than merely equivalent to it.
+
+SSID changes are themselves events: the `NL80211_CMD_CONNECT` and
+`NL80211_CMD_DISCONNECT` multicast groups. Nothing here polls.
+
+## 29.3 A one-shot timer is not polling
+
+§10.1 forbids periodic polling. Subscription refresh (§28.7) arms a timerfd for
+`interval` seconds and re-arms it on expiry, which needs to be reconciled with
+that rule explicitly rather than left to the reader.
+
+The prohibition targets health probes: waking every N seconds to ask whether
+something is still true. A refresh timer asks nothing. It performs an action the
+user configured, at a time the user chose, and with `interval = 0` no timer is
+armed at all. **Recorded as an explicit exception**, on those grounds.
+
+`cron` is not used. Android ships no `crond`; relying on busybox would add an
+external dependency and a second process, whereas a timerfd is already part of
+the reactor's event loop and costs nothing new.
+
+## 29.4 Retry on network recovery, not on a schedule
+
+A failed fetch MUST NOT start a fixed-interval retry loop. It waits for
+rtnetlink to report a usable default route, then retries.
+
+Offline, this attempts nothing at all; on reconnection it attempts immediately.
+Compared with backoff it is both faster and cheaper in power, and it consumes an
+event Flux is already subscribed to.
+
+## 29.5 Boundaries
+
+- SSID affects **whether Flux activates**, never what the policy contains. It is
+  an input to the top-level state of §26, not to the maps of §6.
+- When no Wi-Fi is connected, the dimension does not participate in the
+  decision. It is not treated as an empty SSID.
+- When the SSID cannot be read, Flux MUST treat it as matching no list entry,
+  MUST warn, and MUST NOT block activation. An unreadable SSID is a diagnosable
+  failure, not a reason to refuse to run (§23, PHIL-6).
+
+## 29.6 What the existing event sources already cover
+
+Flux has six event sources on one epoll: signalfd, inotify, rtnetlink, pidfd,
+ringbuf and timerfd. The automation below adds **no new mechanism** — each item
+connects an event already being watched to a behaviour the user can observe.
+
+| Automation | Event source |
+|---|---|
+| A newly installed app is picked up when `mode = "blacklist"` | inotify on `packages.list` |
+| Editing the template or a list file regenerates, validates and rotates | inotify on `config/` |
+| A failed fetch retries when the network returns | rtnetlink (§29.4) |
+| Scheduled subscription refresh | timerfd (§29.3) |
+| Interfaces appearing or disappearing are taken over or dropped | rtnetlink |
+| Local address changes are injected into the bypass set | rtnetlink |
+
+### 29.6.1 Two automations that are deliberately absent
+
+**Automatic latency-based node selection.** sing-box's `urltest` already does
+it. A second implementation would mean a second copy of "which node is usable"
+and a synchronisation problem between Flux and the engine.
+
+**A network watchdog that rolls back automatically.** §8.3 rejected this and the
+reasoning is unchanged: deciding whether the network is healthy requires active
+probing, which misjudges an offline or captive network, and **a rollback that
+misjudges turns the proxy off while the user is using it normally** — strictly
+worse than having none.
 
 ---
 
