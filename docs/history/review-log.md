@@ -1,8 +1,8 @@
 # 独立复核记录与更正对照
 
-> 原 blueprint.md 第 0 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
+> 原 blueprint.md 第 0 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 AUTH-1.1）。
 >
-> 谁读这份：有人质疑某条断言的依据时，来查它是源码、实测还是推理。本文是历史证据与更正记录，不单独创造当前产品要求；0.9.1 规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`。
+> 谁读这份：有人质疑某条断言的依据时，来查它是源码、实测还是推理。本文是历史证据与更正记录，不单独创造当前产品要求；0.9.1 规范性合同是冻结的 `docs/spec/blueprint.md` 加 `docs/spec/blueprint-0.9.1.md`。
 
 ---
 
@@ -356,19 +356,26 @@ dae 把 listener 放在**独立 netns `daens`** 里，所以回程必须再穿�
 
 ### 0.6.1 0.9.1 文档一致性更正（2026-08-29）
 
-0.9.0 蓝图保持冻结。以下更正的完整覆盖范围与验收条件见 `blueprint-0.9.1.md` 的冲突裁决登记表；这里仅保留“原说法 / 实际 / 处置”的历史索引。
+0.9.0 蓝图保持冻结。以下更正的完整覆盖范围与验收条件见 `../spec/blueprint-0.9.1.md` 的冲突裁决登记表；这里仅保留“原说法 / 实际 / 处置”的历史索引。
 
 | # | 原说法 | 实际 | 处置 |
 |---|---|---|---|
 | 9 | capture filter 必须是 dump 中 first-applicable | 前置 OEM filter 返回 `TC_ACT_UNSPEC` 时，后续 Flux filter 仍可达；Q10 已实证 | R091-05 改为身份/排序 + 正向存活验证，兼容字段只表示“已验证可达” |
 | 10 | 物理 `clsact` 缺失或被删后由 Flux 重建 | 物理 `clsact` 属于 netd；抢建会破坏所有权边界 | R091-05 改为 `netd_clsact_missing` 排除并等待 `RTM_NEWQDISC` |
 | 11 | disable/stop/uninstall 会同步拆除全部对象 | 当前实现先 inactive 并停 engine，同 boot 可保留精确自有对象；卸载后由重启清除非持久对象 | R091-09 明确同步承诺与不承诺事项 |
-| 12 | 0.9.x 有 subscription、默认 zashboard，且无 `action.sh` | 当前包含 `action.sh`，默认配置无远程内容；订阅命令不存在 | R091-03 冻结产品范围，不预建未来 seam |
+| 12 | 0.9.x 有 subscription、默认 zashboard | 默认配置无远程内容；订阅命令不存在 | R091-03 冻结产品范围，不预建未来 seam。（本行原本还断言"当前包含 `action.sh`"，已由下方第 19 行推翻） |
 | 13 | 配置存在多套路径、`bypass_v4/v6`、`bypass.files` 或 `.srs` 输入 | 当前 authority file 与 parser 只有 R091-04 的路径和 `apps`/`bypass_cidrs` schema | R091-04 统一路径、schema 与 fresh-install 状态 |
-| 14 | 逐文件 sidecar hash 与管理器版本资格矩阵是当前安装合同 | 当前发布路径是精确 15 文件 allowlist + 归档级 `SHA256SUMS`，安装器只做最小检查 | R091-12 对齐实际供应链边界 |
+| 14 | 逐文件 sidecar hash 与管理器版本资格矩阵是当前安装合同 | 当前发布路径是精确文件 allowlist + 归档级 `SHA256SUMS`，安装器只做最小检查 | R091-12 对齐实际供应链边界；文件数随第 19 行的 `action.sh` 移除变为 14 |
 | 15 | Phase 0 后的 Q3–Q8 仍待实现 | Phase 1–8 与对应设备测试均已进入仓库 | R091-13 以 `plan/implementation.md` §17.0 作为当前进度真相 |
 | 16 | 本地 socket 已独立版本化，CLI 含 `explain/watch/subscribe` | 现有 wire 无独立版本字段，当前 CLI 不含后三个命令 | R091-11 不为唯一 adapter 预建协议框架 |
 | 17 | 每个开发平台都无条件运行 `cargo test --workspace` | Windows 会编译到 Linux/Android-only device binaries，并在 `std::os::fd`/`libc` 处失败；CI 的完整 workspace 门在 Linux | R091-15 把 host-safe、Linux CI 与 Android device suite 分层，三层互不冒充 |
+| 18 | R091-03 初稿把 C8/C10/C11 写成 0.9.1 的范围结论，读起来像 agent 自行取消了这三项能力 | 这三项是 0.9.0 §21 的**所有者确认项**，移出交付范围属 GOV-1.2 的产品能力边界变化，不在 §1.1 的自决授权内 | 所有者 2026-08-29 确认：**WebUI、代理控制面默认体验、订阅转换三项都在后续版本做，0.9.1 不做**。R091-03 与 §21.1/§22.2 改写为"已确认的延期项"而非范围永久收缩；仍禁止现在预建 seam |
+| 19 | 运行时开关是 `/data/adb/flux-rs/disable`，与管理器的模块开关"互不相干"；管理器开关只能下次启动生效，于是需要 `action.sh` 提供一个即时按钮 | 参考实现 `Flux-original` 用 `inotifyd` 直接监听**管理器自己的**模块目录（`flux_service.sh:57`、`dispatcher:187-190` 的 `disable:d`→start / `disable:n`→stop），管理器开关因此当场生效，整个项目没有 `action.sh`。两个 disable 文件是自造的解释负担，而 `action.sh` 是为绕开它引入的第三个入口，还额外背上 Magisk v28+ 的依赖 | 所有者 2026-08-29 确认改用原版模型：**开关合并为 `/data/adb/modules/flux_rs/disable`**，`fluxd` 的既有 inotify 改watch 模块目录；删除 `action.sh`（allowlist 15→14）；`fluxd enable/disable` 写同一个文件；fresh install 由 `customize.sh` 在 `$MODPATH` 建 `disable`，装完即在管理器里显示为禁用。见 R091-03、R091-04 |
+| 20 | `module.prop` 的 `description=` 由 `action.sh` 在按钮被按下时刷新 | 状态显示不该依赖用户按按钮：不按就永远是旧值。原版由守护进程在每次状态转移时 `sync_prop`（`scripts/log:104-152`），并且做了去重、幂等剥离和 mktemp+`mv` 原子替换三件事 | `fluxd` 每次事件循环唤醒后重写，渲染结果不变则不写；剥离与合成逻辑放在 `flux-core::version` 以便任意主机测试（R091-15）。写失败只丢状态显示，不影响 daemon |
+| 21 | 默认 `sing-box.json` 必须是"只有 direct outbound + final + 两条规则"的极简形状 | 所有者要求与原版 Flux 对齐。极简形状本身没有保护任何不变量；真正必须成立的是"不抢 inbound、不开控制端口、每个 selector 能解析、fakeip 不落在固定 bypass 里"四条 | 模板改用原版形状，`xtask` 的校验从枚举允许的键改为检查这四条性质加两条路由规则（R091-03） |
+| 22 | 原版模板的 fakeip `inet6_range: fc00::/18` 可以直接用 | `FIXED_BYPASS_V6` 含 `fc00::/7`（ULA 属私网，必须直连），`fc00::/18` 整个落在里面。IPv6 fakeip 会被判 bypass 走直连，DNS 正常、应用连得上、什么都打不开——D21 的 v6 翻版 | 模板改用 `2001:db8:f::/48`，与 `checks.rs` 既有测试用的已知良好值一致；`fluxd check` 的 `fakeip_bypass_overlap` 本来就会拒绝原值 |
+
+首次真机端到端验证的完整记录见 §0.6.4。
 
 ### 0.6.2 三条附带的平台事实
 
@@ -387,3 +394,23 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 值得单独说的是**为什么这条证据强**：同一次测量的对照组（:443）显示各 app 逐一正确归属，所以 :53 的结果不是孤立巧合，而是整条 UID 归属路径在这台设备上都准。源码分析预测了什么，实测就看到了什么。
 
 同时实测暴露了一个源码分析**没有覆盖**的边界：`private_dns_mode` 的**默认值是 `opportunistic`**，语义是"先试 DoT，上游拒绝才回落明文"。所以可捕获的 DNS 量**取决于对端 DNS 服务器**，不取决于我们。这不是缺陷而是边界（§1.3.3 边界①），但它意味着**同一份配置在两个网络上的 DNS 行为可以完全不同**，`status` 必须让用户看得出来。
+
+### 0.6.4 首次真机端到端验证（2026-08-29，SM-S9180 / 5.15.211 / KernelSU 3.2.5）
+
+0.9.1 合同第一次在真实设备上跑通完整数据路径，用的是产品本身而不是探针：模块 ZIP 安装 → 真实机场订阅转成 authority file → 五个选中 app 的流量经官方未修改 sing-box 出网。
+
+| 断言 | 实测结果 |
+|---|---|
+| 动态 per-interface pref，避开 1 | `rmnet_data0/1/8` 与 `wlan0` **全部取 pref 2** |
+| Q10：三星 `semUidBPF` 占 pref 1 不遮挡后续 filter | `wlan0` 在 Samsung pref 1 之后取 pref 2，`flx_verify` 判定 **reachable**。**这是产品自身而非探针的首次实证** |
+| `ifaces[].pref` 与三态 `first_applicable`（R091-05） | status 逐接口输出 `pref 2` 与 `reachable` / `reachability unverified` |
+| 两个不同随机 listener 端口（R091-08） | 每代候选各抽一对，如 `62909/61793`、`61786/65467` |
+| 动态 self-address 注入 | 收敛过程中 9 → 12 条，随接口地址变化 |
+| `bpf_sk_assign` 无泄漏 | `tcp 36 captured / assigned 36`、`udp 40 captured / assigned 40`，**捕获数与 assign 数逐一相等** |
+| engine 候选失败不改变顶层承诺 | 配置有误时连续 14 代候选失败，顶层稳定 `Inactive` + 精确 `engine_exited:code=1`，backoff 正常，从未谎报 Active |
+| `module.prop` 实时状态（R091-04） | 依次显示 `🤯 [Inactive] engine_exited:code=1` → `🥰 [Active] gen 18 · 5 apps · rmnet_data0, rmnet_data1, rmnet_data8, wlan0` |
+| 官方 engine 收到原始目的 | engine 日志 `inbound/tproxy[flux-in-v4]: inbound connection from 192.168.128.135:51072`，随后 `outbound/hysteria2[香港01]` |
+
+**暴露的一个真实缺口**：`fluxd check` 通过不代表 engine 能启动。`sing-box check` 接受了 `detour` 指向裸 direct outbound 的 DNS server，`start` 阶段却拒绝（`detour to an empty direct outbound makes no sense`）。Flux 的处置是正确的——候选失败、保持 `Inactive`、报出精确原因、按 backoff 重试——但文档不能把 `check` 说成"通过就一定能跑"，`check` 是**配置合法性**门，不是启动保证。
+
+**第二个缺口**：fresh install 落地为"管理器里已禁用"，而被禁用的模块不会执行 `service.sh`，所以没有 daemon 在监听开关。**首次启用因此仍需重启一次**；此后的开关才即时生效。`customize.sh` 必须说清这一点。

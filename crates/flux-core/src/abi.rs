@@ -202,7 +202,7 @@ pub const SEC_VERIFY: &str = "tc/egress";
 /// fixed set of section names for `BPF_PROG_TYPE_SCHED_CLS`, and an object using
 /// anything else cannot be loaded by `bpftool` at all -- which would cost the
 /// project its cheapest verifier gate. Measured on the baseline in
-/// `docs/verification/phase0.md` §16.7: `tc`, `classifier`, `tc/ingress`,
+/// `docs/history/phase0.md` §16.7: `tc`, `classifier`, `tc/ingress`,
 /// `tc/egress` and `tcx/egress` all load and attach through legacy tc, any
 /// `<prefix>/<custom>` form fails to load, and `action` loads as `SCHED_ACT`
 /// and then cannot attach.
@@ -254,7 +254,7 @@ pub const TC_HANDLE_VERIFY: u32 = 0x3;
 /// SM-S9180 / Android 16, Samsung's `semUidBPF` already holds chain 0 /
 /// pref 1 / handle 0x1 / protocol all on `wlan0`'s clsact egress, and `tc`
 /// preferences start at 1, so there is no way to order ahead of it there.
-/// See 0.9.0 `docs/blueprint.md` §8.5.3 as corrected by R091-05.
+/// See 0.9.0 `docs/spec/blueprint.md` §8.5.3 as corrected by R091-05.
 pub const TC_PREF_PREFERRED: u16 = 2;
 
 /// The `tc` floor. Used only when no higher preference can satisfy the

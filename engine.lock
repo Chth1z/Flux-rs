@@ -5,7 +5,7 @@
 # digests below and refuses to package on any mismatch.
 #
 # The blueprint's data-plane contract was verified line by line against
-# SagerNet/sing-box v1.13.19; see docs/blueprint.md §0.5.1 and §9. In particular
+# SagerNet/sing-box v1.13.19; see docs/spec/blueprint.md §0.5.1 and §9. In particular
 # that revision sets only SO_REUSEADDR, IP_TRANSPARENT/IPV6_TRANSPARENT and
 # IP_RECVORIGDSTADDR/IPV6_RECVORIGDSTADDR on its tproxy listener, and never
 # SO_REUSEPORT -- which matters because bpf_sk_assign() rejects a reuseport
@@ -41,7 +41,7 @@ license_path_in_archive = "sing-box-1.13.19-android-arm64/LICENSE"
 # Measured, not assumed: all four PT_LOAD segments of the official aarch64
 # binary are 0x1000 aligned. Flux therefore cannot claim 16 KiB base-page
 # support on the strength of the engine alone; fluxd itself is built with
-# p_align >= 0x4000 and the gap is documented in docs/blueprint.md §3.8 and
+# p_align >= 0x4000 and the gap is documented in docs/spec/blueprint.md §3.8 and
 # §22.2. Re-measure on every version bump.
 max_load_p_align = "0x1000"
 

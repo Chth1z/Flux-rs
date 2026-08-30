@@ -1,8 +1,8 @@
 # Architecture
 
 This is the short 0.9.1 orientation. The binding contract is the frozen
-[`blueprint.md`](blueprint.md) baseline plus
-[`blueprint-0.9.1.md`](blueprint-0.9.1.md); the 0.9.1 delta wins where it
+[`../spec/blueprint.md`](../spec/blueprint.md) baseline plus
+[`../spec/blueprint-0.9.1.md`](../spec/blueprint-0.9.1.md); the 0.9.1 delta wins where it
 explicitly amends the baseline.
 
 ## Shape
@@ -75,7 +75,7 @@ repository's over-design review: raw netlink message construction lives only in
 `nlmsghdr`.
 
 The four deep modules are policy, dataplane, engine, and reactor. Their
-interfaces are defined in `blueprint-0.9.1.md` R091-14; no public trait is
+interfaces are defined in `../spec/blueprint-0.9.1.md` R091-14; no public trait is
 introduced for a single implementation.
 
 ## Failure semantics
@@ -115,5 +115,5 @@ interface remains active, global `active` is untouched; if the last active
 interface disappears, Flux publishes inactive but may keep the ready engine
 waiting. Flux never creates a physical-interface `clsact`. Escalating every
 single-interface drift to a global transaction would blip unrelated proxied
-flows on every Wi-Fi reconnect. See `blueprint.md` §8.5.1 as amended by
+flows on every Wi-Fi reconnect. See `../spec/blueprint.md` §8.5.1 as amended by
 R091-05 and R091-10.

@@ -1,8 +1,8 @@
 # 被拒方案、延期项与待确认事项
 
-> 原 blueprint.md 第 19、21、22 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
+> 原 blueprint.md 第 19、21、22 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 AUTH-1.1）。
 >
-> 谁读这份：有人提议「为什么不做 X」时，来查 X 是否已被评估过。本文保留 0.9.0 的决策历史，并投影 0.9.1 的当前处置；规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`。
+> 谁读这份：有人提议「为什么不做 X」时，来查 X 是否已被评估过。本文保留 0.9.0 的决策历史，并投影 0.9.1 的当前处置；规范性合同是冻结的 `docs/spec/blueprint.md` 加 `docs/spec/blueprint-0.9.1.md`。
 
 ---
 
@@ -70,12 +70,12 @@
 | **C3** | 内核基线 | `5.15`。首发 Android 12 设备不在支持范围 |
 | **C4** | Phase 0 设备 | SM-S9180（Android 16 / **5.15.211** / KernelSU）。它恰好就是基线内核，且实测发现**Android 版本与内核版本解耦**（升级机型），这本身成了 §16.3.5 的关键论据 |
 | **C5** | 控制协议编码 | SEQPACKET 上的单行 JSON。0.9.1 只有 CLI 一个真实客户端，不新增独立 `wire_version` 或未来 UI registry（R091-11） |
-| **C6** | 文档语言 | 中文为主、专有名词保留英文（`authoring.md` §6）。文档已按读者拆分（`docs/README.md`） |
+| **C6** | 文档语言 | 中文为主、专有名词保留英文（AUTH-6）。文档已按读者拆分（`docs/README.md`） |
 | **C7** | **是否给 sing-box 打补丁** | **不打**（D19）。永久使用官方未修改二进制 |
-| **C8** | WebUI | 0.9.1 不包含 Flux WebUI，也不默认托管或下载第三方 UI（R091-03） |
-| **C9** | 开关机制 | `disable` 文件是唯一状态；包含 `action.sh`，它只调用现有 `enable`/`disable`，不保存第二份 toggle（R091-03） |
-| **C10** | 代理控制面 | 默认配置无 `clash_api`、zashboard 或远程内容；用户可在自有配置中启用回环 + secret 的 `clash_api`（R091-03） |
-| **C11** | 订阅 | 0.9.1 不做订阅、转换或自动替换用户配置；只有出现第二个真实配置来源时才设计 seam（R091-03、R091-14） |
+| **C8** | WebUI | **后续版本做，0.9.1 不做**（所有者 2026-08-29 确认）。0.9.1 不包含 Flux WebUI，也不默认托管或下载第三方 UI（R091-03） |
+| **C9** | 开关机制 | **管理器自己的模块开关**（`/data/adb/modules/flux_rs/disable`）是唯一状态，`fluxd` 用 inotify 监听它，当场生效不需重启；无 `action.sh`，无第二个开关文件。`module.prop` 的 `description=` 由 `fluxd` 重写作状态显示（所有者 2026-08-29 确认，R091-04） |
+| **C10** | 代理控制面 | **后续版本做，0.9.1 不做**（所有者 2026-08-29 确认）。0.9.1 默认配置无 `clash_api`、zashboard 或远程内容；用户可在自有配置中启用回环 + secret 的 `clash_api`（R091-03） |
+| **C11** | 订阅 | **后续版本做，0.9.1 不做**（所有者 2026-08-29 确认）。目标形态是类似 `Flux-original` 的订阅转换（URI 列表 → outbound）；0.9.1 不做订阅、转换或自动替换用户配置，也不为它预建 seam（R091-03、R091-14） |
 | **C12** | 诊断包是否含 `logcat` | **默认不含**，`--with-logcat` 显式开启并警告。理由：`logcat -b all` 含通知内容、Wi-Fi BSSID（可定位）、蜂窝小区、账号名、其它应用自己打的日志，且**无法脱敏**——那是几千个应用产生的无结构文本。Android 自己把 `READ_LOGS` 定为 signature 级权限正是因为这个 |
 
 ### 定稿状态
@@ -86,7 +86,7 @@
 - 已无任何已知的、能推翻主路线的技术未知项。
 - 清库重建**已执行**，不再需要第二次授权。
 
-仍然成立的约束：Phase 0 断言失败若需要改全局系统语义或放弃某类设备，属**范围变更**，回 `governance.md` §1.2 找所有者。
+仍然成立的约束：Phase 0 断言失败若需要改全局系统语义或放弃某类设备，属**范围变更**，回 GOV-1.2 找所有者。
 
 ---
 
@@ -109,12 +109,12 @@
 
 | 项 | 为什么现在不做 | 将来插进哪个 seam（不改动其它模块） |
 |---|---|---|
-| 远程 subscription | 引入 HTTP/TLS 信任面、重试、节点合并和第二配置来源；0.9.1 明确不做，也绝不自动替换用户配置 | 等第二个真实配置来源出现后，围绕“输入 → candidate → 用户确认/promotion”重新设计；当前不预建 `subscribe` 命令、trait 或 schema registry |
+| 远程 subscription | 引入 HTTP/TLS 信任面、重试、节点合并和第二配置来源；**所有者已确认后续版本要做**（C11），0.9.1 不做，也绝不自动替换用户配置 | 开工那个版本时围绕“输入 → candidate → 用户确认/promotion”设计，领域知识取自 `Flux-original`；当前不预建 `subscribe` 命令、trait 或 schema registry |
 | 热点 / tethering / LAN 下游代理 | 分类依据从"socket UID"变成"源 IP/MAC"，是一条**新的捕获入口**，但复用同一套 veth + assign 机制 | 新增第三个 entry `flx_cap_lan`，attach 在下游 interface 的 **ingress**（不是 egress），按源 CIDR/MAC 判定后走同一个 `handoff()`。`flux_control` 加一张源 LPM map。ABI magic 随之 bump |
 | 被动入站 TCP（把手机当服务端） | 需要反向的 listener 归属与 NAT 语义，且不是"透明代理"这个产品的问题 | 无既有 seam。若真要做，属新产品线，不是升级 |
 | 分片 UDP 的续传 | 极罕见（QUIC 置 DF 并做 PMTU；DNS 超 MTU 会退 TCP）。0.9.0 的处置是 **drop 而非泄漏**（§7.3），语义已经正确，只是可用性差一点 | 在 `flux_decision` 之外加一张 `{sk, ip_id} → 决策` 的小 map，只在首片命中时写入。热路径不受影响 |
 | 多代理核心 / 多后端 | 一次 seam 失败换来长期双实现维护（§19） | 无 seam，且刻意如此 |
-| WebUI / 自有 Clash 代理层 | 重复造一层只增加攻击面；0.9.1 默认配置也不启用 `clash_api` | 用户若需要，可自行配置回环监听、非空 secret 与任意外部 UI；Flux 不下载、不托管 |
+| WebUI / 代理控制面默认体验 | **所有者已确认后续版本要做**（C8、C10）；0.9.1 默认配置不启用 `clash_api`，也不打包或下载任何 UI | 做那个版本时，第二个真实客户端出现会同时触发 R091-11 的协议兼容窗口；在此之前用户可自行配置回环监听 + 非空 secret 与任意外部 UI |
 | 管理器 App | 当前只有 CLI 一个 adapter，没有真实兼容需求 | 出现第二客户端时先定义兼容窗口，再显式升级协议；不能假称当前 wire 已版本化 |
 | 16 KiB base page | 由固定 engine 资产的 `p_align` 决定，不是我们能选的（§3.8） | 官方资产达到 `p_align >= 0x4000` 后改 `engine.lock` 与一处 page-size 判定 |
 | **TCX attach（6.6+）** | 见下方专门说明——它现在是**优先级最高的延期项**，因为它同时消灭两整类失败 | 在 §12.5 的 attach 层加一个分支：探测到 `BPF_LINK_CREATE` 支持 `BPF_TCX_INGRESS`/`BPF_TCX_EGRESS` 就用 link，否则回落 clsact filter。所有权谓词换成 link id。四个 BPF 程序与全部 map **一行不改** |

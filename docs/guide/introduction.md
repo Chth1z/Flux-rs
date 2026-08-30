@@ -1,6 +1,6 @@
 # Flux-rs 是什么
 
-写给用户看的 0.9.1 介绍。技术合同是 `blueprint.md` 加 `blueprint-0.9.1.md`，这里不展开实现。
+写给用户看的 0.9.1 介绍。技术合同是 `../spec/blueprint.md` 加 `../spec/blueprint-0.9.1.md`，这里不展开实现。
 
 > **当前状态：实现已进入预发布验证，尚无正式 0.9.1 发布。** 只有通过蓝图发布门禁并带签名 tag 的产物才算正式版本；不要把任意 CI artifact 或第三方重打包当作发布。
 
@@ -63,11 +63,19 @@ Flux 能连这一步一起代理。原理上有个不容易发现的细节：And
 ```
 $ fluxd status
 state:      Active
-engine:     running (4/4 sockets verified)
-policy:     3 apps selected
-interface:  rmnet_data0 active (reachable, pref 2)
-warning:    wlan0 excluded: tc_chain_shadowed
+generation: 7
+manager:    KernelSU 12118 (lkm)
+engine:     running (pid 4821, 4/4 sockets verified)
+            config run/effective-sing-box.7.json
+policy:     3 selected, 0 draining, 12 bypass v4, 6 bypass v6, 4 self addresses
+interface:  rmnet_data0 active (flx_cap_l3, pref 2, reachable)
+interface:  wlan0 excluded (flx_cap_l2, pref 2, not reachable, tc_chain_shadowed)
+traffic:    tcp 41 captured / 190 direct, udp 388 captured; assigned 41 tcp / 388 udp
+last error: none
+warning:    wlan0: tx increased while flx_verify did not; lower-pref filters: prog_semUidBPF_schedcls_egress_tsm_ether
 ```
+
+关键在最后三行：它区分了"蜂窝在工作"和"Wi-Fi 不工作，因为厂商程序把链终止了"，并且给出了占位者的名字。`reachable` 是实测结论——`flx_verify` 在真实发包窗口里收到了包；`not reachable` 表示网卡在发包而我们一个都没收到。
 
 `fluxd check` 负责区分配置错误；`status` 负责报告当前设备与接口事实；`bugreport` 生成默认脱敏、默认不含 logcat 的诊断包。0.9.1 不提供 `explain` 命令。
 
@@ -83,23 +91,37 @@ warning:    wlan0 excluded: tc_chain_shadowed
 
 装上之后，它会检查这台手机是否真的具备所需能力——**不是查版本号，而是实际去做一遍看能不能成**。做不到就明确告诉你哪一项做不到。
 
-### 三个文件
+### 两个配置文件，和你本来就会用的那个开关
 
-装完之后状态根里有：
+装完之后要编辑的只有两个文件，都在 `/data/adb/flux-rs/config/`：
 
 | 文件 | 干什么 |
 |---|---|
-| `config/flux.toml` | 你挑哪些应用。带注释，照着填 |
-| `config/sing-box.json` | 代理本身的完整配置。安装时仅在缺失时复制 bootstrap |
-| `disable` | **开关**。这个文件存在就是关，删掉就是开；运行时立即停止新流准入 |
+| `flux.toml` | 你挑哪些应用。带注释，照着填 |
+| `sing-box.json` | 代理本身的完整配置。安装时仅在缺失时复制一份模板 |
 
-用一个文件当开关，是因为它足够简单：文件在就是关，不在就是开，重启之后语义不变，不需要另外记一份"上次是开还是关"。
+**开关就是你 root 管理器里那个模块开关。** Flux 不另做一个：Magisk / KernelSU / APatch 在你拨动开关时会写一个文件，Flux 直接盯着那个文件，所以**关掉当场生效，不用重启**。管理器原本"下次启动不加载"的意思照旧成立，只是现在它同时也立刻停。
+
+因此也没有额外的 Action 按钮要点。命令行 `fluxd enable` / `fluxd disable` 改的是同一个文件，不会出现命令行和管理器界面各说各话。
+
+**装完是关着的，这是故意的。** 你会在管理器里看到模块显示为已禁用——不是装失败。先把上面两个文件填好，跑一次 `fluxd check`，再在管理器里打开它。
+
+### 状态直接显示在模块列表里
+
+不用开终端：管理器里这个模块的描述就是实时状态。
+
+```
+Transparent per-app proxying via eBPF and an unmodified official sing-box.
+🥰 [Active] gen 7 · 3 apps · rmnet_data0
+```
+
+出问题时它会说是哪一种问题，比如 `🤯 [Inactive] unsupported_lpm_trie_kernel:6.6.30`，或者 `😴 [Disabled] toggle this module on to enable Flux`。
 
 ### 代理部分交给成熟工具
 
 Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用哪个服务器、按什么规则、延迟多少——由 [sing-box](https://github.com/SagerNet/sing-box) 负责，它是这个领域成熟的工具，Flux **原封不动**地用官方版本，不打补丁。
 
-0.9.1 不打包 WebUI、不下载 zashboard，也不提供订阅转换命令。你可以在自己维护的 sing-box 配置里启用 `clash_api` 并使用外部 UI；Flux 只要求控制器监听回环且 secret 非空。订阅内容也应由用户先转换成完整 sing-box 配置，再用 `fluxd check` 校验；Flux 永不自动替换它。
+0.9.1 不打包 WebUI、不下载 zashboard，也不提供订阅转换命令——**这三项都计划在后续版本做，只是不在这一版**。现在你可以在自己维护的 sing-box 配置里启用 `clash_api` 并使用外部 UI；Flux 只要求控制器监听回环且 secret 非空。订阅内容也需要你先转换成完整 sing-box 配置，再用 `fluxd check` 校验；Flux 永不自动替换它。
 
 ---
 
@@ -117,14 +139,13 @@ Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用�
 
 **四、只按应用挑，不按网站挑。** "这个应用走代理"是 Flux 的事；"这个应用访问某个网站时走哪个服务器"是 sing-box 的事。别在 Flux 这边找按域名分流的开关。
 
-**五、出问题怎么办。** 从轻到重四条路，任何一条都不需要电脑：
+**五、出问题怎么办。** 从轻到重三条路，任何一条都不需要电脑：
 
-1. 建一个 `disable` 文件——立即停止新流准入并停 engine；内核对象留到 daemon 重建或设备重启。
-2. 在 root 管理器里禁用模块，重启。
-3. 卸载模块——脚本先停用、停止 daemon 并删除状态根，然后按管理器要求重启；重启后非持久内核对象消失。
-4. Magisk 安全模式 / KernelSU 关闭全部模块——**必定恢复**。
+1. 在 root 管理器里关掉这个模块——当场停止新流准入并停 engine，不用重启。内核对象留到 daemon 重建或设备重启。
+2. 卸载模块——脚本先停止 daemon 并删除状态根，然后按管理器要求重启；重启后非持久内核对象消失。
+3. Magisk 安全模式 / KernelSU 关闭全部模块——**必定恢复**。
 
-第 4 条是最终保证。你应该在装之前就知道它存在。
+第 3 条是最终保证。你应该在装之前就知道它存在。
 
 ---
 
@@ -132,13 +153,13 @@ Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用�
 
 | 不做 | 为什么 |
 |---|---|
-| 自己做代理控制面板或打包 WebUI | 避免增加下载信任面与第二套状态；用户可自行配置 sing-box `clash_api` |
-| 订阅转换/远程规则下载 | 不属于 0.9.1 数据面闭环，Flux 不反写用户配置 |
 | 自己实现代理协议 | 使用未修改的官方 sing-box |
 | 按网站/域名分流 | 那是 sing-box 的职责 |
 | 修改官方 sing-box | 用原版。改了就要为改动负责 |
 | 自动检测断网并回滚 | 判断"网络是否正常"需要主动探测，离线时会误判——一个会误判的自动回滚，比没有更糟，它会在你正常用的时候把代理关掉 |
 | 后台常驻通知 | 这是 root 模块，你是主动来找它的 |
+
+上面这些是长期不做的。**这一版还没做、但计划要做**的是另一回事：Flux 自己的 WebUI、开箱即用的代理控制面板，以及订阅链接的自动转换。它们不在 0.9.1 里，但在路线上。
 
 ---
 

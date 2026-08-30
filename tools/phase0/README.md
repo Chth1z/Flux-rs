@@ -1,8 +1,8 @@
 # Phase 0 tooling
 
 These tools preserve the measured 0.9.0 test shapes and raw evidence. For a
-0.9.1 design claim, read the frozen `docs/blueprint.md` baseline and then apply
-`docs/blueprint-0.9.1.md`; in particular, R091-05 replaces dump-first ordering
+0.9.1 design claim, read the frozen `docs/spec/blueprint.md` baseline and then apply
+`docs/spec/blueprint-0.9.1.md`; in particular, R091-05 replaces dump-first ordering
 with reachability and R091-08 uses distinct v4/v6 listener ports even though
 the historical Q2 harness isolated the lookup test with one shared port.
 
@@ -13,11 +13,11 @@ is still free. It splits in two:
 | Half | What it does | Tool |
 |---|---|---|
 | **Observation** | Answers "what is this device actually like" | `observe.sh` (read-only) |
-| **Falsification** | Answers "does the mechanism work here" — Q1–Q10 in `docs/verification/phase0.md` §16.1 | the harnesses below |
+| **Falsification** | Answers "does the mechanism work here" — Q1–Q10 in `docs/history/phase0.md` §16.1 | the harnesses below |
 
 ## These are regression tools, not one-shot scripts
 
-Six of the ten questions are answered (`docs/verification/phase0.md` §16.5 through
+Six of the ten questions are answered (`docs/history/phase0.md` §16.5 through
 §16.10). The remaining four cannot be answered before the code they test exists,
 and `docs/plan/implementation.md` §17.2 assigns each one to the stage that can
 actually run it.
@@ -134,11 +134,11 @@ a wrong conclusion:
 ## Results
 
 `results/` holds redacted, analysed snapshots. One file per device and build.
-The analysis that matters is folded back into `docs/verification/phase0.md` —
+The analysis that matters is folded back into `docs/history/phase0.md` —
 these files are the raw evidence behind it, kept so that a future claim can be
 checked against what was actually measured rather than what was remembered.
 
 Findings that changed the design are tracked separately in
-`docs/evidence/review-log.md`, including the ten times the design was overturned
+`docs/history/review-log.md`, including the ten times the design was overturned
 by its own evidence. Three of those came out of these harnesses, and two of the
 three overturned claims the design itself had made.

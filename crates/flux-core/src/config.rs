@@ -2,7 +2,7 @@
 //!
 //! Implements blueprint §10.2 and §11.2. The parser is strict: an unknown key
 //! is an error, not a warning, so a typo can never silently disable capture
-//! (`docs/ux.md` §2.2). Over-limit input is a clear configuration error and is
+//! (`docs/spec/interaction.md` §27.2.2). Over-limit input is a clear configuration error and is
 //! rejected whole — never truncated, never partially applied (§11.2).
 //!
 //! The schema is the hand-editable flat form defined by blueprint §11.2: an
@@ -191,7 +191,7 @@ fn parse_bypass_cidrs(raw: &[String]) -> Result<(Vec<Ipv4Cidr>, Vec<Ipv6Cidr>), 
 }
 
 /// The legal key nearest to `key` by edit distance, for the typo hint that
-/// `docs/ux.md` §2.2 requires ("reject unknown keys AND point at the closest
+/// `docs/spec/interaction.md` §27.2.2 requires ("reject unknown keys AND point at the closest
 /// legal one"). A silent typo is the worst configuration failure mode, so this
 /// is a contract, not a nicety.
 fn closest_key(key: &str) -> Option<String> {

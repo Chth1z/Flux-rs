@@ -1,8 +1,8 @@
 # 第 17 部分：实施阶段
 
-> 原 `blueprint.md` 第 17 部分。**章节编号未变**：本文里的 §17.x 就是全仓库引用的那个 §17.x（见 `docs/authoring.md` §1.1）。
+> 原 `../spec/blueprint.md` 第 17 部分。**章节编号未变**：本文里的 §17.x 就是全仓库引用的那个 §17.x（见 AUTH-1.1）。
 >
-> 谁读这份：要动手写代码的人（或模型），从头到尾按顺序读。0.9.1 规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`；本文只管**当前进度、顺序、边界与验收**，不得反向创造产品要求。
+> 谁读这份：要动手写代码的人（或模型），从头到尾按顺序读。0.9.1 规范性合同是冻结的 `docs/spec/blueprint.md` 加 `docs/spec/blueprint-0.9.1.md`；本文只管**当前进度、顺序、边界与验收**，不得反向创造产品要求。
 
 ---
 
@@ -19,7 +19,21 @@
 | Phase 6 | 已完成并验证 capture semantics | `a36f05d`、`beef81d`、`3627d30` |
 | Phase 7 | 已完成并验证 self-healing | `63cbdff`、`d27d44d` |
 | Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 0.9.0 §20 与 R091-13/R091-15 门禁约束 |
-| 0.9.1 增量实施 | 文档合同已定稿；已知新增代码项尚未全部落地 | R091-05 要求在 `ifaces[]` 暴露可选 `pref`；完成实现与全部验收后才提升 workspace 版本 |
+| 0.9.1 增量实施 | 文档合同已定稿；R091-05 的 status 缺口已补齐 | `ifaces[].pref` 已加入 wire 与人类输出；`first_applicable` 改为存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 R091-15 分层。完成 Linux CI 与设备回归后才提升 workspace 版本 |
+
+### 17.0.1 设计哲学判决出的返工清单
+
+`docs/philosophy.md` 的判据过一遍现状后，以下几处需要返工。这张表放在这里而不是哲学文档里：哲学不随版本走，而这是一份会被做完的待办（philosophy §4）。
+
+| # | 现状 | 违反 | 处置 |
+|---|---|---|---|
+| 1 | bypass LPM 混装机制保留网段与用户策略 | §1 | 用闲置的 `__u8` value 字节打 `RESERVED`/`POLICY` 标；热路径仍是一次 lookup（0.9.2 R092-11） |
+| 2 | 模板声明 listener 地址与端口 | §1 | 反转回注入：预填需要六道门禁，注入需要一道（0.9.2 R092-03） |
+| 3 | `first_applicable` 字段名与语义相反，靠四处文档解释 | §1、§4 | 改名 `reachable`，删掉解释段落（0.9.2 R092-10） |
+| 4 | listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处 | §4 | 固定 bypass 从运行时参数派生，只留一个来源 |
+| 5 | `service.sh` 里的 daemon 重启退避循环 | §7 | 收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案） |
+| 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（0.9.2 R092-04） |
+| 7 | 0.9.1 留下的一批"必须/不得"式校验 | §1、§2 | 逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进 |
 
 ---
 
@@ -30,16 +44,16 @@
 **九条对每个阶段都成立的规则：**
 
 1. **阶段结束时仓库必须可 build、R091-15 对当前平台适用的测试全绿、Linux CI 全绿。** 不允许"下个阶段再修"的破窗。
-2. **不为下一阶段预建抽象。** 这条是旧审计"24+ 无人居住的脚手架"（`blueprint.md` §18.4）的规则化闭环。需要一个 trait 时再抽，不要提前。
+2. **不为下一阶段预建抽象。** 这条是旧审计"24+ 无人居住的脚手架"（`../spec/blueprint.md` §18.4）的规则化闭环。需要一个 trait 时再抽，不要提前。
 3. **发现真实回归时，只为该不变量加一个聚焦测试**，不要顺手补一套。测试数量不是质量指标。
-4. **实测结果与蓝图冲突时**：按 `governance.md` §3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `evidence/review-log.md`，并在下一份增量蓝图新增修订；**冻结蓝图原文不改，也不得静默偏离**。代码与当前合同不一致时，先明确修订再改代码。
-5. **遇到 `governance.md` §1.2 列出的决策**（改全局系统语义、产品能力边界变化、引入新依赖、放宽失败语义）：**停下，问所有者**，不要自行决定。
-6. **改 ABI 走 `governance.md` §4.2**：`flux_abi.h` 是唯一真相源，`crates/flux-core/src/abi.rs` 是手工镜像，`FLUX_ABI_MAGIC` 必须 bump，`xtask abi-check` 必须通过。
-7. **设备测试遵守 `governance.md` §2.3**：每个改设备状态的脚本都要有覆盖全部退出路径的 cleanup，并在结束时打印残留检查。
-8. **`decisions/rejected-and-deferred.md` §19 里被拒绝的方案不得复活。** 卡住时正确的动作是问，不是去拿一个已被逐条否决的办法。每个阶段的"禁止"小节列的就是该阶段最容易复活的那几条。
-9. **禁止把失败掩盖过去。** `governance.md` §5 点名的五种掩盖手段（token map、patch sing-box、加第二后端、加 heartbeat、放宽 fail-closed）在任何阶段都不允许。
+4. **实测结果与蓝图冲突时**：按 GOV-3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `../history/review-log.md`，并在下一份增量蓝图新增修订；**冻结蓝图原文不改，也不得静默偏离**。代码与当前合同不一致时，先明确修订再改代码。
+5. **遇到 GOV-1.2 列出的决策**（改全局系统语义、产品能力边界变化、引入新依赖、放宽失败语义）：**停下，问所有者**，不要自行决定。
+6. **改 ABI 走 GOV-4.2**：`flux_abi.h` 是唯一真相源，`crates/flux-core/src/abi.rs` 是手工镜像，`FLUX_ABI_MAGIC` 必须 bump，`xtask abi-check` 必须通过。
+7. **设备测试遵守 GOV-2.3**：每个改设备状态的脚本都要有覆盖全部退出路径的 cleanup，并在结束时打印残留检查。
+8. **`../history/rejected-and-deferred.md` §19 里被拒绝的方案不得复活。** 卡住时正确的动作是问，不是去拿一个已被逐条否决的办法。每个阶段的"禁止"小节列的就是该阶段最容易复活的那几条。
+9. **禁止把失败掩盖过去。** GOV-5 点名的五种掩盖手段（token map、patch sing-box、加第二后端、加 heartbeat、放宽 fail-closed）在任何阶段都不允许。
 
-**关于"外推范围"**：所有实测结论都来自**一台** SM-S9180 / 5.15.211。`verification/phase0.md` §16.3 给了五层分类（AOSP 强制 / GKI / SoC 厂商 / OEM / 运行期）。把 OEM 层的观察当普适事实是这个项目最容易犯的错，写代码时尤其如此——**不要把任何单机观测值硬编码**。
+**关于"外推范围"**：所有实测结论都来自**一台** SM-S9180 / 5.15.211。`../history/phase0.md` §16.3 给了五层分类（AOSP 强制 / GKI / SoC 厂商 / OEM / 运行期）。把 OEM 层的观察当普适事实是这个项目最容易犯的错，写代码时尤其如此——**不要把任何单机观测值硬编码**。
 
 ---
 
@@ -47,7 +61,7 @@
 
 **以下“剩余”只描述阶段开始时的安排；这些问题现已随 Phase 3–8 完成。当前状态只看 §17.0。**
 
-**已经答完的**（都在 `verification/phase0.md`）：
+**已经答完的**（都在 `../history/phase0.md`）：
 
 | 问题 | 结论 | 章节 |
 |---|---|---|
@@ -80,7 +94,7 @@
 
 ## 17.3 阶段 0 — 实测地基（**已完成**）
 
-**已交付**：`tools/phase0/` 下的 12 个探针与 harness，`verification/phase0.md` 的六节实测记录，`evidence/review-log.md` §0.6 的三条推翻。
+**已交付**：`tools/phase0/` 下的 12 个探针与 harness，`../history/phase0.md` 的六节实测记录，`../history/review-log.md` §0.6 的三条推翻。
 
 **退出条件（已满足）**：能推翻主路线的 seam 全部实测通过——出向（Q10 / Q1 / Q9）与入向（Q2）两半都测掉了，数据面四个程序在基线内核上过验证器。**已知能推翻主路线的技术未知项：无。**
 
@@ -104,7 +118,7 @@
 
 **交付物**：`flux-core` 的全部纯逻辑 + 单测；`xtask`（`abi-check`、`package`）；module staging；版本与 engine pin 校验。
 
-**必读**：`blueprint.md` §5（crate 结构）、§6（BPF ABI）、§15.2（必须保留的八个逻辑测试）、`engine.lock`。
+**必读**：`../spec/blueprint.md` §5（crate 结构）、§6（BPF ABI）、§15.2（必须保留的八个逻辑测试）、`engine.lock`。
 
 **退出条件**：
 
@@ -113,7 +127,7 @@
 3. `cargo xtask abi-check` **真正实现并通过**：用 clang 算出 `flux_abi.h` 各结构的偏移，与 `abi.rs` 的镜像逐字段比对。CI 里那行 `continue-on-error: true` 在本阶段结束时**必须删掉**。
 4. `cargo xtask package` 连续两次 clean build 产出的 hash 一致（可复现构建）。
 5. `xtask` 校验 `engine.lock` 的两个 sha256 与 size；任一不匹配就拒绝打包。**这条已经手工验证过一次**：2026-08-26 下载 v1.13.19 的 asset，archive 与 binary 两个 digest 与 `engine.lock` 逐字相符（§16.10）。`xtask` 要做的是把它自动化。
-6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖四项机械检查：`docs/README.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`evidence/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
+6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖五项机械检查：`docs/index.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；**每个被引用的标识符（`§N`、`PHIL-N`、`GOV-N`、`AUTH-N`）真实存在，且蓝图之外的文档不占用 `§`**；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`../history/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
 
    **这四项都是真实抓到过缺陷的检查**，不是假想的整洁度指标：章节映射曾指向已移出的文件；推翻计数曾同时存在 5 / 7 / 8 三个互相矛盾的说法；§18 曾把一个已执行完的迁移计划写成待办，还错称归档目录被 `.gitignore` 排除。用 Rust 写在 `xtask` 里，不要写成 PowerShell 脚本——跨平台、CI 天然能跑、且不需要绕执行策略。
 
@@ -123,7 +137,7 @@
 
 - **`flux-core` 里不得出现任何 I/O、`unsafe`、async、netlink、BPF。** 它存在的意义就是"能在开发机上全速测"。
 - 不要为阶段 2 的 reactor 预建 trait 或事件抽象。
-- 不要引入新的运行时依赖。依赖清单的变更属 `governance.md` §1.2，要问。
+- 不要引入新的运行时依赖。依赖清单的变更属 GOV-1.2，要问。
 
 ---
 
@@ -131,7 +145,7 @@
 
 **交付物**：目录 layout；`flock` 单实例；控制协议；CLI（`start`/`stop`/`status`/`check`/`bugreport`）；reactor 骨架；engine 候选生命周期（§9.4 的六步换代事务）。
 
-**必读**：`blueprint.md` §9（sing-box 集成，尤其 §9.4）、§10（reactor）、§11（控制/日志/状态）、§26（reactor 状态机）、`docs/ux.md`。
+**必读**：`../spec/blueprint.md` §9（sing-box 集成，尤其 §9.4）、§10（reactor）、§11（控制/日志/状态）、§26（reactor 状态机）、`docs/spec/interaction.md`。
 
 **退出条件**：
 
@@ -139,7 +153,7 @@
 2. **`fluxd` 自己的 socket 核验必须复现 Q2 的结果**（§16.10.2）：4 个 socket，inode 与 `/proc/<pid>/fd` 对得上。这是把 Q2 从"一次性实测"变成"产品自带的持续检查"。
 3. 第二个 `fluxd` 实例启动时被 `flock` 拒绝，并给出可读原因。
 4. `status` 在无数据面时正确报告 `Inactive` 且**说清原因**（不是空输出）。
-5. `bugreport` 产出诊断包，且默认**不含 logcat**（`docs/ux.md`）。
+5. `bugreport` 产出诊断包，且默认**不含 logcat**（`docs/spec/interaction.md`）。
 
 **本阶段答的 Phase 0 问题**：Q2 的**持续化**（不是重测）。
 
@@ -156,7 +170,7 @@
 
 **交付物**：veth 创建；route/RPDB；自有 veth 的 clsact 生命周期；物理接口上的 filter 挂载与卸载；interface admission；所有权谓词；`rp_filter` 前置检查。
 
-**必读**：`blueprint.md` §8（网络对象与所有权，全节）、§3.3（接口分类）、§10.4（netlink 事件）、§12.8（为什么不 shell out 到 `ip`/`tc`）、`verification/phase0.md` §16.9。
+**必读**：`../spec/blueprint.md` §8（网络对象与所有权，全节）、§3.3（接口分类）、§10.4（netlink 事件）、§12.8（为什么不 shell out 到 `ip`/`tc`）、`../history/phase0.md` §16.9。
 
 **退出条件**：
 
@@ -172,7 +186,7 @@
 
 - **不得 shell out 到 `ip` / `tc`**（§12.8）。全部走 netlink，消息格式见 §8 的 netlink 规格小节。
 - **不得在物理接口上创建或删除 clsact**——复用 netd 的（§8.5.1）。netd 会自己删，删掉的是它的，我们只挂 filter。
-- **不得写全局 sysctl**（`all.rp_filter`、`ip_forward`）。要改就是响亮失败 + 问所有者（`governance.md` §5）。
+- **不得写全局 sysctl**（`all.rp_filter`、`ip_forward`）。要改就是响亮失败 + 问所有者（GOV-5）。
 - **不得删除、移动或替换 AOSP 的 filter**（§3.4）。
 - 不要硬编码 pref 数值。
 
@@ -182,7 +196,7 @@
 
 **交付物**：手写 ELF 解析、relocation、map 创建（12 张）、`SK_STORAGE` 的手写 BTF、ARRAY_OF_MAPS 内层 map、ringbuf；`fluxd check` 的 BPF 半。
 
-**必读**：`blueprint.md` §12（BPF 加载与最小依赖，全节，尤其 §12.7 的 11 条加固）、§6（ABI）、§7.5.0（arm64 无带返回值原子操作）、§7.5.1（verifier 陷阱清单）、`verification/phase0.md` §16.8。
+**必读**：`../spec/blueprint.md` §12（BPF 加载与最小依赖，全节，尤其 §12.7 的 11 条加固）、§6（ABI）、§7.5.0（arm64 无带返回值原子操作）、§7.5.1（verifier 陷阱清单）、`../history/phase0.md` §16.8。
 
 **退出条件**：
 
@@ -207,12 +221,12 @@
 
 **交付物**：`flx_verify` 存活验证流程（§8.5.4）；四个程序挂载；veth 回送路径打通。
 
-**必读**：`blueprint.md` §8.5.3 / §8.5.4、§3.3（L2/L3 分支）、§8.4（路由前置条件）、`verification/phase0.md` §16.5.4 / §16.9.3。
+**必读**：`../spec/blueprint.md` §8.5.3 / §8.5.4、§3.3（L2/L3 分支）、§8.4（路由前置条件）、`../history/phase0.md` §16.5.4 / §16.9.3。
 
 **退出条件**：
 
 1. **`flx_verify` 在每个准入接口上计到调用**，然后卸下探测、在同一 pref 换上 `flx_cap_l2`/`flx_cap_l3`。attach 成功**不**等于能工作（§8.5.3 约束 3）。
-2. **Q5.1 通过**：L2 路径不写任何字节即 `bpf_redirect`，配 ingress 的 `bpf_skb_change_type(PACKET_HOST)`，包被 `ip_rcv` 接受。**若被 `PACKET_OTHERHOST` 丢弃，D17 被证伪**——按 `governance.md` §3 记录，回退到写 dst MAC，不要绕。
+2. **Q5.1 通过**：L2 路径不写任何字节即 `bpf_redirect`，配 ingress 的 `bpf_skb_change_type(PACKET_HOST)`，包被 `ip_rcv` 接受。**若被 `PACKET_OTHERHOST` 丢弃，D17 被证伪**——按 GOV-3 记录，回退到写 dst MAC，不要绕。
 3. **Q5.2 通过**：rmnet 上 `bpf_skb_change_head(14)` + 只写 EtherType 能闭环；headroom 不足时 helper 返回 `-ENOMEM` 而非损坏包。
 4. **Q5.6 通过**：跑完 `all.rp_filter` / `flxrs1.accept_local` / `ip_forward` / `arp_filter` 矩阵，确定**真正必需的最小集**。§8.4 的预测是需要 `flxrs1.rp_filter=0` + `accept_local=1` + `all.rp_filter=0`，不需要 `ip_forward` 与 `arp_filter`。**失败时直接上 `pwru` + `kfree_skb_reason`，不要猜**（§8.4 有 dae 的原始 trace 可对照）。
 5. **Q5.7 通过**：`TC_ACT_UNSPEC` 之后后续 filter 的计数器仍在增长。
@@ -232,7 +246,7 @@
 
 **交付物**：§7.2–7.5 的决策算法全部落地；`bpf_sk_assign` 路径；counters；per-UID 统计（D23）。
 
-**必读**：`blueprint.md` §7（数据面算法，全节）、§2（失败语义）、§1.6（eBPF 能力边界）、`reference/failures-and-status.md`。
+**必读**：`../spec/blueprint.md` §7（数据面算法，全节）、§2（失败语义）、§1.6（eBPF 能力边界）、`../spec/failures.md`。
 
 **退出条件**：
 
@@ -259,21 +273,21 @@
 
 **交付物**：`fault_events` ring buffer；fault latch；generation 换代与恢复；`status` 的完整故障矩阵。
 
-**必读**：`blueprint.md` §2.2（失败语义）、§9.4（换代事务）、§26（reactor 状态机）、`reference/failures-and-status.md`（全文）。
+**必读**：`../spec/blueprint.md` §2.2（失败语义）、§9.4（换代事务）、§26（reactor 状态机）、`../spec/failures.md`（全文）。
 
 **退出条件**：
 
 1. **Q7 通过**：engine 在 egress 的 `listener_alive()` 与 ingress 的 lookup 之间退出时，只影响已 redirect 的包，下一个新 SYN/datagram 恢复 Direct；`kill -9` engine 后新连接 **100% direct**。
 2. **fault 事件数是 O(1) 而非 O(packets)**：latch 抑制 storm，重复/旧事件幂等。
 3. 跨 generation 的 in-flight 旧包被送进新 listener 时行为如 D3 所述无害。
-4. `reference/failures-and-status.md` 的每一行**都能人为构造并观察到**，`status` 给出的假设与文档一致。
+4. `../spec/failures.md` 的每一行**都能人为构造并观察到**，`status` 给出的假设与文档一致。
 5. current fault 让 fluxd 先 inactive 再重启 generation。
 
 **本阶段答的 Phase 0 问题**：**Q7**。
 
 **禁止**：
 
-- 不得加 heartbeat（`governance.md` §5）。
+- 不得加 heartbeat（GOV-5）。
 - 不得放宽 fail-closed 语义来让某个测试变绿。
 - 不得让 fault 处理路径自己成为 storm 源（事件要幂等且有 latch）。
 
@@ -281,22 +295,23 @@
 
 ## 17.11 阶段 8 — 模块封装与发布工程（**实现与设备验证已完成，版本发布未授权**）
 
-**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；`action.sh`；精确 allowlist 的 release candidate artifact。0.9.1 不包含 `webroot` 或 Flux WebUI（R091-03、R091-12）。
+**交付物**：三管理器（Magisk / KernelSU / APatch）module lifecycle；以管理器模块开关为唯一开关的 inotify 控制路径与 `module.prop` 状态显示；精确 allowlist 的 release candidate artifact。0.9.1 不包含 `action.sh`、`webroot` 或 Flux WebUI（R091-03、R091-04、R091-12）。
 
-**必读**：`blueprint.md` §13（模块安装与构建）、`docs/ux.md`、`docs/introduction.md`、`governance.md` §7（发布工程与社区流程）。
+**必读**：`../spec/blueprint.md` §13（模块安装与构建）、`docs/spec/interaction.md`、`docs/guide/introduction.md`、GOV-7（发布工程与社区流程）。
 
 **退出条件**：
 
 1. 0.9.0 artifact / checksum / 文档三者一致。
-2. 三个管理器上安装、启动、`action.sh`、卸载、管理器重启全部闭环；卸载脚本不 flush 内核对象，**重启后**非持久 Flux 对象归零（R091-09）。
-3. `docs/introduction.md` 描述的行为与实际一致——**包括那些"诚实的失败"**：流量统计翻倍、被委托的流量、OEM 冲突时保持 Direct。
-4. `bugreport` 的输出满足 `docs/ux.md` 的隐私约定（默认无 logcat；不泄露第三方包名之外的使用习惯，参见 §16.7.3）。
+2. 三个管理器上安装、启动、在管理器界面里开关模块（当场生效且 `module.prop` 描述随之更新）、卸载、管理器重启全部闭环；卸载脚本不 flush 内核对象，**重启后**非持久 Flux 对象归零（R091-09）。
+3. `docs/guide/introduction.md` 描述的行为与实际一致——**包括那些"诚实的失败"**：流量统计翻倍、被委托的流量、OEM 冲突时保持 Direct。
+4. `bugreport` 的输出满足 `docs/spec/interaction.md` 的隐私约定（默认无 logcat；不泄露第三方包名之外的使用习惯，参见 §16.7.3）。
 
 **禁止**：
 
 - **不得 flush OEM 的防火墙链**（box4magisk 的 `oneplus_a16_fix()` 那条路）。
 - 不得在 `post-fs-data.sh` 里做网络操作（§13 给了理由）。
-- 不得让 `action.sh` 做需要交互的事。
+- 不得在模块目录里写 `disable` 与 `module.prop` 的 `description=` 之外的任何东西：那个目录属于管理器。
+- 不得让 `module.prop` 写入失败影响 daemon，也不得让它变成状态的第二真相源。
 
 ---
 

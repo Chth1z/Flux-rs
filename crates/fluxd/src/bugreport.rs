@@ -1,6 +1,6 @@
 //! `fluxd bugreport`: one self-contained diagnostic zip.
 //!
-//! Rules from `docs/ux.md` §6:
+//! Rules from `docs/spec/interaction.md` §27.6:
 //!
 //! * Default output is REDACTED: IPv4 addresses keep only their first octet;
 //!   IPv6-looking strings, MAC addresses and NFLOG cookies are masked. These
@@ -36,7 +36,7 @@ const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
 /// Options parsed from the CLI.
 #[derive(Debug, Default)]
 pub struct BugreportOptions {
-    /// Include filtered logcat output (opt-in, `docs/ux.md` §6).
+    /// Include filtered logcat output (opt-in, `docs/spec/interaction.md` §27.6).
     pub with_logcat: bool,
     /// Disable redaction.
     pub raw: bool,

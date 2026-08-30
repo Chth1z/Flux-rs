@@ -43,7 +43,7 @@ Direct with a specific reason in `status`.
 
 | Item | 0.9.0 requirement |
 |---|---|
-| Root manager | Magisk, KernelSU, or APatch; Magisk v28+ for `action.sh` |
+| Root manager | Magisk, KernelSU, or APatch (no minimum beyond module support) |
 | CPU | arm64/aarch64 |
 | Kernel floor | 5.15 |
 | Base page | exactly 4096 bytes |
@@ -101,9 +101,16 @@ captured traffic is routed.
 ## Install and first use
 
 Install `Flux-rs-v0.9.0-arm64.zip` from the Magisk, KernelSU, or APatch manager
-app, verify it against the adjacent `SHA256SUMS`, then reboot. A fresh install
-creates `/data/adb/flux-rs/disable`, so installation alone does not capture
-traffic and upgrades preserve the existing switch and user configs.
+app, verify it against the adjacent `SHA256SUMS`, then reboot. **A fresh install
+lands as a disabled module on purpose**, so installation alone does not capture
+traffic; upgrades preserve whatever you chose and never overwrite user configs.
+
+The switch is your root manager's own module toggle. `fluxd` watches that file
+with inotify, so toggling the module takes effect immediately instead of at the
+next boot, and there is no separate switch file, no `action.sh` and no second
+place to look. `fluxd enable` / `fluxd disable` write the same file. The
+manager's module description doubles as a live status readout, for example
+`🥰 [Active] gen 7 · 3 apps · rmnet_data0`.
 
 The two authority files are:
 
@@ -112,10 +119,14 @@ The two authority files are:
 - `/data/adb/flux-rs/config/sing-box.json` — the complete user-owned official
   sing-box configuration. Flux only injects its two generated TProxy inbounds.
 
-The shipped bootstrap config is deliberately minimal: one official direct
-outbound, a direct final route, and the required `sniff` / `hijack-dns` rules.
-It has no remote rule-set or WebUI downloads. Flux never rewrites either user
-authority file, and reinstalling does not overwrite them.
+The shipped bootstrap config follows the original Flux module's template, so
+both projects present the same shape: DNS splitting with fakeip, `clash_mode`
+rules, remote rule-sets and `PROXY` / `GLOBAL` selectors. It contains no
+servers, no subscription and no credentials — `PROXY` starts out pointing at
+`DIRECT` — and it declares no inbound of its own, because Flux injects two
+tproxy inbounds, and no `clash_api`, because a default must not open a control
+port. Flux never rewrites either user authority file, and reinstalling does not
+overwrite them.
 
 ```sh
 FLUXD=/data/adb/modules/flux_rs/bin/fluxd
@@ -158,8 +169,8 @@ publishes the exact sing-box Corresponding Source archive pinned by
 ## Documentation and license
 
 The normative 0.9.1 implementation contract is the frozen
-`docs/blueprint.md` baseline plus `docs/blueprint-0.9.1.md`; when they conflict,
-the delta wins. `docs/architecture.md` is the short engineering orientation.
+`docs/spec/blueprint.md` baseline plus `docs/spec/blueprint-0.9.1.md`; when they conflict,
+the delta wins. `docs/guide/architecture.md` is the short engineering orientation.
 The data-plane ABI source of truth is `bpf/include/flux_abi.h`, mirrored and
 layout-tested in Rust.
 

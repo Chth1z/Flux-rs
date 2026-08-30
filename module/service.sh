@@ -2,7 +2,7 @@
 # Flux-rs boot entry.
 #
 # service.sh is the ONLY boot script that runs on all three managers
-# (docs/blueprint.md §13.2.0):
+# (docs/spec/blueprint.md §13.2.0):
 #   - post-fs-data.sh is skipped entirely by KernelSU in late-load mode
 #   - boot-completed.sh does not exist on Magisk
 #

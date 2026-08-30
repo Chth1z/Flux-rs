@@ -1,7 +1,7 @@
 # Flux-rs 0.9.0 终极设计蓝图与开发指南
 
 - 文档编号：`FLUX-BP-0.9.0-FINAL`
-- **状态：已定稿**（2026-08-25，Asia/Hong_Kong）。全部开放项已关闭，见 `decisions/rejected-and-deferred.md` §21.1。
+- **状态：已定稿**（2026-08-25，Asia/Hong_Kong）。全部开放项已关闭，见 `../history/rejected-and-deferred.md` §21.1。
 - 性质：**唯一实现合同**。与 `docs/` 下任何其它文件冲突时以本文为准。
 - 读者：实现者（人或模型）。本文假设读者不了解旧仓库，也不需要读旧文档。
 - ABI 真相源：`bpf/include/flux_abi.h`（`FLUX_ABI_MAGIC = 0xF10C0903`）；数据面骨架：`bpf/flux.bpf.c`。
@@ -13,7 +13,7 @@
 
 | | 状态 |
 |---|---|
-| Phase 0 **观测半场** | ✅ 已完成（`verification/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
+| Phase 0 **观测半场** | ✅ 已完成（`../history/phase0.md` §16.2）。49 个接口、GKI config、sysctl、`ip rule` 阶梯、fwmark 占用、cgroup 占用全部实测 |
 | Phase 0 **Q10**（厂商 filter 是否遮挡我们） | ✅ **已通过**（§16.5.4）。厂商在 pref 1 在场时，我们在 pref 2 计到 15 次调用 / tx delta 15，1:1 吻合 |
 | Phase 0 **Q1**（SK_STORAGE first-decision） | ✅ **已通过**（§16.6）。verifier 接受核心组合；172+15+24 = 211 恰好等于 tx delta |
 | Phase 0 **Q9**（per-app DNS，**D18 的赌注**） | ✅ **已通过**（§16.7）。明文 :53 上出现的是 `com.android.vending`（UID 10265）等 app UID，netd 的 1051 出现**零次** |
@@ -23,7 +23,7 @@
 | 能推翻主路线的技术未知项 | **无** |
 | 外推范围 | **一台设备**。五层分类见 §16.3；把 OEM 层观察当普适事实是本设计最容易犯的错 |
 
-设计期共推翻自己**八次**——五次在实测前，三次在 2026-08-25 的 Phase 0 实测中（其中两条推翻的是我自己写下的结论）。全部留有「原说法 / 实际 / 处置」对照，逐条位置见 `evidence/review-log.md` §0.6 开头。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
+设计期共推翻自己**八次**——五次在实测前，三次在 2026-08-25 的 Phase 0 实测中（其中两条推翻的是我自己写下的结论）。全部留有「原说法 / 实际 / 处置」对照，逐条位置见 `../history/review-log.md` §0.6 开头。**结论对而理由错**比结论错更危险，所以那张表比结论本身更值得读。
 
 ## 术语强度
 
@@ -40,7 +40,7 @@
 
 # 第 0 部分：独立复核与本文的修正
 
-> **已移出本文** → `docs/evidence/review-log.md`。章节编号未变。含全部「原说法 / 实际 / 处置」更正对照。
+> **已移出本文** → `docs/history/review-log.md`。章节编号未变。含全部「原说法 / 实际 / 处置」更正对照。
 # 第 1 部分：产品合同
 
 ## 1.1 身份（唯一值）
@@ -1448,7 +1448,7 @@ pt_load_align   = "0x1000"   # 四段均为 0x1000 → 0.9.0 只支持 4 KiB bas
 
 | 状态 | 含义 |
 |---|---|
-| `Disabled` | `disable` 文件存在（唯一开关真相源，C9，`docs/ux.md` §1）。不启动 engine、不新建或激活数据面。 |
+| `Disabled` | `disable` 文件存在（唯一开关真相源，C9，`docs/spec/interaction.md` §27.1）。不启动 engine、不新建或激活数据面。 |
 | `Inactive` | `disable` 文件不存在，但正在启动/重启，或被明确错误阻断。control `active == 0`。 |
 | `Active` | control `active == 1`。 |
 
@@ -1620,7 +1620,7 @@ socket 用 `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`，并且**�
 
 | 路径 | 权威内容 | 失败行为 |
 |---|---|---|
-| `disable`（状态根直下） | 唯一持久开关：**存在 = 停用，不存在 = 启用**（C9，`docs/ux.md` §1）。由既有 inotify 源监视，运行时立即生效 | 只看存在性，不读内容 |
+| `disable`（状态根直下） | 唯一持久开关：**存在 = 停用，不存在 = 启用**（C9，`docs/spec/interaction.md` §27.1）。由既有 inotify 源监视，运行时立即生效 | 只看存在性，不读内容 |
 | `config/flux.toml` | package 选择与 CIDR bypass | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `config/sing-box.json` | 唯一用户 engine 配置 | cold 无效 → Direct；hot 无效 → 保留当前 |
 | `run/effective-sing-box.<generation>.json` | 对应 child 的一次性 immutable 生成物；事务中最多 current + candidate 两份 | 非权威源；daemon 重启后精确清理并从用户配置重建 |
@@ -1969,13 +1969,13 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 1. **状态报告诚实性。** 旧代码在 rollback 路径吞掉全部错误，然后向控制面发布 `attached=false`（F-05）；promote journal 在 restore 失败时仍被删除（F-03）。规则：`status` **禁止**报告比已证明状态更干净的结果。宣布"已清理 / Inactive / 无残留"之前必须有一次新的实际枚举（TC dump、`ip rule`、`ip route`、BPF program info）证明对象确实不在。无法证明时报告 `unknown(cleanup_required)` 并附第一个具体错误。
 2. **ABI 测试对着产物，不对着源码字符串。** 旧仓库有一个 token-map 测试断言 C 源文件里的字面量（`token_map.rs:907` vs `flx_sock_addr.c:409`），helper 改名就红（F-10）。规则：`flux_abi.h` 一致性、BTF blob、map 参数一律对编译产物（ELF section / `.BTF` / `BPF_OBJ_GET_INFO_BY_FD`）断言，禁止 grep C 源。
 3. **CI、文档与实际命令必须机械一致。** 旧 CI 调用两个已删除的 xtask 子命令，`development.md` 与 README 还在列退役命令与旧协议版本（F-09、F-13、设计审计 P0 #4）。规则：CI 加一条自检，遍历 workflow 与 docs 中出现的每个 `cargo xtask <sub>`，断言它能被 xtask 解析；版本号只有 workspace 一个来源。
-4. **只有一份权威架构文档。** 旧设计语料里同一份文件同时规定了三种互不兼容的 attach 策略（PromoteThenAppend / 禁止 DETACH / KD 35 fail-open），实现者照着任一段写都会错（设计审计 P0 #1）；18 个 ADR 的 YAML 状态与正文互相矛盾（P1 #20）。规则：0.9.0 **没有 ADR 目录**，只有一份 `docs/architecture.md`（本蓝图的落地版）。任何第二份文档若与它冲突，删掉第二份，而不是加一句"以后者为准"。
+4. **只有一份权威架构文档。** 旧设计语料里同一份文件同时规定了三种互不兼容的 attach 策略（PromoteThenAppend / 禁止 DETACH / KD 35 fail-open），实现者照着任一段写都会错（设计审计 P0 #1）；18 个 ADR 的 YAML 状态与正文互相矛盾（P1 #20）。规则：0.9.0 **没有 ADR 目录**，只有一份 `docs/guide/architecture.md`（本蓝图的落地版）。任何第二份文档若与它冲突，删掉第二份，而不是加一句"以后者为准"。
 
 ---
 
 # 第 16 部分：Phase 0
 
-> **已移出本文** → `docs/verification/phase0.md`。章节编号未变。工具在 `tools/phase0/`。
+> **已移出本文** → `docs/history/phase0.md`。章节编号未变。工具在 `tools/phase0/`。
 # 第 17 部分：实施阶段
 
 > **已移出本文** → `docs/plan/implementation.md`。章节编号未变。
@@ -1992,7 +1992,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 >
 > **归档材料不在本工作树内。** §18.1 第 1 步列出的目录（`audit/**`、`archive/2026-08-25-superseded/`）在重建时没有被带进新树，也从未被 git 跟踪，因此 `git log` 里查不到。下面那句"该目录被 `.gitignore` 排除"**也是错的**：现在的 `.gitignore` 只有 `/clone/` 一条。
 >
-> 这对实现者的实际影响：**任何追溯到归档文档的引用都无法在本仓库内解析。** 但结论本身没有丢——它们已经被折叠进 `verification/phase0.md`、`evidence/review-log.md` 与本文，而且 Q1 / Q2 / Q6 / Q9 / Q10 后来都在同一台设备上**重新一手实测过**（§16.5–16.10），所以那些旧的一次性证据现在只有历史价值。唯一确实无法核验的是 `evidence/review-log.md` §0.5 开头引用的 `sm-s9180-sock-addr-occupancy-2026-08.md`——而那条引用恰好是**被推翻的那一条**，推翻依据是 §16.2 的一手复测，所以结论站在当前证据上，不依赖那份归档。
+> 这对实现者的实际影响：**任何追溯到归档文档的引用都无法在本仓库内解析。** 但结论本身没有丢——它们已经被折叠进 `../history/phase0.md`、`../history/review-log.md` 与本文，而且 Q1 / Q2 / Q6 / Q9 / Q10 后来都在同一台设备上**重新一手实测过**（§16.5–16.10），所以那些旧的一次性证据现在只有历史价值。唯一确实无法核验的是 `../history/review-log.md` §0.5 开头引用的 `sm-s9180-sock-addr-occupancy-2026-08.md`——而那条引用恰好是**被推翻的那一条**，推翻依据是 §16.2 的一手复测，所以结论站在当前证据上，不依赖那份归档。
 >
 > 保留 §18.1–18.4 的原文，是因为它记录了**为什么这么迁移**以及移植清单，那些理由在读现有代码时仍然有用。
 
@@ -2028,7 +2028,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 | 当前内容 | 动作 |
 |---|---|
 | `audit/**`、`archive/**` | 先归档到仓库外，再从产品库删除 |
-| 旧 `README`/`README_zh`/`CONTEXT.md`/18 个 ADR/`docs/**`/`notes.md`/`task_plan.md` | **2026-08-25 已归档至 `archive/2026-08-25-superseded/`**（见该目录 `MANIFEST.md` 的取代关系表）；产品树只按 §5 重写 `README.md`、`CHANGELOG.md`、`docs/architecture.md` |
+| 旧 `README`/`README_zh`/`CONTEXT.md`/18 个 ADR/`docs/**`/`notes.md`/`task_plan.md` | **2026-08-25 已归档至 `archive/2026-08-25-superseded/`**（见该目录 `MANIFEST.md` 的取代关系表）；产品树只按 §5 重写 `README.md`、`CHANGELOG.md`、`docs/guide/architecture.md` |
 | `crates/flux-platform`、`crates/flux-testkit` | 删除（部分文件按 §18.3 移植） |
 | `crates/flux-core`、`crates/fluxd` | 清空后按 §5 重建（部分文件按 §18.3 移植） |
 | 旧 BPF C 与已提交 `.o`（`flx_sock_addr.c`、`connect4_token.c`、`trial_prog.c`、token/cookie/proof/canary） | 删除，重写单一 `bpf/flux.bpf.c` |
@@ -2156,7 +2156,7 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 
 # 第 19 部分：被拒绝的替代方案
 
-> **已移出本文** → `docs/decisions/rejected-and-deferred.md`。章节编号未变。
+> **已移出本文** → `docs/history/rejected-and-deferred.md`。章节编号未变。
 # 第 20 部分：发布前最终验收
 
 打 `v0.9.0` tag 需以下条件**同时**成立：
@@ -2179,10 +2179,10 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 
 # 第 21、22 部分：待确认事项与延期项
 
-> **已移出本文** → `docs/decisions/rejected-and-deferred.md`。章节编号未变。
+> **已移出本文** → `docs/history/rejected-and-deferred.md`。章节编号未变。
 # 第 23、24 部分：失败矩阵与 status 规格
 
-> **已移出本文** → `docs/reference/failures-and-status.md`。章节编号未变。
+> **已移出本文** → `docs/spec/failures.md`。章节编号未变。
 # 第 25 部分：启动时序与边界条件
 
 `service.sh` 在 late_start 触发，此时 Android 还没准备好。这一节把每个"太早"的情况写清楚，因为它们全都会在真机首次开机时命中。

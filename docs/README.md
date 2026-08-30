@@ -1,85 +1,51 @@
-# 文档索引
+# 文档导航
 
-0.9.1 的规范性技术合同由两层组成：冻结的 0.9.0 基线 [`blueprint.md`](blueprint.md)，以及增量修订 [`blueprint-0.9.1.md`](blueprint-0.9.1.md)。先读基线，再应用修订；同一主题冲突时以 0.9.1 修订为准。0.9.0 原文保留，不回写历史。
+这里回答"我该读哪一份"。标识符、编号与真相源在 [`index.md`](index.md)；文档架构与语言规则在 [`authoring.md`](authoring.md) AUTH-0。
+
+## 目录即权威等级
+
+每个目录回答同一个问题：**这份文档和代码不一致时，谁错了？**
+
+| 位置 | 层 | 不一致时 | 语言 |
+|---|---|---|---|
+| `philosophy.md` | 判据 | 合同错（它是蓝图的上游） | 英文 |
+| `governance.md`、`authoring.md` | 过程 | 过程错 | 中文 |
+| `spec/` | **合同** | **代码错** | 英文（0.9.5 起） |
+| `guide/` | 投影 | 文档错，改文档 | 中文 |
+| `history/` | 记录 | 都不错，它只记录当时发生了什么；只增不改 | 保持原样 |
+| `plan/` | 计划 | 描述还没发生的事；会被做完 | 中文 |
 
 ## 按你要做的事挑
 
 | 你要做的事 | 读这个 |
 |---|---|
-| **我是用户，这东西是干什么的** | **`introduction.md`**（不含术语） |
+| **我是用户，这东西是干什么的** | **`guide/introduction.md`**（不含术语） |
+| **要评审或提出一个设计** | **`philosophy.md`**（英文），先过 PHIL-10 的 checklist |
 | **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
-| 实现某个模块 | `blueprint.md`，从头读到尾；再读 `blueprint-0.9.1.md` 的覆盖项 |
-| 了解技术架构 | `architecture.md` |
-| 上机跑测试 | `verification/phase0.md` + `../tools/phase0/README.md` |
-| 查一个错误码的含义 | `reference/failures-and-status.md` |
-| 质疑某条断言的依据 | `evidence/review-log.md` |
-| 提议「为什么不做 X」 | `decisions/rejected-and-deferred.md`（大概已经评估过了） |
-| 改用户看得见的东西 | `ux.md` |
+| 实现某个模块 | `spec/blueprint.md`，从头读到尾；再依次读 `spec/blueprint-0.9.1.md`、`spec/blueprint-0.9.2.md` 的覆盖项 |
+| 了解技术架构 | `guide/architecture.md` |
+| 怎么用、出问题怎么办 | `guide/using-flux.md` |
+| 上机跑测试 | `history/phase0.md` + `../tools/phase0/README.md` |
+| 查一个错误码的含义 | `spec/failures.md` |
+| 改用户看得见的东西 | `spec/interaction.md`（§27） |
+| 质疑某条断言的依据 | `history/review-log.md` |
+| 提议「为什么不做 X」 | `history/rejected-and-deferred.md`（大概已经评估过了） |
 | 搞清楚什么该问所有者 | `governance.md` |
-| 写或改这些文档 | `authoring.md` |
+| 写或改这些文档 | `authoring.md`；引用与编号看 `index.md` |
+| **引用某个 §、发一个新号** | **`index.md`** |
 
-## 章节编号 → 文件
+## 合同当前是三层
 
-**章节编号是全局稳定标识符，跨文件不重编。** `§8.5.3` 无论在哪个文件里都指同一件事，`rg "§8\.5\.3"` 永远能在全仓库找全引用。0.9.1 不重写这些章节，使用独立的 `R091-*` 修订号；引用已修订条款时写“§8.5.3，经 R091-05 修订”。理由见 `authoring.md` §1.1。
+冻结的 0.9.0 基线 [`spec/blueprint.md`](spec/blueprint.md)，增量修订 [`spec/blueprint-0.9.1.md`](spec/blueprint-0.9.1.md)，再叠 [`spec/blueprint-0.9.2.md`](spec/blueprint-0.9.2.md)（草案）。按这个顺序读，冲突时取最新一层。0.9.5 会把三层折进一份全量蓝图，届时前两层移入 `history/`。
 
-| 部分 | 内容 | 文件 |
-|---|---|---|
-| §0 | 独立复核与更正对照 | `evidence/review-log.md` |
-| §1 | 产品合同 | `blueprint.md` |
-| §2 | 数据路径与失败语义 | `blueprint.md` |
-| §3 | Android 平台事实 | `blueprint.md` |
-| §4 | 内核机制依赖清单 | `blueprint.md` |
-| §5 | crate 与模块结构 | `blueprint.md` |
-| §6 | BPF ABI | `blueprint.md` |
-| §7 | 数据面算法 | `blueprint.md` |
-| §8 | 网络对象与所有权 | `blueprint.md` |
-| §9 | sing-box 集成 | `blueprint.md` |
-| §10 | 控制面 | `blueprint.md` |
-| §11 | 配置与持久状态 | `blueprint.md` |
-| §12 | BPF 构建与最小加载器 | `blueprint.md` |
-| §13 | 模块封装与构建 | `blueprint.md` |
-| §14 | 性能与能效预算 | `blueprint.md` |
-| §15 | 验证策略 | `blueprint.md` |
-| §16 | Phase 0 十问 + 实测 + 外推分层 | `verification/phase0.md` |
-| §17 | 实施阶段 | `plan/implementation.md` |
-| §18 | 从旧仓库过渡 | `blueprint.md` |
-| §19 | 被拒绝的替代方案 | `decisions/rejected-and-deferred.md` |
-| §20 | 发布前最终验收 | `blueprint.md` |
-| §21 | 需要所有者确认的事项 | `decisions/rejected-and-deferred.md` |
-| §22 | 延期项与它们的 seam | `decisions/rejected-and-deferred.md` |
-| §23 | 失败矩阵 | `reference/failures-and-status.md` |
-| §24 | `status` 输出与错误码规格 | `reference/failures-and-status.md` |
-| §25 | 启动时序与边界条件 | `blueprint.md` |
-| §26 | reactor 状态机 | `blueprint.md` |
+0.9.1 做的是文档与实现对账，不改产品形态；0.9.2 改的正是产品形态（配置模型、订阅、黑白名单、自动化），因此它大量覆盖 0.9.1 自己的条款。
 
 ## 为什么这么拆
 
-按**读者**拆，不按篇幅拆。判据是一句话：如果两块内容总是被同一个人在同一次工作中一起读，它们就该在同一个文件里。
+两条判据叠加，先后有序。
 
-技术核心（§1–§15、§18、§20、§25、§26）是一张互相引用的密网——§7.5 的不变量依赖 §8.4 的 sysctl 结论，§8.5.3 的 pref 策略依赖 §14.1 的性能预算——实现者会把它们一起读，所以保留为 0.9.0 基线。§17 已移到实施计划；0.9.1 用增量蓝图修正基线，不复制整张密网。完整论证见 `authoring.md` §1。
+**先按权威等级拆**，也就是上面那张表：合同、投影、记录、计划混在一个目录里，读者无法从文件名判断"违反它意味着什么"。目录名承载这个信息，放错位置就变得显眼——这是 PHIL-2「让无效状态不可表示」用在文档上。
 
-## 真相源
+**再按读者拆**，不按篇幅拆：如果两块内容总是被同一个人在同一次工作中一起读，它们就该在同一个文件里。技术核心（§1–§15、§20、§25、§26）是一张互相引用的密网——§7.5 的不变量依赖 §8.4 的 sysctl 结论，§8.5.3 的 pref 策略依赖 §14.1 的性能预算——实现者会把它们一起读，所以不再往下拆。
 
-| 主题 | 唯一真相源 |
-|---|---|
-| 0.9.1 产品合同 | `blueprint.md` + `blueprint-0.9.1.md`；冲突时后者优先 |
-| 数据面 ABI | `../bpf/include/flux_abi.h`（`crates/flux-core/src/abi.rs` 是手写镜像，offset 在**编译期**断言） |
-| engine 资产 | `../engine.lock` |
-| 实测数据 | `../tools/phase0/results/`，只增不改 |
-| 研究引用的第三方源码 | `../tools/clone-manifest.md` + `../tools/reclone.sh` 重建 `clone/`（源码本身不进 git） |
-
-## 当前状态
-
-0.9.0 设计于 2026-08-25 定稿并冻结。0.9.1 增量蓝图于 2026-08-28 建立、2026-08-29 定稿，用于修正文档冲突和对齐已测试实现；它不等同于已发布 `v0.9.1`。
-
-| | 状态 |
-|---|---|
-| Phase 0 观测半场 | ✅ 完成 |
-| Phase 0 Q10（厂商 filter 是否遮挡我们） | ✅ **通过** |
-| Phase 0 Q1（SK_STORAGE first-decision） | ✅ **通过**（基线内核，§16.6） |
-| Phase 0 Q9（per-app DNS，D18 的赌注） | ✅ **通过**（§16.7） |
-| 产品数据面四个程序过验证器 | ✅ **通过**（基线内核，§16.8.5） |
-| Phase 0 Q2（listener / lookup / **assign 成功**） | ✅ **通过**（§16.10） |
-| Phase 1–8 实现 | ✅ 已进入仓库；当前明细见 `plan/implementation.md` |
-| Phase 0 Q3–Q8 | ✅ 对应 Phase 3–7 device acceptance 已提交；发布前仍按 §20 复核证据完整性 |
-| 当前发布状态 | 预发布验证；没有 `v0.9.1` 发布授权 |
+完整论证见 AUTH-0 与 AUTH-1。

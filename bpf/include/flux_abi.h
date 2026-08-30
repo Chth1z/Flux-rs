@@ -29,9 +29,9 @@
  *             into dedicated exact HASH maps (self_addr_v4/v6) and a per-UID
  *             byte counter is added (uid_stats). The listener addresses move
  *             out of the range sing-box conventionally uses for fakeip.
- *             See docs/blueprint.md D20, D21, D23.
+ *             See docs/spec/blueprint.md D20, D21, D23.
  * 0xF10C0902: added the flx_verify probe program and FLUX_CNT_SAW_PACKET, for
- *             the positive liveness check in docs/blueprint.md section 8.5.4.
+ *             the positive liveness check in docs/spec/blueprint.md section 8.5.4.
  *             Needed because a vendor filter at a lower TC preference can
  *             terminate the classifier chain, so "attach succeeded" does not
  *             imply "our program runs". Deliberately a SEPARATE program rather
@@ -87,7 +87,7 @@
  * old caps made "select every third-party app" structurally impossible. And
  * uid_policy has to hold selected plus every DRAINING entry accumulated during
  * a boot, because DRAINING entries are never deleted (see flux_uid_mode).
- * Details in docs/blueprint.md section 1.5.3.
+ * Details in docs/spec/blueprint.md section 1.5.3.
  */
 #define FLUX_UID_POLICY_MAX_ENTRIES 4096u
 #define FLUX_UID_SELECTED_MAX       1024u
@@ -228,7 +228,7 @@ struct flux_control {
  * /15 into the fixed bypass -- which made every fakeip address un-capturable,
  * so fakeip failed silently and completely. The convention is theirs and older,
  * so Flux moves. Only the exact listener address is bypassed now, not a prefix.
- * See docs/blueprint.md D21 and section 9.0.
+ * See docs/spec/blueprint.md D21 and section 9.0.
  */
 #define FLUX_LISTEN_V4_STR "198.51.100.1"        /* RFC 5737 TEST-NET-2    */
 #define FLUX_LISTEN_V6_STR "2001:db8:0:1::2"     /* RFC 3849 documentation */
@@ -357,7 +357,7 @@ enum flux_counter {
  * ELF section per program. These are not free-form labels: a section name that
  * libbpf does not recognise makes the object unloadable by bpftool, which is
  * how the verifier gets exercised during development and in CI. Measured on
- * the baseline (bpftool v5.16, kernel 5.15.211, see docs/verification/phase0.md
+ * the baseline (bpftool v5.16, kernel 5.15.211, see docs/history/phase0.md
  * section 16.7):
  *
  *   loads AND attaches via legacy tc : tc, classifier, tc/ingress, tc/egress,
@@ -395,7 +395,7 @@ enum flux_counter {
  * ifindex, ifname, parent/direction, kind == "bpf", direct-action, program
  * name, the program's map set, the identity snapshot of numerically smaller
  * preferences, and the positive liveness result. The filter need not be first in dump order
- * (docs/blueprint-0.9.1.md R091-05).
+ * (docs/spec/blueprint-0.9.1.md R091-05).
  */
 #define FLUX_TC_CHAIN 0
 #define FLUX_TC_HANDLE_EGRESS 0x1
@@ -409,7 +409,7 @@ enum flux_counter {
  *
  * The loader therefore DUMPS the parent first and picks the lowest preference
  * that satisfies the ordering constraints, recording what it actually got.
- * Two rules the loader must honour (docs/blueprint.md section 8.5.3):
+ * Two rules the loader must honour (docs/spec/blueprint.md section 8.5.3):
  *
  *   - Avoid pref 1 even when it looks free. The vendor attaches late (observed
  *     minutes after the link carried traffic), so taking pref 1 either breaks

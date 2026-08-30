@@ -75,7 +75,7 @@ fn check_bpf(report: &mut CheckReport) {
 
 /// The bounded-time check: `flux.toml`, `packages.list` resolution,
 /// `sing-box.json` structure and §9 constraints, clash_api hardening
-/// (`docs/ux.md` §3.2), and engine binary presence. No subprocesses.
+/// (`docs/spec/interaction.md` §27.3.2), and engine binary presence. No subprocesses.
 pub fn quick_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
     let mut report = CheckReport::default();
     check_flux_toml(layout, &mut report);
@@ -390,7 +390,7 @@ fn overlaps_v6(left: Ipv6Cidr, right: Ipv6Cidr) -> bool {
     u128::from(left.addr) & mask == u128::from(right.addr) & mask
 }
 
-/// `docs/ux.md` §3.2: with `experimental.clash_api` present, an empty `secret`
+/// `docs/spec/interaction.md` §27.3.2: with `experimental.clash_api` present, an empty `secret`
 /// or a non-loopback `external_controller` is an ERROR, not a warning — either
 /// one hands the proxy control plane to every app (or every Wi-Fi neighbour).
 fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
@@ -406,7 +406,7 @@ fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
         _ => {
             report.errors.push(
                 "clash_api_secret_missing: experimental.clash_api.secret is empty or absent; \
-                 any app could reconfigure the proxy (docs/ux.md §3.2)"
+                 any app could reconfigure the proxy (docs/spec/interaction.md §27.3.2)"
                     .to_string(),
             );
         }
@@ -421,7 +421,7 @@ fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
         if !loopback {
             report.errors.push(format!(
                 "clash_api_not_loopback: external_controller `{controller}` is not bound to \
-                 loopback; the control plane would be exposed to the network (docs/ux.md §3.2)"
+                 loopback; the control plane would be exposed to the network (docs/spec/interaction.md §27.3.2)"
             ));
         }
     }

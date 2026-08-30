@@ -12,7 +12,7 @@
 //! * No `libc`, no `unsafe`, no I/O. `unsafe_code` is `forbid`den above.
 //! * No trait abstraction layers for a single implementation.
 //!
-//! The design contract is `docs/blueprint.md`. Section references in these
+//! The design contract is `docs/spec/blueprint.md`. Section references in these
 //! modules point at it and are load-bearing: do not implement a module without
 //! reading the section it cites.
 

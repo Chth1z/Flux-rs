@@ -1,17 +1,22 @@
-//! `cargo xtask doc-check` — the four mechanical documentation checks of
+//! `cargo xtask doc-check` — the five mechanical documentation checks of
 //! `docs/plan/implementation.md` §17.4 (exit criterion 6).
 //!
 //! Each one has caught a real defect before it was automated, which is why it
 //! exists (that section, closing paragraph):
 //!
-//! 1. The chapter map in `docs/README.md` points at files that exist and that
+//! 1. The chapter map in `docs/index.md` points at files that exist and that
 //!    really carry the `# 第 N 部分` heading (the map once pointed at files
 //!    that had been moved out).
 //! 2. Every relative markdown link under `docs/` resolves.
-//! 3. `flux_abi.h`'s `FLUX_SEC_*` and `abi.rs`'s `SEC_*` agree byte-for-byte
+//! 3. Every identifier cited anywhere resolves, and no document outside the
+//!    blueprint claims a `§` number. Both halves were violated on the day the
+//!    rule was written: `ux.md` numbered itself §1–§8 against the blueprint's
+//!    §1–§8, `philosophy.md` did the same, and a citation to a philosophy §8
+//!    outlived the section it named.
+//! 4. `flux_abi.h`'s `FLUX_SEC_*` and `abi.rs`'s `SEC_*` agree byte-for-byte
 //!    and every section name is in the set measured usable on the baseline
-//!    device (`docs/verification/phase0.md` §16.8.2).
-//! 4. The overturn numbering in `docs/evidence/review-log.md` is continuous
+//!    device (`docs/history/phase0.md` §16.8.2).
+//! 5. The overturn numbering in `docs/history/review-log.md` is continuous
 //!    and consistent with the total the blueprint claims (the count once
 //!    existed in three contradictory versions: 5, 7 and 8).
 
@@ -23,8 +28,9 @@ pub fn run() -> Result<(), String> {
     let root = util::repo_root();
     let mut failures: Vec<String> = Vec::new();
 
-    check_chapter_map(&root, &mut failures)?;
+    let map = check_chapter_map(&root, &mut failures)?;
     check_links(&root, &mut failures)?;
+    check_identifiers(&root, &map, &mut failures)?;
     check_sections(&root, &mut failures)?;
     check_overturns(&root, &mut failures)?;
 
@@ -40,20 +46,20 @@ pub fn run() -> Result<(), String> {
 
 // --------------------------------------------------------- 1. chapter map
 
-/// Parse the `## 章节编号 → 文件` table in `docs/README.md` and verify each
+/// Parse the `## 章节编号 → 文件` table in `docs/index.md` and verify each
 /// row: the file exists and carries a level-1 `# 第 N 部分：<title>` heading
 /// for that part number. The 内容 column is a description, not the heading
 /// text, so the mechanical anchor is the globally stable part number
-/// (`authoring.md` §1.1), not a string comparison against prose.
-fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    let readme_path = root.join("docs/README.md");
+/// (AUTH-1.1), not a string comparison against prose.
+fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<Vec<u32>, String> {
+    let readme_path = root.join("docs/index.md");
     let readme = util::read_text(&readme_path)?;
 
     let mut rows: Vec<(u32, String, usize)> = Vec::new();
     let mut in_table_section = false;
     for (idx, line) in readme.lines().enumerate() {
         if line.starts_with("## ") {
-            in_table_section = line.trim() == "## 章节编号 → 文件";
+            in_table_section = line.trim().ends_with("章节编号 → 文件");
             continue;
         }
         if !in_table_section || !line.starts_with('|') {
@@ -69,7 +75,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
         };
         let Ok(number) = number.trim().parse::<u32>() else {
             failures.push(format!(
-                "docs/README.md:{}: chapter row `{}` has an unparsable part number",
+                "docs/index.md:{}: chapter row `{}` has an unparsable part number",
                 idx + 1,
                 cells[1]
             ));
@@ -79,8 +85,8 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
     }
 
     if rows.is_empty() {
-        failures.push("docs/README.md: chapter map table not found".into());
-        return Ok(());
+        failures.push("docs/index.md: chapter map table not found".into());
+        return Ok(Vec::new());
     }
 
     // Numbering must be dense: every part number exactly once, no gaps.
@@ -88,7 +94,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
         let (prev, next) = (&pair[0], &pair[1]);
         if next.0 != prev.0 + 1 {
             failures.push(format!(
-                "docs/README.md:{}: chapter map jumps from §{} to §{}",
+                "docs/index.md:{}: chapter map jumps from §{} to §{}",
                 next.2, prev.0, next.0
             ));
         }
@@ -100,7 +106,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
         let path = root.join("docs").join(file);
         if !path.is_file() {
             failures.push(format!(
-                "docs/README.md:{line}: §{number} maps to `{file}`, which does not exist"
+                "docs/index.md:{line}: §{number} maps to `{file}`, which does not exist"
             ));
             continue;
         }
@@ -112,7 +118,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
             checked += 1;
         } else {
             failures.push(format!(
-                "docs/README.md:{line}: §{number} maps to `{file}`, but that file has no \
+                "docs/index.md:{line}: §{number} maps to `{file}`, but that file has no \
                  `# 第 {number} 部分：…` heading"
             ));
         }
@@ -123,7 +129,154 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<(), Stri
         rows.first().map(|r| r.0).unwrap_or(0),
         rows.last().map(|r| r.0).unwrap_or(0),
     );
+    Ok(rows.iter().map(|r| r.0).collect())
+}
+
+// ---------------------------------------------------- 3. identifier registry
+
+/// Every prefix registered in `docs/index.md` §1, and the heading pattern that
+/// defines one of its identifiers.
+const NAMESPACES: [(&str, &str); 3] = [
+    ("PHIL", "docs/philosophy.md"),
+    ("GOV", "docs/governance.md"),
+    ("AUTH", "docs/authoring.md"),
+];
+
+/// Two properties the identifier system promises and cannot enforce by hand:
+///
+/// 1. every `PREFIX-N` cited anywhere resolves to a heading that exists;
+/// 2. no document outside the blueprint namespace claims a `§` number.
+///
+/// Both were violated the day the rule was written: `philosophy.md` numbered
+/// its own sections §0–§7, colliding with the blueprint, and a citation to its
+/// §8 outlived the section itself.
+fn check_identifiers(root: &Path, parts: &[u32], failures: &mut Vec<String>) -> Result<(), String> {
+    // Which identifiers actually exist, per namespace.
+    let mut defined: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (prefix, file) in NAMESPACES {
+        let text = util::read_text(&root.join(file))?;
+        let mut ids = Vec::new();
+        for line in text.lines() {
+            let Some(rest) = line
+                .strip_prefix("## ")
+                .or_else(|| line.strip_prefix("### "))
+            else {
+                continue;
+            };
+            let Some(tail) = rest.strip_prefix(prefix).and_then(|t| t.strip_prefix('-')) else {
+                continue;
+            };
+            let id: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if !id.is_empty() {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            failures.push(format!("{file}: defines no {prefix}-N headings at all"));
+        }
+        defined.insert(prefix, ids);
+    }
+
+    let mut files = Vec::new();
+    collect_markdown(&root.join("docs"), &mut files)?;
+    files.sort();
+
+    // A meta document must not use the section sign for its own sections.
+    for (_, file) in NAMESPACES {
+        let path = root.join(file);
+        let text = util::read_text(&path)?;
+        for (idx, line) in text.lines().enumerate() {
+            if line.starts_with("## ") || line.starts_with("### ") {
+                if let Some(rest) = line.trim_start_matches('#').trim_start().strip_prefix('§') {
+                    failures.push(format!(
+                        "{file}:{}: heading claims §{} — the section sign belongs to the \
+                         blueprint alone (index.md §1)",
+                        idx + 1,
+                        rest.split_whitespace().next().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+    }
+
+    // Every cited identifier must resolve.
+    let mut checked = 0usize;
+    for file in &files {
+        let text = util::read_text(file)?;
+        let shown = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .display()
+            .to_string();
+        for (idx, line) in text.lines().enumerate() {
+            for (prefix, ids) in &defined {
+                for cited in cited_ids(line, prefix) {
+                    checked += 1;
+                    if !ids.contains(&cited) {
+                        failures.push(format!(
+                            "{shown}:{}: {prefix}-{cited} does not exist",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+            // Blueprint parts: only the top-level number is registered.
+            for cited in cited_sections(line) {
+                checked += 1;
+                if !parts.contains(&cited) {
+                    failures.push(format!(
+                        "{shown}:{}: §{cited} is not a registered part (index.md §4)",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+    }
+    println!(
+        "doc-check: identifiers — {} namespaces registered, {checked} references resolved",
+        defined.len() + 1
+    );
     Ok(())
+}
+
+/// `PREFIX-1.2` occurrences in one line, returned as `1.2`.
+fn cited_ids(line: &str, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let needle = format!("{prefix}-");
+    let mut rest = line;
+    while let Some(at) = rest.find(&needle) {
+        let after = &rest[at + needle.len()..];
+        let raw: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let consumed = raw.len();
+        let id = raw.trim_end_matches('.').to_string();
+        if !id.is_empty() {
+            out.push(id);
+        }
+        rest = &after[consumed.min(after.len())..];
+    }
+    out
+}
+
+/// The top-level part number of every `§N…` in one line. `§8.5.3` yields 8.
+/// Escaped forms inside `rg` examples (`§8\.5\.3`) are read the same way.
+fn cited_sections(line: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(at) = rest.find('§') {
+        let after = &rest[at + '§'.len_utf8()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            out.push(n);
+        }
+        rest = &after[digits.len().min(after.len())..];
+    }
+    out
 }
 
 /// Does `text` contain a level-1 heading `# 第 <numbers> 部分：<title>` whose
@@ -234,7 +387,7 @@ fn link_targets(line: &str) -> Vec<&str> {
 // ------------------------------------------------- 3. ELF section names
 
 /// The section names measured loadable AND attachable via legacy `tc` on the
-/// baseline device (`docs/verification/phase0.md` §16.8.2). `action` loads
+/// baseline device (`docs/history/phase0.md` §16.8.2). `action` loads
 /// but selects `SCHED_ACT` and cannot attach, so it is deliberately absent.
 const USABLE_SECTIONS: [&str; 5] = ["tc", "classifier", "tc/ingress", "tc/egress", "tcx/egress"];
 
@@ -331,7 +484,7 @@ fn check_sections(root: &Path, failures: &mut Vec<String>) -> Result<(), String>
 /// All of N == M + K, M == before, K == added, and the table numbering must
 /// hold simultaneously.
 fn check_overturns(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    let log_path = root.join("docs/evidence/review-log.md");
+    let log_path = root.join("docs/history/review-log.md");
     let log = util::read_text(&log_path)?;
 
     // Locate §0.6 and its extent (up to the next heading of any level).
@@ -408,7 +561,7 @@ fn check_overturns(root: &Path, failures: &mut Vec<String>) -> Result<(), String
     let log_total = before + table_numbers.len() as u64;
 
     // The blueprint's claim.
-    let blueprint_path = root.join("docs/blueprint.md");
+    let blueprint_path = root.join("docs/spec/blueprint.md");
     let blueprint = util::read_text(&blueprint_path)?;
     let Some(claim_at) = blueprint.find("共推翻自己") else {
         failures.push("blueprint.md: the overturn-total claim (`共推翻自己…次`) is gone".into());
@@ -546,6 +699,26 @@ mod tests {
         );
         assert_eq!(count_before(claim, "次在实测前"), Some(5));
         assert_eq!(count_after(claim, "实测前，", '次'), Some(3));
+    }
+
+    #[test]
+    fn identifier_citations_extract() {
+        assert_eq!(cited_ids("see PHIL-1 and PHIL-10", "PHIL"), ["1", "10"]);
+        assert_eq!(cited_ids("(GOV-1.2) and GOV-6.2.", "GOV"), ["1.2", "6.2"]);
+        // A trailing full stop is punctuation, not part of the identifier.
+        assert_eq!(cited_ids("per AUTH-0.", "AUTH"), ["0"]);
+        assert!(cited_ids("PHILOSOPHY is not a citation", "PHIL").is_empty());
+        assert!(cited_ids("nothing here", "PHIL").is_empty());
+    }
+
+    #[test]
+    fn section_citations_yield_the_part_number() {
+        assert_eq!(cited_sections("§8.5.3 depends on §14.1"), [8, 14]);
+        assert_eq!(cited_sections("the escaped form §8\\.5\\.3"), [8]);
+        assert_eq!(cited_sections("§0 and §27"), [0, 27]);
+        assert!(cited_sections("no sections").is_empty());
+        // A lone sign with no number is prose, not a citation.
+        assert!(cited_sections("the § symbol").is_empty());
     }
 
     #[test]

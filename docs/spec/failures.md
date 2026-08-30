@@ -1,8 +1,8 @@
 # 失败矩阵与 status 规格
 
-> 原 blueprint.md 第 23、24 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 `docs/authoring.md` §1.1）。
+> 原 blueprint.md 第 23、24 部分。**章节编号未变**：本文里的 §N.x 就是全仓库引用的那个 §N.x（见 AUTH-1.1）。
 >
-> 谁读这份：拿着一个错误码来查含义的人。本文投影 0.9.1；规范性合同是冻结的 `docs/blueprint.md` 加 `docs/blueprint-0.9.1.md`，冲突时后者优先。
+> 谁读这份：拿着一个错误码来查含义的人。本文投影 0.9.1；规范性合同是冻结的 `docs/spec/blueprint.md` 加 `docs/spec/blueprint-0.9.1.md`，冲突时后者优先。
 
 ---
 
@@ -74,7 +74,8 @@
 | 场景 | 行为 | 遗留 |
 |---|---|---|
 | `fluxd stop` | publish `active=0` → `SIGTERM` engine → 短 deadline → `SIGKILL` → pidfd 确认 → 正常退出(0) | veth/BPF/TC 对象**保留**（下次启动删除重建）；service.sh 因退出码 0 不重启 |
-| `fluxd disable` | 创建 `disable`，publish `active=0`，停止 engine；daemon 继续运行等命令 | 同上；“已停用”不表示同 boot 已拆除网络对象 |
+| 在管理器里关掉模块 | 管理器创建 `/data/adb/modules/flux_rs/disable`；inotify 唤醒 daemon，之后同下一行 | 同下一行；无需重启 |
+| `fluxd disable` | 创建同一个 `disable`，publish `active=0`，停止 engine；daemon 继续运行等命令 | 同上；“已停用”不表示同 boot 已拆除网络对象 |
 | `SIGTERM` / `SIGINT` | 同 `stop` | 同上 |
 | `fluxd` 被 `SIGKILL` | engine 因 `PDEATHSIG=SIGKILL` 被内核终止 → listener 消失 → **新流因 listener lookup miss 而 Direct**；已入场 TCP 的包 redirect 后在 ingress drop | TC filter + veth + rule + route 全部残留。**这是 fail-open 的关键路径**：残留的 capture 程序不会形成黑洞，因为它每次都要先查 listener |
 | `service.sh` 重启 fluxd | §8.7 步骤 2 删除全部精确自有残留后重建 | 归零 |
@@ -94,7 +95,7 @@
 ```jsonc
 {
   "ok": true,
-  "version": "0.9.1",                // 目标值；实施前当前 workspace 仍报告 0.9.0
+  "version": "0.9.0",                // 唯一来源是 workspace manifest，随发布 bump
   "abi_magic": "0xF10C0903",
   "state": "Disabled" | "Inactive" | "Active",
   "generation": 7,
@@ -111,10 +112,12 @@
   "ifaces": [
     { "name": "wlan0", "ifindex": 24, "arphrd": "ether",
       "entry": "flx_cap_l2", "status": "active",
-      "prog_id": 118, "prog_tag": "a1b2c3d4e5f60718", "pref": 2,
-      "first_applicable": true },      // 兼容字段：表示已验证可达，不表示 dump 排第一
+      "prog_id": 118, "prog_tag": "a1b2c3d4e5f60718",
+      "pref": 2,                       // 该接口实际占用的 preference，逐接口选择
+      "first_applicable": true },      // 兼容字段：已验证可达，不表示 dump 排第一
     { "name": "rmnet_data0", "ifindex": 30, "arphrd": "rawip",
-      "entry": "flx_cap_l3", "status": "active", "…": null },
+      "entry": "flx_cap_l3", "status": "admitted",
+      "pref": 2, "…": null },          // 无 first_applicable：存活验证尚未出结论
     { "name": "v4-rmnet_data0", "ifindex": 31, "arphrd": "none",
       "status": "excluded", "reason": "clat_order_unverified" }
   ],
@@ -135,7 +138,9 @@
 }
 ```
 
-`disable` 文件存在表示 desired state 是 disabled。engine 尚在终止或收敛仍忙时，顶层可以短暂为 `Inactive` 并给出 pending warning；完成后才是 `Disabled`。这三个状态都不单独承诺 cleanup。
+`/data/adb/modules/flux_rs/disable` 存在表示 desired state 是 disabled——那是管理器自己的模块开关，`fluxd` 用 inotify 监听它。engine 尚在终止或收敛仍忙时，顶层可以短暂为 `Inactive` 并给出 pending warning；完成后才是 `Disabled`。这三个状态都不单独承诺 cleanup。
+
+同一份状态会被 `fluxd` 渲染成一行写进 `module.prop` 的 `description=`，供管理器列表显示；那只是**投影**，权威仍然是这里的 JSON。
 
 ## 24.2 错误码命名规则
 
@@ -151,6 +156,8 @@
 | `excluded(<reason>)` | 单个 interface 被排除，其余仍工作 | `excluded(tc_chain_shadowed)` |
 
 `not_first_applicable` 是 0.9.0 已公开的兼容 token。0.9.1 保留编码但收窄含义为“attachment identity 或已验证的前置 filter 快照不再成立”；人类文案统一说“不可达/需重新验证”，不能据字段名声称 Flux 必须排在 dump 第一项。
+
+`ifaces[].first_applicable` 三态且缺省有意义：字段缺席表示尚未得出结论（`flx_verify` 未出结果，或 `tc_dump_failed` 这类根本没看到的情形），`true` 表示可达性已验证，`false` 表示明确判定不可达（遮挡、身份漂移或 attach 失败）。**不要把缺席读成 `false`。**
 
 ## 24.3 必须产生的 warning
 
