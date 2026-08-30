@@ -1,27 +1,160 @@
-// Flux-rs bootstrap configuration (blueprint §9.6).
+// Flux-rs bootstrap configuration (blueprint §9.6, R091-03).
 //
-// Flux injects exactly two tproxy inbounds into an immutable per-generation
-// copy. Keep this user-authority template deliberately small: one official
-// direct outbound, a direct final route, and the two §1.3.4 DNS rules. Users
-// can replace the file with any complete supported sing-box configuration.
+// Adapted from the original Flux module's conf/template.json so both projects
+// present users the same shape. Three deliberate differences, each forced:
+//
+//   * no "inbounds": Flux injects exactly two tproxy inbounds of its own into
+//     an immutable per-generation copy, and a template inbound would compete
+//     with them for the listener (blueprint §9.1);
+//   * no "experimental.clash_api": a shipped default must not open a control
+//     port, and the original ships one with no secret (R091-03, C10);
+//   * PROXY starts as a one-member group pointing at DIRECT, because an empty
+//     selector cannot be resolved and a fresh install must pass `fluxd check`
+//     before the user has edited anything;
+//   * the IPv6 fakeip range is 2001:db8:f::/48, not the original's fc00::/18.
+//     Flux bypasses all of fc00::/7 because ULA is private space that must go
+//     direct, so a fakeip inside it would be sent direct and every IPv6 fakeip
+//     connection would fail silently. `fluxd check` rejects that overlap
+//     outright (blueprint D21, §9.0.1).
+//
+// This file is yours. Replace it with any complete supported sing-box
+// configuration, then run `fluxd check`. Flux never rewrites it.
 {
-  "outbounds": [
-    { "type": "direct", "tag": "DIRECT" }
-  ],
-
-  "route": {
-    "rules": [
-      { "action": "sniff" },
+  "log": {
+    "level": "error",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
       {
-        "type": "logical",
-        "mode": "or",
-        "rules": [
-          { "port": 53 },
-          { "protocol": "dns" }
-        ],
-        "action": "hijack-dns"
+        "type": "https",
+        "tag": "dns_proxy",
+        "server": "1.1.1.1",
+        "detour": "PROXY"
+      },
+      {
+        "type": "https",
+        "tag": "dns_direct",
+        "server": "223.5.5.5"
+      },
+      {
+        "type": "fakeip",
+        "tag": "dns_fakeip",
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "2001:db8:f::/48"
       }
     ],
-    "final": "DIRECT"
+    "rules": [
+      {
+        "clash_mode": "Direct",
+        "server": "dns_direct"
+      },
+      {
+        "clash_mode": "Global",
+        "server": "dns_proxy"
+      },
+      {
+        "rule_set": "cn",
+        "server": "dns_direct"
+      },
+      {
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "rule_set": "proxy",
+        "server": "dns_fakeip"
+      }
+    ],
+    "final": "dns_proxy",
+    "strategy": "prefer_ipv4",
+    "independent_cache": true
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "DIRECT"
+    },
+    {
+      "type": "selector",
+      "tag": "PROXY",
+      "outbounds": [
+        "DIRECT"
+      ],
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "GLOBAL",
+      "outbounds": [
+        "PROXY"
+      ]
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "clash_mode": "Direct",
+        "outbound": "DIRECT"
+      },
+      {
+        "clash_mode": "Global",
+        "outbound": "GLOBAL"
+      },
+      {
+        "rule_set": "cn",
+        "outbound": "DIRECT"
+      },
+      {
+        "rule_set": "cnip",
+        "outbound": "DIRECT"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "DIRECT"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "proxy",
+        "format": "binary",
+        "url": "https://ghfast.top/https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/proxy.srs",
+        "update_interval": "1d"
+      },
+      {
+        "type": "remote",
+        "tag": "cn",
+        "format": "binary",
+        "url": "https://ghfast.top/https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs",
+        "update_interval": "1d"
+      },
+      {
+        "type": "remote",
+        "tag": "cnip",
+        "format": "binary",
+        "url": "https://ghfast.top/https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
+        "update_interval": "1d"
+      }
+    ],
+    "final": "PROXY",
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns_direct"
+    }
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_fakeip": true,
+      "store_rdrc": true
+    }
   }
 }

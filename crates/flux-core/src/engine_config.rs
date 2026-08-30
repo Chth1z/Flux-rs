@@ -191,7 +191,13 @@ pub fn strip_jsonc_comments(input: &str) -> String {
 }
 
 /// Parses a JSONC document (comments allowed) into a value.
+///
+/// A leading UTF-8 BOM is skipped. Editors on Windows add one routinely, and
+/// the resulting `serde_json` message ("expected value at line 1 column 1")
+/// points at a byte the user cannot see, which makes a trivial problem look
+/// like a corrupt config.
 pub fn parse_jsonc(text: &str) -> Result<Value, serde_json::Error> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     serde_json::from_str(&strip_jsonc_comments(text))
 }
 
@@ -333,27 +339,12 @@ mod tests {
         let config = parse_jsonc(DEFAULT_SING_BOX_JSONC).expect("template parses as JSONC");
 
         // No inbound, so Flux can inject its own.
-        assert!(build_effective(&config, &params()).is_ok());
-
-        // The bootstrap remains exactly the small §9.6 direct configuration;
-        // remote rule sets, selectors, DNS policy, and WebUI belong to the
-        // user's authority file rather than the module default.
         let top = config.as_object().expect("template is an object");
-        assert_eq!(top.len(), 2);
-        assert!(top.contains_key("outbounds"));
-        assert!(top.contains_key("route"));
-        assert_eq!(
-            config["outbounds"],
-            json!([{ "type": "direct", "tag": "DIRECT" }])
+        assert!(
+            !top.contains_key("inbounds"),
+            "the template must leave the inbound side to Flux"
         );
-        assert_eq!(config["route"]["final"], "DIRECT");
-        assert_eq!(
-            config["route"]["rules"]
-                .as_array()
-                .expect("template route.rules is an array")
-                .len(),
-            2
-        );
+        assert!(build_effective(&config, &params()).is_ok());
 
         // Both route rules remain present (blueprint §1.3.4).
         assert!(
@@ -364,6 +355,47 @@ mod tests {
             has_dns_hijack_rule(&config),
             "default template lacks a hijack-dns rule"
         );
+
+        // A shipped default must never open a control port (R091-03, C10).
+        assert!(
+            config.pointer("/experimental/clash_api").is_none(),
+            "the template must not ship a clash_api listener"
+        );
+
+        // Every group must resolve, or a fresh install fails `fluxd check`
+        // before the user has edited anything.
+        for outbound in config["outbounds"].as_array().expect("outbounds array") {
+            let kind = outbound["type"].as_str().unwrap_or_default();
+            if matches!(kind, "selector" | "urltest") {
+                let members = outbound["outbounds"].as_array();
+                assert!(
+                    members.is_some_and(|list| !list.is_empty()),
+                    "group {} ships with no members",
+                    outbound["tag"]
+                );
+            }
+        }
+
+        // The IPv6 fakeip range must stay out of fc00::/7: Flux bypasses ULA as
+        // private space, so a fakeip inside it would be sent direct and every
+        // IPv6 fakeip connection would fail silently (D21).
+        for server in config["dns"]["servers"].as_array().expect("dns servers") {
+            if server["type"] == "fakeip" {
+                let range = server["inet6_range"].as_str().unwrap_or_default();
+                assert!(
+                    !range.starts_with("fc") && !range.starts_with("fd"),
+                    "fakeip inet6_range {range} lies inside the fixed ULA bypass"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_leading_byte_order_mark_is_not_a_syntax_error() {
+        // Editing sing-box.json on Windows routinely adds one, and the raw
+        // serde message points at an invisible byte.
+        let value = parse_jsonc("\u{feff}{\"outbounds\": []}").expect("BOM is skipped");
+        assert_eq!(value["outbounds"], json!([]));
     }
 
     #[test]
