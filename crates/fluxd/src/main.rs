@@ -40,6 +40,8 @@ mod layout;
 mod netlink;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod reactor;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod subscription;
 
 use std::process::ExitCode;
 
@@ -59,6 +61,7 @@ COMMANDS:
     status     Ask the daemon for its state (--json for the raw response)
     check      Validate configuration and engine without changing anything
     reload     Ask the daemon to re-read configuration and converge
+    subscribe  Fetch the subscription once and rotate only when output changes
     stop       Ask the daemon to publish inactive, stop the engine, and exit
     enable     Remove the disable file (the daemon reacts via inotify)
     disable    Create the disable file (the daemon reacts via inotify)
@@ -113,7 +116,15 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
 
     /// One request against the running daemon, or a readable refusal.
     fn ask(layout: &Layout, request: Request) -> Result<Response, String> {
-        control::request(&layout.control_socket(), &request, Duration::from_secs(30)).map_err(|e| {
+        ask_with_timeout(layout, request, Duration::from_secs(30))
+    }
+
+    fn ask_with_timeout(
+        layout: &Layout,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<Response, String> {
+        control::request(&layout.control_socket(), &request, timeout).map_err(|e| {
             format!(
                 "fluxd daemon is not reachable at {} ({e})",
                 layout.control_socket().display()
@@ -314,6 +325,23 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+
+        "subscribe" => {
+            match ask_with_timeout(&layout, Request::Subscribe, Duration::from_secs(125)) {
+                Ok(response) => {
+                    print_status(&response);
+                    if response.ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
 
         "stop" => match ask(&layout, Request::Stop) {
             Ok(_) => {

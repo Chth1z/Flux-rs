@@ -35,7 +35,7 @@ pub enum State {
 
 /// A command from a client to the daemon.
 ///
-/// All six commands are idempotent by construction (blueprint §10.3), so the
+/// All seven commands are idempotent by construction (blueprint §10.3), so the
 /// protocol needs no request-id de-duplication. New commands must preserve that
 /// property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,8 @@ pub enum Request {
     Disable,
     /// Re-read configuration and converge.
     Reload,
+    /// Fetch the configured subscription once and rotate only if output changes.
+    Subscribe,
     /// Publish inactive, stop the engine, and exit zero without a broad flush.
     Stop,
 }
@@ -279,6 +281,7 @@ mod tests {
             Request::Enable,
             Request::Disable,
             Request::Reload,
+            Request::Subscribe,
             Request::Stop,
         ] {
             let line = to_line(&request).expect("serialise");

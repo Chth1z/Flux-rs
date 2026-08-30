@@ -263,13 +263,36 @@ mod tests {
         let old_generation = before.generation;
         let old_pid = before.engine.pid;
 
+        // §28.6: an unchanged template must not rotate. Restarting the engine
+        // for identical bytes would drop live connections to prove nothing.
+        let (code, stdout, stderr) = env.run(&["reload"]);
+        assert_eq!(code, 0, "reload failed: {stdout} {stderr}");
+        let unchanged = env.status();
+        assert!(unchanged.engine.running, "engine survives a reload");
+        assert_eq!(
+            unchanged.generation, old_generation,
+            "an unchanged template must not rotate"
+        );
+        assert_eq!(unchanged.engine.pid, old_pid, "nor restart the engine");
+
+        // A template that does generate different bytes must rotate.
+        std::fs::write(
+            env.root.join("config/template.json"),
+            serde_json::json!({
+                "outbounds": [ { "type": "direct", "tag": CONFIG_SENTINEL } ],
+                "log": { "level": "debug" }
+            })
+            .to_string(),
+        )
+        .expect("template.json");
+
         let (code, stdout, stderr) = env.run(&["reload"]);
         assert_eq!(code, 0, "reload failed: {stdout} {stderr}");
         let response = env.status();
         assert!(response.engine.running, "engine survives a reload");
         assert!(
             response.generation > old_generation,
-            "hot switch must advance the generation ({} -> {})",
+            "changed content must advance the generation ({} -> {})",
             old_generation,
             response.generation
         );
@@ -403,6 +426,19 @@ mod tests {
 
     fn scenario_queued_reload_waits_for_convergence(env: &Env) {
         let before = env.status();
+
+        // The template must actually differ, or §28.6 skips the rotation and
+        // there is no switch window for this scenario to observe.
+        std::fs::write(
+            env.root.join("config/template.json"),
+            serde_json::json!({
+                "outbounds": [ { "type": "direct", "tag": CONFIG_SENTINEL } ],
+                "log": { "level": "info" }
+            })
+            .to_string(),
+        )
+        .expect("template.json");
+
         let mut first = env.command(&["reload"]).spawn().expect("first reload");
 
         // The fake engine delays listener creation. Seeing no promoted engine
@@ -418,6 +454,17 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        // The queued reload needs its own distinct content for the same reason.
+        std::fs::write(
+            env.root.join("config/template.json"),
+            serde_json::json!({
+                "outbounds": [ { "type": "direct", "tag": CONFIG_SENTINEL } ],
+                "log": { "level": "warn" }
+            })
+            .to_string(),
+        )
+        .expect("template.json");
 
         let second = env.command(&["reload"]).spawn().expect("queued reload");
         let second_output = second.wait_with_output().expect("queued reload output");

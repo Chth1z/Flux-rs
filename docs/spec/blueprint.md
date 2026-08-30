@@ -3426,8 +3426,19 @@ Two, distinguished **by content**, never by file extension, URL suffix or the
 - **Already sing-box JSON** — take `.outbounds`. Measured: providers return a
   complete config when the request carries a `sing-box` user agent.
 - **Base64-encoded URI list** — decode, then parse each line as `vmess`,
-  `vless`, `trojan`, `hysteria`, `hysteria2`, `tuic`, `ss`, `socks`, `http` or
-  `snell`.
+  `vless`, `trojan`, `hysteria`, `hysteria2`, `tuic`, `ss`, `socks` or `http`.
+
+The supported set is exactly what the pinned engine can run, and nothing wider.
+`snell` was listed here through 0.9.5 and is not: it is Surge-proprietary and
+appears nowhere in sing-box, so under §1.1's unmodified official binary a snell
+node could never connect. Parsing one would have produced a candidate that fails
+`sing-box check` — safe, because §28.6 keeps the current generation, but the user
+would be left with a subscription that never applies and no statement of why.
+
+A line whose scheme is not in this list **fails the parse, naming the line
+number and the scheme**. It is not skipped: a silently dropped node is a node
+the user paid for and cannot see is missing. The failure costs nothing
+operationally, because §28.6 keeps the running generation either way.
 
 URI parsing MUST live in `flux-core`: pure logic, no libc, no syscalls.
 It therefore has unit tests that run on any development host with no device and

@@ -34,6 +34,17 @@ BTF blob by hand (`docs/spec/blueprint.md` D10).
 Resolved by Cargo and audited in CI by `cargo deny` against `deny.toml`. Run
 `cargo deny list` for the current set with licenses.
 
+The subscription pipeline has four direct Rust dependencies:
+
+- `ureq` 3 — blocking HTTP and rustls TLS; upstream
+  <https://github.com/algesten/ureq>; MIT OR Apache-2.0.
+- `base64` 0.23 — provider and URI payload decoding; upstream
+  <https://github.com/marshallpierce/rust-base64>; MIT OR Apache-2.0.
+- `url` 2 — standards-based URL and percent decoding; upstream
+  <https://github.com/servo/rust-url>; MIT OR Apache-2.0.
+- `regex-lite` 0.1 — node filtering, renaming, and region grouping; upstream
+  <https://github.com/rust-lang/regex>; MIT OR Apache-2.0.
+
 ## Research sources
 
 `docs/spec/blueprint.md` cites AOSP, the Linux kernel, dae, honk, Cilium and several

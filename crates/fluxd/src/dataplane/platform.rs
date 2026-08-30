@@ -144,6 +144,10 @@ pub struct Manager {
     address_seen_v4: BTreeMap<[u8; 4], u64>,
     address_seen_v6: BTreeMap<[u8; 16], u64>,
     address_tick: u64,
+    /// Last full rtnetlink snapshot contained an up, globally addressed link
+    /// with a unicast default route. Subscription retry consumes this event-
+    /// driven fact; it is not a periodic probe (blueprint §29.4).
+    default_route_ready: bool,
     status: DataplaneStatus,
 }
 
@@ -226,6 +230,7 @@ impl Manager {
             address_seen_v4: BTreeMap::new(),
             address_seen_v6: BTreeMap::new(),
             address_tick: 0,
+            default_route_ready: false,
             status: DataplaneStatus::default(),
         })
     }
@@ -240,6 +245,21 @@ impl Manager {
 
     pub fn status(&self) -> &DataplaneStatus {
         &self.status
+    }
+
+    /// Refreshes the event-driven default-route fact without creating or
+    /// mutating any data-plane object. Subscription recovery calls this at
+    /// request boundaries and after debounced rtnetlink events, never from a
+    /// periodic probe (blueprint §29.4).
+    pub fn refresh_default_route_ready(&mut self) -> Result<bool, DataplaneError> {
+        let snapshot = self
+            .route
+            .snapshot()
+            .map_err(|error| DataplaneError::io("rtnetlink_dump", error))?;
+        self.default_route_ready = snapshot.links.iter().any(|link| {
+            is_potential_candidate(link, &snapshot) && has_default_route(link.ifindex, &snapshot)
+        });
+        Ok(self.default_route_ready)
     }
 
     /// Stages the interface dimension before topology admission runs.
@@ -1942,6 +1962,9 @@ impl Manager {
             .route
             .snapshot()
             .map_err(|e| DataplaneError::io("rtnetlink_dump", e))?;
+        self.default_route_ready = snapshot.links.iter().any(|link| {
+            is_potential_candidate(link, &snapshot) && has_default_route(link.ifindex, &snapshot)
+        });
         let mut candidates = snapshot
             .links
             .iter()

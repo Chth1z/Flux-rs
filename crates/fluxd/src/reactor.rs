@@ -29,7 +29,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
-use flux_core::config::FluxConfig;
+use flux_core::config::{FluxConfig, SubscriptionConfig};
 use flux_core::control_wire::{
     Counters, EngineStatus, Request, Response, RootManagerStatus, State,
 };
@@ -74,6 +74,8 @@ const TOK_CHECK_OUT: u64 = 13;
 const TOK_RTNETLINK: u64 = 14;
 const TOK_TC_VERIFY: u64 = 15;
 const TOK_BPF_RING: u64 = 16;
+const TOK_SUBSCRIPTION_RESULT: u64 = 17;
+const TOK_SUBSCRIPTION_TIMER: u64 = 18;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -83,6 +85,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 /// intermediate status instead of letting the client mistake a live daemon
 /// for a missing one.
 const CONTROL_CONVERGE_TIMEOUT: Duration = Duration::from_secs(20);
+const CONTROL_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_CONNECTIONS: usize = 32;
 
 #[derive(Debug)]
@@ -105,6 +108,16 @@ struct PolicyCandidate {
     flux: FluxConfig,
     desired: crate::dataplane::DesiredPolicy,
     warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PendingSubscription {
+    url: String,
+    raw: Vec<u8>,
+    /// The engine generation built from `raw`, once candidate validation has
+    /// begun. This keeps an unrelated transaction failure from discarding a
+    /// fetched response that merely arrived while that transaction was live.
+    generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +185,10 @@ enum PendingControl {
         conn: ControlConn,
         deadline: Instant,
     },
+    Subscribing {
+        conn: ControlConn,
+        deadline: Instant,
+    },
 }
 
 impl PendingControl {
@@ -179,7 +196,8 @@ impl PendingControl {
         match self {
             Self::Reading { deadline, .. }
             | Self::Writing { deadline, .. }
-            | Self::Converging { deadline, .. } => *deadline,
+            | Self::Converging { deadline, .. }
+            | Self::Subscribing { deadline, .. } => *deadline,
         }
     }
 }
@@ -246,6 +264,8 @@ struct Reactor {
     control_timer: OwnedFd,
     engine_timer: OwnedFd,
     tc_verify_timer: OwnedFd,
+    subscription_timer: OwnedFd,
+    subscription_worker: crate::subscription::Worker,
     server: ControlServer,
     dataplane: crate::dataplane::Manager,
     control_conns: BTreeMap<u64, PendingControl>,
@@ -265,6 +285,15 @@ struct Reactor {
     last_error: Option<String>,
     last_error_detail: Option<String>,
     policy_error: Option<(String, Option<String>)>,
+    subscription_error: Option<(String, Option<String>)>,
+    subscription_retry_on_route: bool,
+    default_route_was_ready: bool,
+    route_recovery_epoch: u64,
+    subscription_fetch_route_epoch: u64,
+    subscription_schedule: Option<(String, u64)>,
+    pending_subscription: Option<PendingSubscription>,
+    subscription_fetch_queued: bool,
+    subscription_reconfigure_queued: bool,
     crash_count: u32,
     /// Deadline of the one-shot crash retry, exposed as `backoff_seconds`.
     /// `None` means no crash retry is armed; this is never a health poll.
@@ -302,6 +331,8 @@ impl Reactor {
         let control_timer = make_timerfd()?;
         let engine_timer = make_timerfd()?;
         let tc_verify_timer = make_timerfd()?;
+        let subscription_timer = make_timerfd()?;
+        let subscription_worker = crate::subscription::Worker::new()?;
         let server = ControlServer::bind(&layout.control_socket())?;
         let dataplane = crate::dataplane::Manager::open()?;
         let root_manager = root_manager_from_env();
@@ -319,6 +350,16 @@ impl Reactor {
             Ok(_) => {}
             Err(e) => logger.log(&format!("stale-file cleanup failed: {e}")),
         }
+        match layout.clean_stale_subscription_temps() {
+            Ok(removed) if !removed.is_empty() => logger.log(&format!(
+                "removed {} stale subscription cache temporary file(s)",
+                removed.len()
+            )),
+            Ok(_) => {}
+            Err(error) => logger.log(&format!(
+                "stale subscription cache temporary cleanup failed: {error}"
+            )),
+        }
 
         // SAFETY: sysconf has no preconditions.
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -333,6 +374,16 @@ impl Reactor {
         epoll_add(&epoll, engine_timer.as_raw_fd(), TOK_ENGINE_TIMER)?;
         epoll_add(&epoll, tc_verify_timer.as_raw_fd(), TOK_TC_VERIFY)?;
         epoll_add(&epoll, dataplane.event_fd(), TOK_RTNETLINK)?;
+        epoll_add(
+            &epoll,
+            subscription_worker.event_fd(),
+            TOK_SUBSCRIPTION_RESULT,
+        )?;
+        epoll_add(
+            &epoll,
+            subscription_timer.as_raw_fd(),
+            TOK_SUBSCRIPTION_TIMER,
+        )?;
 
         Ok(Self {
             layout,
@@ -349,6 +400,8 @@ impl Reactor {
             control_timer,
             engine_timer,
             tc_verify_timer,
+            subscription_timer,
+            subscription_worker,
             server,
             dataplane,
             control_conns: BTreeMap::new(),
@@ -364,6 +417,15 @@ impl Reactor {
             last_error: None,
             last_error_detail: None,
             policy_error: None,
+            subscription_error: None,
+            subscription_retry_on_route: false,
+            default_route_was_ready: false,
+            route_recovery_epoch: 0,
+            subscription_fetch_route_epoch: 0,
+            subscription_schedule: None,
+            pending_subscription: None,
+            subscription_fetch_queued: false,
+            subscription_reconfigure_queued: false,
             crash_count: 0,
             backoff_until: None,
             reload_requested: false,
@@ -422,7 +484,11 @@ impl Reactor {
                     TOK_INOTIFY => self.handle_inotify(),
                     TOK_DEBOUNCE => {
                         drain_timer(&self.debounce_timer);
+                        let topology_changed = self.topology_changed;
                         self.converge("debounced filesystem/network change");
+                        if topology_changed {
+                            self.maybe_retry_subscription_on_route();
+                        }
                     }
                     TOK_BACKOFF => {
                         drain_timer(&self.backoff_timer);
@@ -445,6 +511,12 @@ impl Reactor {
                     TOK_RTNETLINK => self.handle_rtnetlink(),
                     TOK_TC_VERIFY => self.handle_tc_verify(),
                     TOK_BPF_RING => self.handle_bpf_faults(),
+                    TOK_SUBSCRIPTION_RESULT => self.handle_subscription_result(),
+                    TOK_SUBSCRIPTION_TIMER => {
+                        drain_timer(&self.subscription_timer);
+                        self.rearm_subscription_timer();
+                        self.start_scheduled_subscription_fetch("scheduled refresh");
+                    }
                     token if token >= TOK_CONTROL_CONN_BASE => {
                         if self.handle_control_connection(token) {
                             self.request_shutdown("stop request");
@@ -536,6 +608,7 @@ impl Reactor {
                 .log(&format!("cannot freeze capture during shutdown: {error}"));
         }
         disarm_timer(&self.tc_verify_timer);
+        disarm_timer(&self.subscription_timer);
         if let Err(error) = self.dataplane.cancel_attachment() {
             self.logger
                 .log(&format!("cannot cancel TC verification: {error}"));
@@ -640,15 +713,21 @@ impl Reactor {
         match pending {
             PendingControl::Reading { conn, deadline } => match conn.recv_request() {
                 Ok(request) => {
+                    let subscribing = request == Request::Subscribe;
                     let (response, stop_after) = self.dispatch_request(request);
                     let Some(response) = response else {
-                        self.control_conns.insert(
-                            token,
+                        let pending = if subscribing {
+                            PendingControl::Subscribing {
+                                conn,
+                                deadline: Instant::now() + CONTROL_SUBSCRIBE_TIMEOUT,
+                            }
+                        } else {
                             PendingControl::Converging {
                                 conn,
                                 deadline: Instant::now() + CONTROL_CONVERGE_TIMEOUT,
-                            },
-                        );
+                            }
+                        };
+                        self.control_conns.insert(token, pending);
                         self.rearm_control_timer();
                         return false;
                     };
@@ -734,6 +813,12 @@ impl Reactor {
                 self.rearm_control_timer();
                 false
             }
+            PendingControl::Subscribing { conn, deadline } => {
+                self.control_conns
+                    .insert(token, PendingControl::Subscribing { conn, deadline });
+                self.rearm_control_timer();
+                false
+            }
         }
     }
 
@@ -764,12 +849,23 @@ impl Reactor {
             let Some(pending) = self.control_conns.remove(&token) else {
                 continue;
             };
-            let PendingControl::Converging { conn, .. } = pending else {
-                continue;
+            let (conn, subscribing) = match pending {
+                PendingControl::Converging { conn, .. } => (conn, false),
+                PendingControl::Subscribing { conn, .. } => (conn, true),
+                _ => continue,
             };
             self.logger
                 .log("control convergence response budget elapsed; returning current status");
-            let response = Box::new(self.build_status(self.overall_ok()));
+            let mut response = self.build_status(!subscribing && self.overall_ok());
+            if subscribing {
+                response
+                    .warnings
+                    .push("subscription refresh is still in progress".to_string());
+                if response.last_error.is_none() {
+                    response.last_error = Some("subscription_refresh_in_progress".to_string());
+                }
+            }
+            let response = Box::new(response);
             if let Err(error) = conn.send_response(&response) {
                 if error.kind() == io::ErrorKind::WouldBlock
                     && epoll_mod_events(&self.epoll, conn.as_raw_fd(), token, libc::EPOLLOUT as u32)
@@ -794,20 +890,47 @@ impl Reactor {
     /// transaction reached a terminal state. The peer remains non-blocking;
     /// backpressure transitions to the normal EPOLLOUT state.
     fn complete_convergence_controls(&mut self) {
+        self.complete_waiting_controls(false, None);
+        if !self.subscription_worker.is_busy()
+            && !self.convergence_busy()
+            && (self.pending_subscription.is_none() || !self.overall_ok())
+        {
+            self.complete_waiting_controls(true, None);
+        }
+        self.rearm_control_timer();
+    }
+
+    fn complete_waiting_controls(
+        &mut self,
+        subscription: bool,
+        response_error: Option<(&str, &str)>,
+    ) {
         let tokens: Vec<u64> = self
             .control_conns
             .iter()
             .filter_map(|(token, pending)| {
-                matches!(pending, PendingControl::Converging { .. }).then_some(*token)
+                let matches = if subscription {
+                    matches!(pending, PendingControl::Subscribing { .. })
+                } else {
+                    matches!(pending, PendingControl::Converging { .. })
+                };
+                matches.then_some(*token)
             })
             .collect();
         for token in tokens {
-            let Some(PendingControl::Converging { conn, deadline }) =
-                self.control_conns.remove(&token)
-            else {
+            let Some(pending) = self.control_conns.remove(&token) else {
                 continue;
             };
-            let response = self.build_status(self.overall_ok());
+            let (conn, deadline) = match pending {
+                PendingControl::Converging { conn, deadline }
+                | PendingControl::Subscribing { conn, deadline } => (conn, deadline),
+                _ => continue,
+            };
+            let mut response = self.build_status(response_error.is_none() && self.overall_ok());
+            if let Some((token, warning)) = response_error {
+                response.last_error = Some(token.to_string());
+                response.warnings.push(warning.to_string());
+            }
             match conn.send_response(&response) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -828,7 +951,6 @@ impl Reactor {
                 Err(_) => {}
             }
         }
-        self.rearm_control_timer();
     }
 
     /// Executes an already-decoded request. Socket I/O remains outside this
@@ -885,6 +1007,20 @@ impl Reactor {
                 let ok = self.overall_ok();
                 Some(self.build_status(ok))
             }
+            Request::Subscribe => match self.start_subscription_fetch("manual refresh") {
+                Ok(()) if self.subscription_worker.is_busy() || self.convergence_busy() => {
+                    return (None, false);
+                }
+                Ok(()) => Some(self.build_status(self.overall_ok())),
+                Err((token, detail)) => {
+                    let mut response = self.build_status(false);
+                    response.last_error = Some(token);
+                    if let Some(detail) = detail {
+                        response.warnings.push(detail);
+                    }
+                    Some(response)
+                }
+            },
             Request::Stop => {
                 // Reply while the socket still exists; the connection state
                 // reports `stop_after` once the frame is sent.
@@ -933,10 +1069,13 @@ impl Reactor {
                     engine_config_changed = true;
                 } else if event.wd == self.module_wd && name == "disable" {
                     switch_changed = true;
-                } else if event.wd == self.config_wd {
-                    let (policy, engine) = config_event_domains(&name);
-                    policy_changed |= policy;
-                    engine_config_changed |= engine;
+                } else if event.wd == self.config_wd && !name.is_empty() {
+                    // Every config child can affect policy, generation, or
+                    // both. Recompute both pure outputs; generated-byte
+                    // equality, not the filename, decides whether to rotate
+                    // the engine (blueprint §28.6, Batch C5).
+                    policy_changed = true;
+                    engine_config_changed = true;
                 } else if self.packages_wd == Some(event.wd) && name == "packages.list" {
                     policy_changed = true;
                 }
@@ -1234,6 +1373,32 @@ impl Reactor {
     }
 
     fn finish_phase6_activation(&mut self) {
+        let candidate_generation = match self.activation_role.as_ref() {
+            Some(WaitRole::Candidate(plan)) => Some(plan.generation),
+            _ => None,
+        };
+        if let Some(generation) = candidate_generation {
+            if !self.commit_pending_subscription(Some(generation)) {
+                let error = EngineError::Io(io::Error::other(
+                    "subscription cache could not be committed",
+                ));
+                let Some(WaitRole::Candidate(plan)) = self.activation_role.take() else {
+                    return;
+                };
+                let Some(child) = self.engine.take() else {
+                    self.finish_transaction_error(error, None);
+                    return;
+                };
+                self.begin_stop(
+                    child,
+                    StopNext::Recover {
+                        plan,
+                        candidate_error: error,
+                    },
+                );
+                return;
+            }
+        }
         if let Err(error) = self.dataplane.publish_active() {
             self.fail_phase6_activation("active control publication", error);
             return;
@@ -1277,6 +1442,7 @@ impl Reactor {
         }
         self.engine_cancel_requested = false;
         self.refresh_config_warnings();
+        self.resume_queued_subscription_work();
         self.run_queued_convergence();
         if self.engine_transaction.is_none() && self.activation_role.is_none() {
             self.complete_convergence_controls();
@@ -1329,7 +1495,22 @@ impl Reactor {
             return;
         }
         if self.layout.disabled() {
+            self.complete_waiting_controls(
+                true,
+                Some((
+                    "subscription_fetch_failed:disabled",
+                    "subscription refresh was cancelled because Flux was disabled",
+                )),
+            );
+            self.rearm_control_timer();
             disarm_timer(&self.tc_verify_timer);
+            disarm_timer(&self.subscription_timer);
+            self.subscription_schedule = None;
+            self.subscription_retry_on_route = false;
+            self.default_route_was_ready = false;
+            self.pending_subscription = None;
+            self.subscription_fetch_queued = false;
+            self.subscription_reconfigure_queued = false;
             if let Err(error) = self.dataplane.cancel_attachment() {
                 self.logger
                     .log(&format!("cannot cancel TC verification: {error}"));
@@ -1337,9 +1518,11 @@ impl Reactor {
             self.dataplane.converge(false);
             self.engine_cancel_requested = true;
             self.cancel_engine_work();
-            self.reload_requested = false;
-            self.policy_changed = false;
-            self.engine_config_changed = false;
+            // Preserve a full recomputation for the next enable. Config-file
+            // events continue to arrive while disabled, and none may be lost.
+            self.reload_requested = true;
+            self.policy_changed = true;
+            self.engine_config_changed = true;
             self.topology_changed = false;
             self.cancel_backoff();
             return;
@@ -1400,14 +1583,90 @@ impl Reactor {
         };
         self.policy_changed = false;
 
+        let subscription_url_changed = candidate_policy.as_ref().is_some_and(|candidate| {
+            self.current_policy.as_ref().is_some_and(|current| {
+                current.flux.subscription.url != candidate.flux.subscription.url
+            })
+        });
+        let engine_flux = candidate_policy
+            .as_ref()
+            .map(|policy| policy.flux.clone())
+            .or_else(|| {
+                self.current_policy
+                    .as_ref()
+                    .map(|policy| policy.flux.clone())
+            });
         let mut candidate_user = if want_engine {
-            match self.read_engine_config() {
-                Ok(user) => Some(user),
-                Err((token, detail)) => {
-                    self.logger
-                        .log(&format!("engine candidate rejected: {token}"));
-                    self.last_error = Some(token);
-                    self.last_error_detail = detail;
+            match engine_flux.as_ref() {
+                Some(flux)
+                    if subscription_url_changed
+                        && !flux.subscription.url.is_empty()
+                        && self.current_engine_user.is_some()
+                        && self
+                            .pending_subscription
+                            .as_ref()
+                            .is_none_or(|pending| pending.url != flux.subscription.url) =>
+                {
+                    // A new URL has no matching cache yet. Keep the current
+                    // generated artifact until its fetch completes instead of
+                    // rotating to a template-only intermediate generation.
+                    self.current_engine_user.clone()
+                }
+                Some(flux) => {
+                    self.ensure_subscription_schedule(&flux.subscription);
+                    match self.read_engine_config(flux, !subscription_url_changed) {
+                        Ok(user) => {
+                            if self
+                                .subscription_error
+                                .as_ref()
+                                .is_some_and(|(token, _)| token == "flux_config_invalid")
+                            {
+                                self.clear_subscription_error();
+                            }
+                            if self.policy_error.is_none()
+                                && self.last_error.as_deref() == Some("flux_config_invalid")
+                            {
+                                self.last_error = None;
+                                self.last_error_detail = None;
+                            }
+                            Some(user)
+                        }
+                        Err((token, _)) if token == "subscription_cache_missing" => {
+                            if self.subscription_retry_on_route {
+                                self.logger
+                                    .log("engine generation is waiting for default-route recovery");
+                            } else {
+                                match self.start_subscription_fetch_with(
+                                    &flux.subscription,
+                                    "raw cache is missing",
+                                ) {
+                                    Ok(()) => self.logger.log(
+                                        "engine generation is waiting for a subscription response",
+                                    ),
+                                    Err((token, detail)) => {
+                                        self.set_subscription_error(token, detail);
+                                    }
+                                }
+                            }
+                            None
+                        }
+                        Err((token, detail)) => {
+                            self.logger
+                                .log(&format!("engine candidate rejected: {token}"));
+                            if token.starts_with("subscription_") {
+                                self.set_subscription_error(token, detail);
+                            } else {
+                                self.last_error = Some(token);
+                                self.last_error_detail = detail;
+                            }
+                            None
+                        }
+                    }
+                }
+                None => {
+                    self.last_error = Some("flux_config_invalid".to_string());
+                    self.last_error_detail =
+                        Some("no valid policy exists for the engine candidate".to_string());
                     None
                 }
             }
@@ -1511,6 +1770,7 @@ impl Reactor {
                     self.current_policy = Some(policy);
                     self.policy_retry_available = true;
                     self.clear_policy_error();
+                    self.configure_subscription(subscription_url_changed);
                     self.refresh_config_warnings();
                 }
                 Err(error) => {
@@ -1535,6 +1795,9 @@ impl Reactor {
                 }
             }
         }
+        if self.subscription_schedule.is_none() && self.current_policy.is_some() {
+            self.configure_subscription(false);
+        }
         self.topology_changed = false;
 
         // A socket-ready candidate can legitimately wait with active=0 while
@@ -1554,14 +1817,28 @@ impl Reactor {
             return;
         }
 
-        let force_engine_restart = self.reload_requested;
         self.reload_requested = false;
         self.engine_config_changed = false;
         let need_switch = self.engine.is_some()
             && candidate_user.as_ref().is_some_and(|user| {
-                force_engine_restart || self.current_engine_user.as_ref() != Some(user)
+                self.current_engine_user
+                    .as_ref()
+                    .is_none_or(|current| !generated_bytes_equal(current, user))
             });
         if !need_start && !need_switch {
+            if candidate_user.is_some() {
+                let committed = self.commit_pending_subscription(None);
+                if committed
+                    && self.policy_error.is_none()
+                    && self.subscription_error.is_none()
+                    && !self.dataplane_error_active
+                {
+                    self.last_error = None;
+                    self.last_error_detail = None;
+                }
+            } else {
+                self.pending_subscription = None;
+            }
             if let Some(params) = self.engine.as_ref().map(|child| child.params) {
                 self.start_phase6_attachment(params);
             }
@@ -1581,6 +1858,14 @@ impl Reactor {
     }
 
     fn start_generation_check(&mut self, user: serde_json::Value, generation: u64) {
+        if let (Some(pending), Some(policy)) = (
+            self.pending_subscription.as_mut(),
+            self.current_policy.as_ref(),
+        ) {
+            if pending.url == policy.flux.subscription.url {
+                pending.generation = Some(generation);
+            }
+        }
         let (port_v4, port_v6) = match engine::draw_ports() {
             Ok(ports) => ports,
             Err(e) => {
@@ -2010,6 +2295,7 @@ impl Reactor {
     }
 
     fn begin_candidate_failure(&mut self, mut plan: SwitchPlan, error: EngineError) {
+        self.discard_pending_subscription_generation(plan.generation);
         self.logger.log(&format!(
             "generation {}: candidate failed: {}",
             plan.generation,
@@ -2112,6 +2398,15 @@ impl Reactor {
     }
 
     fn stop_confirmation_failed(&mut self, child: EngineChild, next: StopNext) {
+        let failed_generation = match &next {
+            StopNext::StartCandidate(plan) | StopNext::Recover { plan, .. } => {
+                Some(plan.generation)
+            }
+            StopNext::FinishRecoveryFailure { .. } | StopNext::Cancelled => None,
+        };
+        if let Some(generation) = failed_generation {
+            self.discard_pending_subscription_generation(generation);
+        }
         match &next {
             StopNext::StartCandidate(plan) => {
                 let _ = fs::remove_file(&plan.candidate);
@@ -2138,6 +2433,7 @@ impl Reactor {
         self.engine_transaction = None;
         self.engine_cancel_requested = false;
         disarm_timer(&self.engine_timer);
+        self.resume_queued_subscription_work();
         self.complete_convergence_controls();
         self.schedule_backoff(1);
     }
@@ -2228,6 +2524,13 @@ impl Reactor {
         error: EngineError,
         recovery_error: Option<EngineError>,
     ) {
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation.is_some())
+        {
+            self.pending_subscription = None;
+        }
         self.engine_transaction = None;
         disarm_timer(&self.engine_timer);
         let retryable = is_retryable(&error);
@@ -2247,6 +2550,7 @@ impl Reactor {
             self.logger.log(&format!("retry in {step}s"));
             self.schedule_backoff(step);
         }
+        self.resume_queued_subscription_work();
         self.run_queued_convergence();
         if !self.convergence_busy() {
             self.complete_convergence_controls();
@@ -2262,6 +2566,538 @@ impl Reactor {
                 || self.topology_changed)
         {
             self.converge("queued change");
+        }
+    }
+
+    fn subscription_config_from_authority(
+        &self,
+    ) -> Result<SubscriptionConfig, (String, Option<String>)> {
+        let path = self.layout.flux_toml();
+        let flux = match checks::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES + 1) {
+            Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
+                (
+                    "flux_config_invalid".to_string(),
+                    Some(checks::describe_flux_error(&error)),
+                )
+            })?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => FluxConfig::default(),
+            Err(error) => {
+                return Err((
+                    "flux_config_unreadable".to_string(),
+                    Some(format!("{}: {error}", path.display())),
+                ));
+            }
+        };
+        Ok(flux.subscription)
+    }
+
+    fn start_subscription_fetch(&mut self, reason: &str) -> Result<(), (String, Option<String>)> {
+        if self.layout.disabled() {
+            return Err((
+                "subscription_fetch_failed:disabled".to_string(),
+                Some("subscription refresh is unavailable while Flux is disabled".to_string()),
+            ));
+        }
+        let config = self.subscription_config_from_authority()?;
+        self.start_subscription_fetch_with(&config, reason)?;
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation.is_none())
+        {
+            self.engine_config_changed = true;
+            self.converge("pending subscription refresh");
+        }
+        Ok(())
+    }
+
+    fn start_subscription_fetch_with(
+        &mut self,
+        config: &SubscriptionConfig,
+        reason: &str,
+    ) -> Result<(), (String, Option<String>)> {
+        if self.layout.disabled() {
+            return Err((
+                "subscription_fetch_failed:disabled".to_string(),
+                Some("subscription refresh is unavailable while Flux is disabled".to_string()),
+            ));
+        }
+        if config.url.is_empty() {
+            return Err((
+                "subscription_fetch_failed:disabled".to_string(),
+                Some("subscription.url is empty".to_string()),
+            ));
+        }
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.url == config.url)
+        {
+            return Ok(());
+        }
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation.is_some())
+        {
+            self.subscription_fetch_queued = true;
+            return Ok(());
+        }
+        if self.subscription_worker.is_busy() {
+            return Ok(());
+        }
+        self.pending_subscription = None;
+        self.refresh_default_route_observation("subscription fetch start");
+        self.subscription_fetch_route_epoch = self.route_recovery_epoch;
+        let request = crate::subscription::FetchRequest {
+            url: config.url.clone(),
+            timeout: Duration::from_secs(config.timeout),
+            retries: config.retries,
+        };
+        match self.subscription_worker.start(request) {
+            Ok(true) => {
+                self.logger
+                    .log(&format!("subscription fetch started ({reason})"));
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(error) => Err((
+                "subscription_fetch_failed:worker".to_string(),
+                Some(format!("cannot start subscription worker: {error}")),
+            )),
+        }
+    }
+
+    fn handle_subscription_result(&mut self) {
+        let Some(completed) = self.subscription_worker.take_result() else {
+            return;
+        };
+        let config = match self.subscription_config_from_authority() {
+            Ok(config) => config,
+            Err((token, detail)) => {
+                self.set_subscription_error(token, detail);
+                self.complete_convergence_controls();
+                return;
+            }
+        };
+
+        if completed.url != config.url || config.url.is_empty() || self.layout.disabled() {
+            self.logger
+                .log("discarded a subscription result for a superseded configuration");
+            let unavailable = config.url.is_empty() || self.layout.disabled();
+            if !unavailable {
+                if let Err((token, detail)) =
+                    self.start_subscription_fetch_with(&config, "configured URL changed")
+                {
+                    self.set_subscription_error(token, detail);
+                }
+            } else {
+                self.complete_waiting_controls(
+                    true,
+                    Some((
+                        "subscription_fetch_failed:disabled",
+                        "subscription refresh was discarded because subscription is disabled",
+                    )),
+                );
+                self.rearm_control_timer();
+            }
+            if !self.subscription_worker.is_busy() {
+                self.complete_convergence_controls();
+            }
+            return;
+        }
+
+        let raw = match completed.result {
+            Ok(raw) => raw,
+            Err(error) => {
+                self.pending_subscription = None;
+                self.set_subscription_error(error.token, Some(error.detail));
+                self.refresh_default_route_observation("subscription fetch failure");
+                if self.route_recovery_epoch != self.subscription_fetch_route_epoch {
+                    self.subscription_retry_on_route = false;
+                    self.logger.log(
+                        "default route recovered while the subscription request was in flight; retrying once",
+                    );
+                    self.start_scheduled_subscription_fetch(
+                        "default route recovered during failed request",
+                    );
+                    return;
+                }
+                self.subscription_retry_on_route = true;
+                disarm_timer(&self.subscription_timer);
+                self.logger
+                    .log("subscription fetch failed; waiting for default-route recovery");
+                self.complete_convergence_controls();
+                return;
+            }
+        };
+
+        // A completed HTTP exchange ends the route-recovery wait even when
+        // its content is rejected. Resume the user-configured refresh cadence.
+        self.subscription_retry_on_route = false;
+        self.rearm_subscription_timer();
+
+        if let Err(error) = flux_core::subscription::parse_and_refine(&raw, &config) {
+            let (token, detail) = subscription_error_status(&error);
+            self.pending_subscription = None;
+            self.set_subscription_error(token, Some(detail));
+            self.logger.log("subscription content was rejected");
+            self.complete_convergence_controls();
+            return;
+        }
+
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation.is_some())
+        {
+            // Never replace the raw input that an in-flight generation is
+            // waiting to commit. Re-fetch current authority after that
+            // transaction reaches a terminal state.
+            self.subscription_fetch_queued = true;
+            self.logger.log(
+                "deferred a newer subscription response until the active transaction finishes",
+            );
+            if !self.convergence_busy() {
+                self.resume_queued_subscription_work();
+            }
+            return;
+        }
+
+        self.pending_subscription = Some(PendingSubscription {
+            url: completed.url,
+            raw,
+            generation: None,
+        });
+        self.subscription_retry_on_route = false;
+        self.clear_subscription_error();
+        // The fetch authority is the file on disk, which may be newer than
+        // `current_policy` when a manual command races the inotify debounce.
+        // Re-read both domains so the validated response is applied to the
+        // exact policy that requested it.
+        self.policy_changed = true;
+        self.policy_retry_available = true;
+        self.engine_config_changed = true;
+        self.converge("subscription refresh");
+        if !self.convergence_busy() {
+            self.complete_convergence_controls();
+        }
+    }
+
+    fn configure_subscription(&mut self, url_changed: bool) {
+        let Some(config) = self
+            .current_policy
+            .as_ref()
+            .map(|policy| policy.flux.subscription.clone())
+        else {
+            return;
+        };
+        let raw_path = self.layout.subscription_raw();
+
+        if config.url.is_empty() {
+            self.complete_waiting_controls(
+                true,
+                Some((
+                    "subscription_fetch_failed:disabled",
+                    "subscription refresh was cancelled because subscription.url is empty",
+                )),
+            );
+            self.rearm_control_timer();
+        }
+
+        if url_changed
+            && self
+                .pending_subscription
+                .as_ref()
+                .is_some_and(|pending| pending.generation.is_some())
+        {
+            self.subscription_reconfigure_queued = true;
+            self.subscription_schedule = None;
+            disarm_timer(&self.subscription_timer);
+            return;
+        }
+
+        if config.url.is_empty() {
+            self.subscription_schedule = None;
+            self.subscription_retry_on_route = false;
+            self.pending_subscription = None;
+            self.subscription_fetch_queued = false;
+            self.subscription_reconfigure_queued = false;
+            disarm_timer(&self.subscription_timer);
+            if self.remove_subscription_cache_files("subscription was disabled") {
+                self.clear_subscription_error();
+            }
+            return;
+        }
+
+        let pending_matches = self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.url == config.url);
+        let cache_matches = match self.subscription_cache_matches(&config.url) {
+            Ok(matches) => matches,
+            Err(error) => {
+                self.set_subscription_error(
+                    "subscription_fetch_failed:cache_read".to_string(),
+                    Some(format!(
+                        "cannot read {}: {error}",
+                        self.layout.subscription_url_binding().display()
+                    )),
+                );
+                false
+            }
+        } && raw_path.is_file();
+        let needs_fetch = url_changed || !cache_matches;
+        if needs_fetch {
+            if !pending_matches {
+                self.pending_subscription = None;
+            }
+            self.remove_subscription_cache_files(if url_changed {
+                "the configured URL changed"
+            } else {
+                "the cache authority binding was absent or stale"
+            });
+        }
+
+        self.ensure_subscription_schedule(&config);
+
+        if needs_fetch && !pending_matches && (!self.subscription_retry_on_route || url_changed) {
+            if let Err((token, detail)) =
+                self.start_subscription_fetch_with(&config, "subscription configuration")
+            {
+                self.set_subscription_error(token, detail);
+            }
+        }
+    }
+
+    fn ensure_subscription_schedule(&mut self, config: &SubscriptionConfig) {
+        if config.url.is_empty() {
+            self.subscription_schedule = None;
+            disarm_timer(&self.subscription_timer);
+            return;
+        }
+        let schedule = (config.url.clone(), config.interval);
+        if self.subscription_schedule.as_ref() != Some(&schedule) {
+            self.subscription_schedule = Some(schedule);
+            self.rearm_subscription_timer();
+        }
+    }
+
+    fn subscription_cache_matches(&self, url: &str) -> io::Result<bool> {
+        let path = self.layout.subscription_url_binding();
+        let bytes =
+            match checks::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES.saturating_add(1))
+            {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            };
+        if bytes.len() > flux_core::config::MAX_CONFIG_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "subscription URL binding exceeds the Flux config limit",
+            ));
+        }
+        Ok(bytes == url.as_bytes())
+    }
+
+    fn remove_subscription_cache_files(&mut self, reason: &str) -> bool {
+        let mut ok = true;
+        for path in [
+            self.layout.subscription_raw(),
+            self.layout.subscription_url_binding(),
+        ] {
+            match fs::remove_file(&path) {
+                Ok(()) => self.logger.log(&format!(
+                    "removed subscription cache state because {reason}"
+                )),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    ok = false;
+                    self.set_subscription_error(
+                        "subscription_fetch_failed:cache_remove".to_string(),
+                        Some(format!("cannot remove {}: {error}", path.display())),
+                    );
+                }
+            }
+        }
+        ok
+    }
+
+    fn rearm_subscription_timer(&self) {
+        let config = self
+            .current_policy
+            .as_ref()
+            .map(|policy| policy.flux.subscription.clone())
+            .or_else(|| self.subscription_config_from_authority().ok());
+        let Some(config) = config else {
+            disarm_timer(&self.subscription_timer);
+            return;
+        };
+        if self.shutdown_requested
+            || self.layout.disabled()
+            || self.subscription_retry_on_route
+            || config.url.is_empty()
+            || config.interval == 0
+        {
+            disarm_timer(&self.subscription_timer);
+        } else {
+            arm_timer(
+                &self.subscription_timer,
+                Duration::from_secs(config.interval),
+            );
+        }
+    }
+
+    fn start_scheduled_subscription_fetch(&mut self, reason: &str) {
+        if self.subscription_retry_on_route {
+            disarm_timer(&self.subscription_timer);
+            return;
+        }
+        let config = self
+            .current_policy
+            .as_ref()
+            .map(|policy| policy.flux.subscription.clone())
+            .or_else(|| self.subscription_config_from_authority().ok());
+        let Some(config) = config else {
+            return;
+        };
+        if config.url.is_empty() {
+            return;
+        }
+        if let Err((token, detail)) = self.start_subscription_fetch_with(&config, reason) {
+            self.set_subscription_error(token, detail);
+            self.complete_convergence_controls();
+        }
+    }
+
+    fn maybe_retry_subscription_on_route(&mut self) {
+        let recovery_epoch = self.route_recovery_epoch;
+        self.refresh_default_route_observation("subscription route recovery");
+        if !self.subscription_retry_on_route || self.route_recovery_epoch == recovery_epoch {
+            return;
+        }
+        self.subscription_retry_on_route = false;
+        self.start_scheduled_subscription_fetch("default route recovered");
+    }
+
+    fn refresh_default_route_observation(&mut self, context: &str) {
+        let route_ready = match self.dataplane.refresh_default_route_ready() {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.logger.log(&format!(
+                    "cannot evaluate the default route during {context}: {error}"
+                ));
+                return;
+            }
+        };
+        if !self.default_route_was_ready && route_ready {
+            self.route_recovery_epoch = self.route_recovery_epoch.wrapping_add(1);
+        }
+        self.default_route_was_ready = route_ready;
+    }
+
+    fn resume_queued_subscription_work(&mut self) {
+        if self.convergence_busy() {
+            return;
+        }
+        if self.subscription_reconfigure_queued {
+            self.subscription_reconfigure_queued = false;
+            self.subscription_fetch_queued = false;
+            self.engine_config_changed = true;
+            let url_changed = self
+                .current_policy
+                .as_ref()
+                .map(|policy| {
+                    !self
+                        .subscription_cache_matches(&policy.flux.subscription.url)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true);
+            self.configure_subscription(url_changed);
+            return;
+        }
+        if self.subscription_fetch_queued {
+            self.subscription_fetch_queued = false;
+            if let Err((token, detail)) =
+                self.start_subscription_fetch("queued subscription refresh")
+            {
+                self.set_subscription_error(token, detail);
+            }
+        }
+    }
+
+    fn commit_pending_subscription(&mut self, generation: Option<u64>) -> bool {
+        let should_commit = self.pending_subscription.as_ref().is_some_and(|pending| {
+            pending.generation == generation
+                && (generation.is_some()
+                    || self
+                        .current_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.flux.subscription.url == pending.url))
+        });
+        if !should_commit {
+            return true;
+        }
+        let pending = self
+            .pending_subscription
+            .take()
+            .expect("pending subscription was just matched");
+        let path = self.layout.subscription_raw();
+        let binding_path = self.layout.subscription_url_binding();
+        let unchanged = fs::read(&path)
+            .map(|current| current == pending.raw)
+            .unwrap_or(false);
+        let raw_result = if unchanged {
+            Ok(())
+        } else {
+            write_private_replace(&path, &pending.raw)
+        };
+        let binding_unchanged = fs::read(&binding_path)
+            .map(|current| current == pending.url.as_bytes())
+            .unwrap_or(false);
+        let result = raw_result.and_then(|()| {
+            if binding_unchanged {
+                Ok(())
+            } else {
+                // Raw first, authority second: a crash between the renames can
+                // only leave an unbound response, never bind old raw to a new
+                // URL.
+                write_private_replace(&binding_path, pending.url.as_bytes())
+            }
+        });
+        match result {
+            Ok(()) => {
+                self.clear_subscription_error();
+                self.logger.log(if unchanged {
+                    "subscription cache already matched the accepted response"
+                } else {
+                    "subscription cache committed atomically"
+                });
+                true
+            }
+            Err(error) => {
+                self.set_subscription_error(
+                    "subscription_fetch_failed:cache_write".to_string(),
+                    Some(format!(
+                        "cannot write subscription cache state ({} or {}): {error}",
+                        path.display(),
+                        binding_path.display()
+                    )),
+                );
+                self.logger.log("subscription cache commit failed");
+                false
+            }
+        }
+    }
+
+    fn discard_pending_subscription_generation(&mut self, generation: u64) {
+        if self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation == Some(generation))
+        {
+            self.pending_subscription = None;
         }
     }
 
@@ -2294,8 +3130,26 @@ impl Reactor {
         }
     }
 
+    fn set_subscription_error(&mut self, token: String, detail: Option<String>) {
+        self.subscription_error = Some((token.clone(), detail.clone()));
+        self.last_error = Some(token);
+        self.last_error_detail = detail;
+    }
+
+    fn clear_subscription_error(&mut self) {
+        let Some((token, _)) = self.subscription_error.take() else {
+            return;
+        };
+        if self.last_error.as_deref() == Some(token.as_str()) {
+            self.last_error = None;
+            self.last_error_detail = None;
+        }
+    }
+
     fn overall_ok(&self) -> bool {
-        self.last_error.is_none() && self.policy_error.is_none()
+        self.last_error.is_none()
+            && self.policy_error.is_none()
+            && self.subscription_error.is_none()
     }
 
     fn schedule_backoff(&mut self, seconds: u64) {
@@ -2351,7 +3205,11 @@ impl Reactor {
     /// Reads only the engine domain. Policy parsing and package resolution are
     /// deliberately independent so a broken sibling file cannot roll back a
     /// valid update (§10.5).
-    fn read_engine_config(&self) -> Result<serde_json::Value, (String, Option<String>)> {
+    fn read_engine_config(
+        &self,
+        flux: &FluxConfig,
+        use_cache: bool,
+    ) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.template_json();
         let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
@@ -2387,7 +3245,74 @@ impl Reactor {
         })?;
         let template = engine_config::parse_jsonc(&text)
             .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
-        engine_config::generate_from_template(&template, &[]).map_err(|error| {
+
+        let nodes = if flux.subscription.url.is_empty() {
+            Vec::new()
+        } else {
+            let pending = self.pending_subscription.as_ref().and_then(|pending| {
+                (pending.url == flux.subscription.url).then_some(pending.raw.as_slice())
+            });
+            let cache_matches = if use_cache {
+                self.subscription_cache_matches(&flux.subscription.url)
+                    .map_err(|error| {
+                        (
+                            "subscription_fetch_failed:cache_read".to_string(),
+                            Some(format!(
+                                "cannot read {}: {error}",
+                                self.layout.subscription_url_binding().display()
+                            )),
+                        )
+                    })?
+            } else {
+                false
+            };
+            let cached;
+            let raw = if let Some(raw) = pending {
+                raw
+            } else if cache_matches {
+                let raw_path = self.layout.subscription_raw();
+                cached = match checks::read_capped(
+                    &raw_path,
+                    crate::subscription::MAX_SUBSCRIPTION_BYTES + 1,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Err((
+                            "subscription_cache_missing".to_string(),
+                            Some(format!("{} does not exist", raw_path.display())),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err((
+                            "subscription_fetch_failed:cache_read".to_string(),
+                            Some(format!("cannot read {}: {error}", raw_path.display())),
+                        ));
+                    }
+                };
+                if cached.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
+                    return Err((
+                        "subscription_fetch_failed:too_large".to_string(),
+                        Some(format!(
+                            "{} exceeds the {}-byte limit",
+                            raw_path.display(),
+                            crate::subscription::MAX_SUBSCRIPTION_BYTES
+                        )),
+                    ));
+                }
+                cached.as_slice()
+            } else {
+                return Err((
+                    "subscription_cache_missing".to_string(),
+                    Some("no raw response matches the configured subscription URL".to_string()),
+                ));
+            };
+            flux_core::subscription::parse_and_refine(raw, &flux.subscription).map_err(|error| {
+                let (token, detail) = subscription_error_status(&error);
+                (token, Some(detail))
+            })?
+        };
+
+        engine_config::generate_from_template(&template, &nodes).map_err(|error| {
             (
                 "engine_config_invalid".to_string(),
                 Some(engine::describe_config_error(&error)),
@@ -2609,6 +3534,13 @@ impl Reactor {
                 warnings.push(detail.clone());
             }
         }
+        if let Some((_, Some(detail))) = &self.subscription_error {
+            if self.last_error_detail.as_ref() != Some(detail)
+                && !warnings.iter().any(|warning| warning == detail)
+            {
+                warnings.push(detail.clone());
+            }
+        }
         warnings.extend(self.config_warnings.iter().cloned());
 
         let counters = match self.dataplane.counters() {
@@ -2639,20 +3571,13 @@ impl Reactor {
                 .policy_error
                 .as_ref()
                 .map(|(token, _)| token.clone())
+                .or_else(|| {
+                    self.subscription_error
+                        .as_ref()
+                        .map(|(token, _)| token.clone())
+                })
                 .or_else(|| self.last_error.clone()),
         }
-    }
-}
-
-/// Routes config-directory events to the two independent transaction domains.
-/// Any direct child other than the two authority files may be an @file list;
-/// list changes update policy and regenerate the engine candidate (§29.6).
-fn config_event_domains(name: &str) -> (bool, bool) {
-    match name {
-        "flux.toml" => (true, false),
-        "template.json" => (false, true),
-        "" => (false, false),
-        _ => (true, true),
     }
 }
 
@@ -2791,6 +3716,28 @@ fn is_retryable(e: &EngineError) -> bool {
         EngineError::BinaryMissing(_)
         | EngineError::ConfigInvalid(_)
         | EngineError::CheckFailed { .. } => false,
+    }
+}
+
+fn subscription_error_status(
+    error: &flux_core::subscription::SubscriptionError,
+) -> (String, String) {
+    use flux_core::subscription::SubscriptionError;
+    let token = match error {
+        SubscriptionError::ZeroNodes => "subscription_empty",
+        SubscriptionError::InvalidExcludePattern(_)
+        | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
+        _ => "subscription_fetch_failed:invalid_content",
+    };
+    (token.to_string(), error.to_string())
+}
+
+/// Engine rotation is decided by the serialized generated artifact, including
+/// insertion order. `Value` equality is intentionally not the criterion.
+fn generated_bytes_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (serde_json::to_vec(left), serde_json::to_vec(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -3006,6 +3953,37 @@ fn write_replace(path: &Path, data: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Writes one machine-owned secret with the same fsync-then-rename shape as
+/// the engine candidate transaction, while keeping the previous path intact
+/// until the final atomic replacement.
+fn write_private_replace(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let tmp = dir.join(format!(
+        ".{}.subscription.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("raw")
+    ));
+    let result = (|| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 // -------------------------------------------------------------------- logging
 
 /// Timestamped append-only logger: the daemon log file plus a stderr mirror.
@@ -3075,15 +4053,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_directory_events_cover_templates_and_list_files() {
-        assert_eq!(config_event_domains("flux.toml"), (true, false));
-        assert_eq!(config_event_domains("template.json"), (false, true));
-        assert_eq!(config_event_domains("apps.txt"), (true, true));
-        assert_eq!(config_event_domains("cidrs.txt"), (true, true));
-        assert_eq!(config_event_domains(""), (false, false));
-    }
-
-    #[test]
     fn civil_from_days_matches_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // leap year
@@ -3098,6 +4067,20 @@ mod tests {
         assert_eq!(step(0), 1);
         assert_eq!(step(4), 30);
         assert_eq!(step(100), 30);
+    }
+
+    #[test]
+    fn equal_generated_bytes_skip_rotation() {
+        let generated: serde_json::Value =
+            serde_json::from_str(r#"{"outbounds":[{"type":"direct","tag":"DIRECT"}]}"#).unwrap();
+        assert!(generated_bytes_equal(&generated, &generated.clone()));
+    }
+
+    #[test]
+    fn different_generated_key_order_requires_rotation() {
+        let left: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
+        let right: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
+        assert!(!generated_bytes_equal(&left, &right));
     }
 
     #[test]

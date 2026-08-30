@@ -49,9 +49,9 @@ pub(crate) fn parse_flux_config(layout: &Layout, bytes: &[u8]) -> Result<FluxCon
 /// load and a real `sing-box check -c` subprocess run against a throwaway
 /// effective config. CLI-only; the daemon must use [`quick_check`].
 pub fn full_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
-    let mut report = quick_check(layout, spec);
+    let (mut report, generated) = quick_check_inner(layout, spec);
     check_bpf(&mut report);
-    run_engine_check(layout, spec, &mut report);
+    run_engine_check(spec, generated.as_ref(), &mut report);
     report
 }
 
@@ -88,20 +88,31 @@ fn check_bpf(report: &mut CheckReport) {
 /// `template.json` generation and §9 constraints, clash_api hardening
 /// (`docs/spec/interaction.md` §27.3.2), and engine binary presence. No subprocesses.
 pub fn quick_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
+    quick_check_inner(layout, spec).0
+}
+
+fn quick_check_inner(
+    layout: &Layout,
+    spec: &EngineSpec,
+) -> (CheckReport, Option<serde_json::Value>) {
     let mut report = CheckReport::default();
-    check_flux_toml(layout, &mut report);
-    check_template_json(layout, &mut report);
-    check_cross_config(layout, &mut report);
+    let flux = check_flux_toml(layout, &mut report);
+    let generated = check_template_json(layout, flux.as_ref(), &mut report);
+    if let (Some(flux), Some(generated)) = (flux.as_ref(), generated.as_ref()) {
+        if let Err(error) = validate_fakeip_bypass(flux, generated) {
+            report.errors.push(error);
+        }
+    }
     if !spec.binary.exists() {
         report.errors.push(format!(
             "engine_binary_missing: {} does not exist",
             spec.binary.display()
         ));
     }
-    report
+    (report, generated)
 }
 
-fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
+fn check_flux_toml(layout: &Layout, report: &mut CheckReport) -> Option<FluxConfig> {
     let path = layout.flux_toml();
     let bytes = match read_capped(&path, MAX_CONFIG_BYTES + 1) {
         Ok(bytes) => bytes,
@@ -109,13 +120,13 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
             report.warnings.push(
                 "config/flux.toml missing: no apps selected, nothing will be proxied".to_string(),
             );
-            return;
+            return Some(FluxConfig::default());
         }
         Err(e) => {
             report
                 .errors
                 .push(format!("flux.toml unreadable: {e} ({})", path.display()));
-            return;
+            return None;
         }
     };
     let config = match parse_flux_config(layout, &bytes) {
@@ -124,7 +135,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
             report
                 .errors
                 .push(format!("flux.toml: {}", describe_flux_error(&e)));
-            return;
+            return None;
         }
     };
     if config.apps_mode == flux_core::config::ListMode::Whitelist && config.apps.is_empty() {
@@ -133,6 +144,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
             .push("flux.toml selects no apps: nothing will be proxied".to_string());
     }
     check_selectors(&config, report);
+    Some(config)
 }
 
 /// Resolves the selected apps against `packages.list`. An unknown package makes
@@ -194,7 +206,11 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
     }
 }
 
-fn check_template_json(layout: &Layout, report: &mut CheckReport) {
+fn check_template_json(
+    layout: &Layout,
+    flux: Option<&FluxConfig>,
+    report: &mut CheckReport,
+) -> Option<serde_json::Value> {
     let path = layout.template_json();
     let bytes = match read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
         Ok(bytes) => bytes,
@@ -203,14 +219,14 @@ fn check_template_json(layout: &Layout, report: &mut CheckReport) {
                 "engine_config_missing: {} does not exist",
                 path.display()
             ));
-            return;
+            return None;
         }
         Err(e) => {
             report.errors.push(format!(
                 "template.json unreadable: {e} ({})",
                 path.display()
             ));
-            return;
+            return None;
         }
     };
     if bytes.len() > MAX_ENGINE_CONFIG_BYTES {
@@ -218,7 +234,7 @@ fn check_template_json(layout: &Layout, report: &mut CheckReport) {
             "engine_config_too_large: {} exceeds the 8 MiB limit",
             path.display()
         ));
-        return;
+        return None;
     }
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
@@ -226,7 +242,7 @@ fn check_template_json(layout: &Layout, report: &mut CheckReport) {
             report
                 .errors
                 .push("engine_config_invalid: template.json is not UTF-8".to_string());
-            return;
+            return None;
         }
     };
     let user = match engine_config::parse_jsonc(&text) {
@@ -235,18 +251,35 @@ fn check_template_json(layout: &Layout, report: &mut CheckReport) {
             report
                 .errors
                 .push(format!("engine_config_invalid: template.json: {e}"));
-            return;
+            return None;
         }
     };
 
-    let generated = match engine_config::generate_from_template(&user, &[]) {
+    let nodes = match flux {
+        Some(flux) => match check_subscription_nodes(layout, flux) {
+            Ok(Some(nodes)) => nodes,
+            Ok(None) => {
+                report.warnings.push(
+                    "subscription cache is missing: template checks passed, but subscribed nodes will be validated after the initial fetch"
+                        .to_string(),
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                report.errors.push(error);
+                return None;
+            }
+        },
+        None => Vec::new(),
+    };
+    let generated = match engine_config::generate_from_template(&user, &nodes) {
         Ok(generated) => generated,
         Err(error) => {
             report.errors.push(format!(
                 "engine_config_invalid: {}",
                 engine::describe_config_error(&error)
             ));
-            return;
+            return None;
         }
     };
 
@@ -262,17 +295,82 @@ fn check_template_json(layout: &Layout, report: &mut CheckReport) {
             "engine_config_invalid: {}",
             engine::describe_config_error(&e)
         ));
-        return;
+        return None;
     }
 
-    if !engine_config::has_dns_hijack_rule(&user) {
+    if !engine_config::has_dns_hijack_rule(&generated) {
         report.warnings.push(
             "template.json has no DNS hijack rule: selected apps' DNS may leak to the physical network"
                 .to_string(),
         );
     }
-    report.warnings.extend(sing_box_warnings(&user));
-    check_clash_api(&user, report);
+    report.warnings.extend(sing_box_warnings(&generated));
+    check_clash_api(&generated, report);
+    Some(generated)
+}
+
+fn check_subscription_nodes(
+    layout: &Layout,
+    flux: &FluxConfig,
+) -> Result<Option<Vec<engine_config::RefinedNode>>, String> {
+    if flux.subscription.url.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let binding_path = layout.subscription_url_binding();
+    let binding = match read_capped(
+        &binding_path,
+        flux_core::config::MAX_CONFIG_BYTES.saturating_add(1),
+    ) {
+        Ok(binding) => binding,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "subscription_fetch_failed:cache_read: {}: {error}",
+                binding_path.display()
+            ));
+        }
+    };
+    if binding.len() > flux_core::config::MAX_CONFIG_BYTES {
+        return Err(format!(
+            "subscription_fetch_failed:cache_read: {} exceeds the Flux config limit",
+            binding_path.display()
+        ));
+    }
+    if binding != flux.subscription.url.as_bytes() {
+        return Ok(None);
+    }
+    let path = layout.subscription_raw();
+    let raw = match read_capped(&path, crate::subscription::MAX_SUBSCRIPTION_BYTES + 1) {
+        Ok(raw) => raw,
+        // A first-use check is read-only and may precede the initial fetch.
+        // The daemon will fetch before it creates an enabled generation.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "subscription_fetch_failed:cache_read: {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    if raw.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
+        return Err(format!(
+            "subscription_fetch_failed:too_large: {} exceeds the {}-byte limit",
+            path.display(),
+            crate::subscription::MAX_SUBSCRIPTION_BYTES
+        ));
+    }
+    flux_core::subscription::parse_and_refine(&raw, &flux.subscription)
+        .map(Some)
+        .map_err(|error| {
+            use flux_core::subscription::SubscriptionError;
+            let token = match &error {
+                SubscriptionError::ZeroNodes => "subscription_empty",
+                SubscriptionError::InvalidExcludePattern(_)
+                | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
+                _ => "subscription_fetch_failed:invalid_content",
+            };
+            format!("{token}: {error}")
+        })
 }
 
 /// Warnings required on both `check` and the normal status surface. These are
@@ -345,27 +443,6 @@ pub fn validate_fakeip_bypass(flux: &FluxConfig, user: &serde_json::Value) -> Re
         }
     }
     Ok(())
-}
-
-fn check_cross_config(layout: &Layout, report: &mut CheckReport) {
-    let Ok(flux_bytes) = read_capped(&layout.flux_toml(), MAX_CONFIG_BYTES + 1) else {
-        return;
-    };
-    let Ok(flux) = parse_flux_config(layout, &flux_bytes) else {
-        return;
-    };
-    let Ok(engine_bytes) = read_capped(&layout.template_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
-        return;
-    };
-    let Ok(text) = String::from_utf8(engine_bytes) else {
-        return;
-    };
-    let Ok(user) = engine_config::parse_jsonc(&text) else {
-        return;
-    };
-    if let Err(error) = validate_fakeip_bypass(&flux, &user) {
-        report.errors.push(error);
-    }
 }
 
 fn collect_fakeip_ranges(
@@ -487,23 +564,11 @@ fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
 /// under the engine-check deadline. Skipped when the prior structural checks
 /// already failed (running the engine on known-bad input adds noise, not
 /// information).
-fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport) {
+fn run_engine_check(spec: &EngineSpec, user: Option<&serde_json::Value>, report: &mut CheckReport) {
     if !report.errors.is_empty() || !spec.binary.exists() {
         return;
     }
-    let Ok(bytes) = read_capped(&layout.template_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
-        return;
-    };
-    if bytes.len() > MAX_ENGINE_CONFIG_BYTES {
-        return;
-    }
-    let Ok(text) = String::from_utf8(bytes) else {
-        return;
-    };
-    let Ok(template) = engine_config::parse_jsonc(&text) else {
-        return;
-    };
-    let Ok(user) = engine_config::generate_from_template(&template, &[]) else {
+    let Some(user) = user else {
         return;
     };
     let params = EngineParams {
@@ -511,7 +576,7 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
         port_v4: flux_core::abi::LISTEN_PORT_MIN,
         port_v6: flux_core::abi::LISTEN_PORT_MIN + 1,
     };
-    let Ok(effective) = engine_config::build_effective(&user, &params) else {
+    let Ok(effective) = engine_config::build_effective(user, &params) else {
         return;
     };
 

@@ -138,6 +138,13 @@ impl Layout {
         self.run_dir().join("subscription.raw")
     }
 
+    /// Local authority metadata for [`Layout::subscription_raw`]. This is
+    /// written from `flux.toml`, never from the network response, so a cache
+    /// left across a restart cannot be mistaken for a different URL.
+    pub fn subscription_url_binding(&self) -> PathBuf {
+        self.run_dir().join("subscription.url")
+    }
+
     /// The daemon's own log. Appended by the daemon and the engine's captured
     /// stdout/stderr (blueprint §13.3); included in `bugreport`.
     pub fn log_file(&self) -> PathBuf {
@@ -260,6 +267,31 @@ impl Layout {
                 continue;
             }
             let path = entry.path();
+            fs::remove_file(&path)?;
+            removed.push(path);
+        }
+        Ok(removed)
+    }
+
+    /// Removes the two exact temporary names used by subscription cache
+    /// replacement. A killed writer may leave one behind between fsync and
+    /// rename; no other name in `run/` is considered daemon-owned here.
+    pub fn clean_stale_subscription_temps(&self) -> io::Result<Vec<PathBuf>> {
+        let mut removed = Vec::new();
+        for path in [
+            self.run_dir().join(".subscription.raw.subscription.tmp"),
+            self.run_dir().join(".subscription.url.subscription.tmp"),
+        ] {
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let own_uid = unsafe { libc::geteuid() };
+            if meta.file_type().is_symlink() || !meta.is_file() || meta.uid() != own_uid {
+                continue;
+            }
             fs::remove_file(&path)?;
             removed.push(path);
         }
@@ -422,6 +454,10 @@ mod tests {
             layout.subscription_raw(),
             layout.run_dir().join("subscription.raw")
         );
+        assert_eq!(
+            layout.subscription_url_binding(),
+            layout.run_dir().join("subscription.url")
+        );
         assert!(layout.mode_error().is_none());
         for dir in [
             layout.root().to_path_buf(),
@@ -516,6 +552,37 @@ mod tests {
             "daemon.lock",
         ] {
             assert!(run.join(name).exists(), "{name} must survive");
+        }
+        fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn stale_subscription_temp_cleanup_is_strict() {
+        let layout = tmp_layout("subscription-temp");
+        layout.ensure().expect("create");
+        let run = layout.run_dir();
+        for name in [
+            ".subscription.raw.subscription.tmp",
+            ".subscription.url.subscription.tmp",
+        ] {
+            fs::write(run.join(name), b"stale").unwrap();
+        }
+        for name in [
+            ".subscription.raw.subscription.123",
+            ".subscription.raw.subscription.tmp.bak",
+            "subscription.raw",
+        ] {
+            fs::write(run.join(name), b"keep").unwrap();
+        }
+
+        let removed = layout.clean_stale_subscription_temps().unwrap();
+        assert_eq!(removed.len(), 2);
+        for name in [
+            ".subscription.raw.subscription.123",
+            ".subscription.raw.subscription.tmp.bak",
+            "subscription.raw",
+        ] {
+            assert!(run.join(name).exists(), "{name}");
         }
         fs::remove_dir_all(layout.root()).unwrap();
     }

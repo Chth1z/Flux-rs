@@ -51,6 +51,7 @@ serde_json = { workspace = true }
 # both (the product ships on Android; Linux hosts run the tests).
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = { workspace = true }
+ureq = { workspace = true }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"

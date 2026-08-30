@@ -23,6 +23,7 @@ pub mod config;
 pub mod control_wire;
 pub mod engine_config;
 pub mod selector;
+pub mod subscription;
 pub mod version;
 
 /// Product version, kept in lockstep with the workspace manifest.

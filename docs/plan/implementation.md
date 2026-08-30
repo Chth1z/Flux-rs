@@ -43,7 +43,7 @@
 |---|---|---|---|
 | ~~1~~ | ~~用户权威文件是 `config/template.json`，引擎跑生成的 `run/sing-box.<gen>.json`~~ | ~~`layout.rs` 仍以 `config/sing-box.json` 为用户权威；没有生成步骤~~ | ~~§28.1~~ |
 | ~~2~~ | ~~包内 bootstrap 名为 `etc/default-template.json`~~ | ~~`package.rs` 仍装成 `etc/default-sing-box.json`~~ | ~~§28.1~~ |
-| 3 | 订阅抓取、URI 解析、节点精修、`fluxd subscribe` | 均未实现 | §28.3–§28.7 |
+| ~~3~~ | ~~订阅抓取、URI 解析、节点精修、`fluxd subscribe`~~ | ~~均未实现~~ | ~~§28.3–§28.7~~ |
 | ~~4~~ | ~~生成是纯函数的机检测试（把生成物的 `outbounds` 换回模板后必须深度相等）~~ | ~~未实现~~ | ~~§28.2、§15.2~~ |
 | 5 | `webroot/index.html` 进 allowlist | allowlist 当前 14 项，无 webroot | §28.8、§13.1 |
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
@@ -54,10 +54,10 @@
 | 11 | `clash_api` 的 secret / 监听地址不安全时**告警而非硬拒** | `checks.rs` 仍是 error | §23、§27.2.4 |
 | ~~12~~ | ~~listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码~~ | ~~两处各写一遍~~ | ~~§17.0.1 第 4 项~~ |
 | 13 | 物理 `clsact` 缺失时**排除并等 netd**，不自建 | 需核对 `dataplane` 当前行为 | §8.5 |
-| 14 | 订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试 | 未实现 | §29.3、§29.4 |
+| ~~14~~ | ~~订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试~~ | ~~未实现~~ | ~~§29.3、§29.4~~ |
 | ~~15~~ | ~~`config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代~~ | ~~未实现~~ | ~~§29.6~~ |
 | 16 | 面向用户的文案按 §27 过一遍（`module.prop`、guide） | 未做 | §27.1.3 |
-| 17 | 换代的判据是**生成物变了**，不是"哪个文件被改了" | `config_event_domains` 按文件名路由，`flux.toml` 只进策略域 | §28.6 第 3 条、§28.2 |
+| ~~17~~ | ~~换代的判据是**生成物变了**，不是"哪个文件被改了"~~ | ~~`config_event_domains` 按文件名路由，`flux.toml` 只进策略域~~ | ~~§28.6 第 3 条、§28.2~~ |
 
 第 8 项是本表里唯一改 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 必须 bump magic，并同步 `flux_abi.h` 与 `abi.rs` 两侧。
 

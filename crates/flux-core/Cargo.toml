@@ -8,9 +8,12 @@ repository.workspace = true
 description = "Pure logic for Flux-rs: config, selectors, CIDR, ABI mirror. No libc, no syscalls, testable on any host."
 
 [dependencies]
+base64 = { workspace = true }
+regex-lite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+url = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"
