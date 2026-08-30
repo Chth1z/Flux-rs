@@ -235,11 +235,110 @@ fn check_identifiers(root: &Path, parts: &[u32], failures: &mut Vec<String>) -> 
             }
         }
     }
+    check_decision_status(root, failures)?;
+
     println!(
         "doc-check: identifiers — {} namespaces registered, {checked} references resolved",
         defined.len() + 1
     );
     Ok(())
+}
+
+/// Where each decision namespace is defined, and where its status registry is.
+const DECISION_REGISTRIES: [(&str, &str); 2] = [
+    ("D", "docs/history/review-log.md"),
+    ("C", "docs/history/rejected-and-deferred.md"),
+];
+
+/// The only statuses a decision may carry.
+const DECISION_STATUSES: [&str; 4] = ["current", "superseded", "deferred", "executed"];
+
+/// Every decision defined in a history document must appear in that document's
+/// status registry, with a status from the fixed vocabulary, and anything
+/// marked superseded must say by what.
+///
+/// Without this, a decision that has been replaced reads exactly like one that
+/// still binds. That is how settled questions get re-litigated: R092-03 was
+/// decided, reversed, and reversed back inside one day.
+fn check_decision_status(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
+    for (prefix, file) in DECISION_REGISTRIES {
+        let text = util::read_text(&root.join(file))?;
+
+        // Identifiers the document actually defines, as `**D7**` in a table.
+        let mut defined: Vec<u32> = Vec::new();
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(at) = rest.find(&format!("**{prefix}")) {
+                let after = &rest[at + prefix.len() + 2..];
+                let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+                if !digits.is_empty() && after[digits.len()..].starts_with("**") {
+                    if let Ok(n) = digits.parse() {
+                        defined.push(n);
+                    }
+                }
+                rest = &after[digits.len().min(after.len())..];
+            }
+        }
+        defined.sort_unstable();
+        defined.dedup();
+
+        // Rows of the status registry: `| D7 | superseded | ... |` and ranges
+        // like `| D1-D6 | current | - |`.
+        let mut covered: Vec<u32> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            if !line.starts_with('|') {
+                continue;
+            }
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            if cells.len() < 4 {
+                continue;
+            }
+            let Some(range) = parse_id_range(cells[1], prefix) else {
+                continue;
+            };
+            let status = cells[2];
+            if !DECISION_STATUSES.contains(&status) {
+                continue; // not a status row; some tables reuse the id column
+            }
+            if status == "superseded" && (cells[3].is_empty() || cells[3] == "—" || cells[3] == "-")
+            {
+                failures.push(format!(
+                    "{file}:{}: {} is superseded but names no replacement",
+                    idx + 1,
+                    cells[1].trim_matches('*')
+                ));
+            }
+            covered.extend(range);
+        }
+
+        if covered.is_empty() {
+            failures.push(format!("{file}: has no {prefix} status registry"));
+            continue;
+        }
+        for id in &defined {
+            if !covered.contains(id) {
+                failures.push(format!(
+                    "{file}: {prefix}{id} is defined but missing from the status registry"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `D7` or `D1–D6` (either dash) into the numbers it covers.
+fn parse_id_range(cell: &str, prefix: &str) -> Option<Vec<u32>> {
+    let cell = cell.trim_matches('*').trim();
+    let body = cell.strip_prefix(prefix)?;
+    let sep = ['–', '—', '-'];
+    match body.split_once(|c| sep.contains(&c)) {
+        None => body.parse().ok().map(|n| vec![n]),
+        Some((lo, hi)) => {
+            let lo: u32 = lo.trim().parse().ok()?;
+            let hi: u32 = hi.trim().trim_start_matches(prefix).trim().parse().ok()?;
+            (lo <= hi).then(|| (lo..=hi).collect())
+        }
+    }
 }
 
 /// `PREFIX-1.2` occurrences in one line, returned as `1.2`.

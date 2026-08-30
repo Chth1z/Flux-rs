@@ -68,7 +68,7 @@
 | §15 | 验证策略 | `spec/blueprint.md` |
 | §16 | Phase 0 十问 + 实测 + 外推分层 | `history/phase0.md` |
 | §17 | 实施阶段 | `plan/implementation.md` |
-| §18 | 从旧仓库过渡 | `spec/blueprint.md` |
+| §18 | 从旧仓库过渡 | `history/migration.md` |
 | §19 | 被拒绝的替代方案 | `history/rejected-and-deferred.md` |
 | §20 | 发布前最终验收 | `spec/blueprint.md` |
 | §21 | 需要所有者确认的事项 | `history/rejected-and-deferred.md` |

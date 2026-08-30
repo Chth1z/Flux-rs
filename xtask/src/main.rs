@@ -18,6 +18,7 @@ mod btf_check;
 mod cdefs;
 mod doc_check;
 mod elf;
+mod fidelity;
 mod package;
 mod sha256;
 mod util;
@@ -34,7 +35,9 @@ TASKS:
     abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
     btf-check      clang .BTF flux_decision layout vs the hand-written blob
     template-check pinned official sing-box validates the shipped default template
-    doc-check      the four mechanical documentation checks (implementation.md \u{a7}17.4)
+    doc-check      the five mechanical documentation checks (implementation.md \u{a7}17.4)
+    fidelity A B   what a re-issue of a document dropped: citations, cross-refs,
+                   identifiers, constants
     build-bpf      compile bpf/flux.bpf.c with clang
     package        build the module ZIP from the allowlist
     verify-package package twice from clean cross-build state, assert equal hashes
@@ -95,6 +98,13 @@ fn main() -> ExitCode {
         "btf-check" => btf_check::run(),
         "template-check" => package::template_check(),
         "doc-check" => doc_check::run(),
+        "fidelity" => {
+            let mut args = std::env::args().skip(2);
+            match (args.next(), args.next()) {
+                (Some(before), Some(after)) => fidelity::run(&before, &after),
+                _ => Err("fidelity takes two document paths: the earlier, then the re-issue".into()),
+            }
+        }
         "build-bpf" => package::build_bpf(),
         "package" => package::run(),
         "verify-package" => package::verify(),

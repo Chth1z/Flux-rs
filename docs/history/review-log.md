@@ -56,6 +56,22 @@
 
 以下每条都是**本文与旧蓝图的实质差异**，实现者必须按本文执行。
 
+### 0.3.0 D 条目状态登记
+
+引用一条 D 之前先看这张表。**没有它，一条已被取代的决定和一条现行决定在文档里长得一模一样**——这正是 agent 会反复重新推导已经辩论完的问题的原因。`doc-check` 校验：每个定义过的 D 都在表里、状态取自固定词表、`superseded` 必须指出被谁取代。
+
+状态词表：`current`（仍然生效）、`superseded`（已被取代，必须写明取代者）、`deferred`（决定推迟）、`executed`（一次性动作，已完成）。
+
+| # | 状态 | 取代者 |
+|---|---|---|
+| D1–D6 | current | — |
+| D7 | superseded | D20、D21（地址前缀方案作废；防自环结论保留） |
+| D8–D15 | current | — |
+| D16 | superseded | D21（收窄为 listener 精确 /32 与 /128） |
+| D17–D21 | current | — |
+| D22 | superseded | §11.2（容量结论保留；`.srs` 输入方案未进入 schema） |
+| D23 | current | — |
+
 | # | 旧蓝图做法 | 本文做法 | 理由 |
 |---|---|---|---|
 | **D1** | egress 对每个 packet 做 `bpf_sk_lookup_tcp()` 反向查找 app full socket，再取 SK_STORAGE | 直接 `bpf_sk_fullsock(skb->sk)` 取 full socket | 省掉每包一次 socket hash 查找；并消除"反查到错误 socket / `sk_bound_dev_if` 不匹配导致查不到"的正确性风险。已核验 helper 可用且不需 release。 |
