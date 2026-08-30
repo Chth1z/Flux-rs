@@ -151,11 +151,14 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             _ => println!("engine:     not running"),
         }
         println!(
-            "policy:     {} selected, {} draining, {} bypass v4, {} bypass v6, {} self addresses",
+            "policy:     apps {} ({} selected, {} draining); cidr {} ({} v4, {} v6); interfaces {}; {} self addresses",
+            response.policy.apps_mode.as_str(),
             response.policy.selected,
             response.policy.draining,
+            response.policy.cidr_mode.as_str(),
             response.policy.bypass_v4,
             response.policy.bypass_v6,
+            response.policy.interfaces_mode.as_str(),
             response.policy.self_addresses
         );
         for iface in &response.ifaces {

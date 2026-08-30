@@ -403,10 +403,13 @@ mod tests {
         let policy_path = root.join("config/flux.toml");
         fs::write(
             &policy_path,
-            format!("apps = [\"0:{package}\"]\nbypass_cidrs = []\n"),
+            format!(
+                "[apps]\nmode = \"whitelist\"\nlist = [\"0:{package}\"]\n\
+                 [cidr]\nmode = \"blacklist\"\nlist = []\n"
+            ),
         )
         .expect("write Phase 7 policy");
-        let engine_path = root.join("config/sing-box.json");
+        let engine_path = root.join("config/template.json");
         fs::write(&engine_path, engine.to_string()).expect("write Phase 7 engine config");
         for path in [policy_path, engine_path] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))

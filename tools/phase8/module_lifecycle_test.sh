@@ -55,7 +55,7 @@ install_module() {
 	mkdir -p "$dest/bin" "$dest/etc" "$dest/licenses"
 	for payload in module.prop customize.sh service.sh uninstall.sh \
 		bin/fluxd bin/sing-box etc/default-flux.toml \
-		etc/default-sing-box.json engine.lock LICENSE \
+		etc/default-template.json engine.lock LICENSE \
 		THIRD_PARTY_NOTICES.md licenses/sing-box-LICENSE \
 		licenses/DEPENDENCIES.md; do
 		echo payload >"$dest/$payload"
@@ -63,7 +63,7 @@ install_module() {
 	: >"$dest/skip_mount"
 	cp "$ROOT/module/customize.sh" "$dest/customize.sh"
 	cp "$ROOT/module/flux.toml" "$dest/etc/default-flux.toml"
-	cp "$ROOT/module/template.json" "$dest/etc/default-sing-box.json"
+	cp "$ROOT/module/template.json" "$dest/etc/default-template.json"
 
 	env FLUX_RUNTIME_ROOT="$runtime" MODPATH="$dest" ARCH=arm64 MAGISK_VER=28.1 \
 		sh -c '
@@ -81,15 +81,18 @@ install_module "$FRESH" "$FRESH_RUNTIME"
 [ -f "$FRESH/disable" ] || fail 'fresh install must land as a disabled module'
 [ ! -e "$FRESH_RUNTIME/disable" ] || fail 'the runtime root must not hold a second switch'
 [ -f "$FRESH_RUNTIME/config/flux.toml" ] || fail 'fresh install did not seed flux.toml'
-[ -f "$FRESH_RUNTIME/config/sing-box.json" ] || fail 'fresh install did not seed sing-box.json'
+[ -f "$FRESH_RUNTIME/config/template.json" ] || fail 'fresh install did not seed template.json'
 
 # An upgrade must never re-disable a module the user turned on, and must never
 # replace either authority file.
 echo 'user edit' >"$FRESH_RUNTIME/config/flux.toml"
+echo '{ "user": "template" }' >"$FRESH_RUNTIME/config/template.json"
 UPGRADE="$WORK/upgrade"
 install_module "$UPGRADE" "$FRESH_RUNTIME"
 [ ! -e "$UPGRADE/disable" ] || fail 'upgrade must preserve the user switch, not force disable'
 [ "$(cat "$FRESH_RUNTIME/config/flux.toml")" = 'user edit' ] || fail 'upgrade overwrote flux.toml'
+[ "$(cat "$FRESH_RUNTIME/config/template.json")" = '{ "user": "template" }' ] || \
+	fail 'upgrade overwrote template.json'
 
 # Product scripts keep the narrow lifecycle boundaries from blueprint §13.
 body=$(sed '/^[[:space:]]*#/d' "$ROOT/module/uninstall.sh")

@@ -41,13 +41,13 @@
 
 | # | 合同 | 当前实现 | 章节 |
 |---|---|---|---|
-| 1 | 用户权威文件是 `config/template.json`，引擎跑生成的 `run/sing-box.<gen>.json` | `layout.rs` 仍以 `config/sing-box.json` 为用户权威；没有生成步骤 | §28.1 |
-| 2 | 包内 bootstrap 名为 `etc/default-template.json` | `package.rs` 仍装成 `etc/default-sing-box.json` | §28.1 |
+| ~~1~~ | ~~用户权威文件是 `config/template.json`，引擎跑生成的 `run/sing-box.<gen>.json`~~ | ~~`layout.rs` 仍以 `config/sing-box.json` 为用户权威；没有生成步骤~~ | ~~§28.1~~ |
+| ~~2~~ | ~~包内 bootstrap 名为 `etc/default-template.json`~~ | ~~`package.rs` 仍装成 `etc/default-sing-box.json`~~ | ~~§28.1~~ |
 | 3 | 订阅抓取、URI 解析、节点精修、`fluxd subscribe` | 均未实现 | §28.3–§28.7 |
-| 4 | 生成是纯函数的机检测试（把生成物的 `outbounds` 换回模板后必须深度相等） | 未实现 | §28.2、§15.2 |
+| ~~4~~ | ~~生成是纯函数的机检测试（把生成物的 `outbounds` 换回模板后必须深度相等）~~ | ~~未实现~~ | ~~§28.2、§15.2~~ |
 | 5 | `webroot/index.html` 进 allowlist | allowlist 当前 14 项，无 webroot | §28.8、§13.1 |
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
-| 7 | 三个维度统一黑/白名单与 `@file` 引用 | `flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键 | §11.2 |
+| ~~7~~ | ~~三个维度统一黑/白名单与 `@file` 引用~~ | ~~`flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键~~ | ~~§11.2~~ |
 | ~~8~~ | ~~bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump**~~ | ~~loader 恒写 `1`，BPF 只判非空，magic 未变~~ | ~~§6.1.1、§6.3~~ |
 | ~~9~~ | ~~运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json`~~ | ~~`layout.rs` 仍用旧名~~ | ~~§28.1~~ |
 | ~~10~~ | ~~wire 字段 `first_applicable` → `reachable`；排除原因 `not_first_applicable` → `identity_drift`~~ | ~~`control_wire.rs` 仍是旧名~~ | ~~§24、§27.3.3~~ |
@@ -55,10 +55,13 @@
 | ~~12~~ | ~~listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码~~ | ~~两处各写一遍~~ | ~~§17.0.1 第 4 项~~ |
 | 13 | 物理 `clsact` 缺失时**排除并等 netd**，不自建 | 需核对 `dataplane` 当前行为 | §8.5 |
 | 14 | 订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试 | 未实现 | §29.3、§29.4 |
-| 15 | `config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代 | 未实现 | §29.6 |
+| ~~15~~ | ~~`config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代~~ | ~~未实现~~ | ~~§29.6~~ |
 | 16 | 面向用户的文案按 §27 过一遍（`module.prop`、guide） | 未做 | §27.1.3 |
+| 17 | 换代的判据是**生成物变了**，不是"哪个文件被改了" | `config_event_domains` 按文件名路由，`flux.toml` 只进策略域 | §28.2、§10.5 |
 
 第 8 项是本表里唯一改 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 必须 bump magic，并同步 `flux_abi.h` 与 `abi.rs` 两侧。
+
+第 17 项现在还看不出症状，订阅落地后才会咬人：`[subscription]` 的精修规则按 §28.2 是生成的输入，改了它必须换代，但按文件名路由的话 `flux.toml` 只进策略域。反过来把 `flux.toml` 也接进引擎域，又会让每次改应用清单都白白重启一次引擎。两难只是因为判据选错了——**生成既然是纯函数，比对生成物本身就是精确的**：字节相同就不换代，不同才换。这样"哪个文件改了"根本不需要知道。
 
 **§17.0.1 的哲学返工清单与本表有重叠，但两张表的判据不同**：那张问"现状违反了哪条判据"，本表问"合同要求什么而代码还没有"。发布门禁（§20 第 14 条）只盯本表，所以任何合同要求都必须在这里有一行，否则它永远不会被实现。
 

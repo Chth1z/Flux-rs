@@ -301,14 +301,23 @@ impl EngineError {
 
 pub fn describe_config_error(e: &EngineConfigError) -> String {
     match e {
-        EngineConfigError::NotAnObject => "sing-box.json is not a JSON object".to_string(),
+        EngineConfigError::NotAnObject => "template.json is not a JSON object".to_string(),
         EngineConfigError::UserSuppliedInbound => {
-            "sing-box.json declares its own inbounds; Flux injects the only two (blueprint §9.1)"
+            "template.json declares its own inbounds; Flux injects the only two (blueprint §9.1)"
                 .to_string()
         }
         EngineConfigError::InboundsNotArray => "`inbounds` is not an array".to_string(),
         EngineConfigError::ReservedTag(tag) => {
             format!("tag `{tag}` uses the reserved `flux-` prefix (blueprint §9.6)")
+        }
+        EngineConfigError::OutboundsNotArray => {
+            "template.json `outbounds` is absent or not an array".to_string()
+        }
+        EngineConfigError::NodeNotAnObject => {
+            "a refined subscription node is not an outbound object".to_string()
+        }
+        EngineConfigError::NodeTagMissing => {
+            "a refined subscription node has no non-empty tag".to_string()
         }
     }
 }

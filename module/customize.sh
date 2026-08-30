@@ -30,7 +30,7 @@ for payload in \
 	bin/fluxd \
 	bin/sing-box \
 	etc/default-flux.toml \
-	etc/default-sing-box.json \
+	etc/default-template.json \
 	engine.lock \
 	LICENSE \
 	THIRD_PARTY_NOTICES.md \
@@ -93,10 +93,10 @@ if [ ! -e "$RUNTIME_ROOT/config/flux.toml" ]; then
 	chown 0:0 "$RUNTIME_ROOT/config/flux.toml"
 	chmod 0600 "$RUNTIME_ROOT/config/flux.toml"
 fi
-if [ ! -e "$RUNTIME_ROOT/config/sing-box.json" ]; then
-	cp "$MODPATH/etc/default-sing-box.json" "$RUNTIME_ROOT/config/sing-box.json"
-	chown 0:0 "$RUNTIME_ROOT/config/sing-box.json"
-	chmod 0600 "$RUNTIME_ROOT/config/sing-box.json"
+if [ ! -e "$RUNTIME_ROOT/config/template.json" ]; then
+	cp "$MODPATH/etc/default-template.json" "$RUNTIME_ROOT/config/template.json"
+	chown 0:0 "$RUNTIME_ROOT/config/template.json"
+	chmod 0600 "$RUNTIME_ROOT/config/template.json"
 fi
 
 # Installation itself must never start capturing traffic. The switch is the
@@ -110,7 +110,7 @@ fi
 ui_print "- Runtime files initialized."
 if [ "$FRESH_INSTALL" = 1 ]; then
 	ui_print "- Flux-rs is installed DISABLED, on purpose."
-	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and sing-box.json"
+	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and template.json"
 	ui_print "- 2. Run 'fluxd check'"
 	ui_print "- 3. Enable this module in your manager, then REBOOT once."
 	ui_print "-    Later toggles take effect immediately; only the first"

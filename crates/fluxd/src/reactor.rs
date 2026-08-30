@@ -933,10 +933,10 @@ impl Reactor {
                     engine_config_changed = true;
                 } else if event.wd == self.module_wd && name == "disable" {
                     switch_changed = true;
-                } else if event.wd == self.config_wd && name == "flux.toml" {
-                    policy_changed = true;
-                } else if event.wd == self.config_wd && name == "sing-box.json" {
-                    engine_config_changed = true;
+                } else if event.wd == self.config_wd {
+                    let (policy, engine) = config_event_domains(&name);
+                    policy_changed |= policy;
+                    engine_config_changed |= engine;
                 } else if self.packages_wd == Some(event.wd) && name == "packages.list" {
                     policy_changed = true;
                 }
@@ -1470,6 +1470,9 @@ impl Reactor {
         if let Err(error) = self.dataplane.cancel_attachment() {
             self.record_dataplane_error("TC verification cancellation", error);
             return;
+        }
+        if let Some(policy) = candidate_policy.as_ref() {
+            self.dataplane.stage_interface_policy(&policy.desired);
         }
         self.dataplane.converge_with_bpf(true, crate::BPF_OBJECT);
         if let Some(error) = self.dataplane.status().error.clone() {
@@ -2349,7 +2352,7 @@ impl Reactor {
     /// deliberately independent so a broken sibling file cannot roll back a
     /// valid update (§10.5).
     fn read_engine_config(&self) -> Result<serde_json::Value, (String, Option<String>)> {
-        let path = self.layout.sing_box_json();
+        let path = self.layout.template_json();
         let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -2379,11 +2382,17 @@ impl Reactor {
         let text = String::from_utf8(bytes).map_err(|_| {
             (
                 "engine_config_invalid".to_string(),
-                Some("sing-box.json is not UTF-8".to_string()),
+                Some("template.json is not UTF-8".to_string()),
             )
         })?;
-        engine_config::parse_jsonc(&text)
-            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))
+        let template = engine_config::parse_jsonc(&text)
+            .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
+        engine_config::generate_from_template(&template, &[]).map_err(|error| {
+            (
+                "engine_config_invalid".to_string(),
+                Some(engine::describe_config_error(&error)),
+            )
+        })
     }
 
     fn read_policy_config(&self) -> Result<PolicyCandidate, (String, Option<String>)> {
@@ -2406,7 +2415,7 @@ impl Reactor {
             &self.layout.flux_toml(),
             flux_core::config::MAX_CONFIG_BYTES + 1,
         ) {
-            Ok(bytes) => FluxConfig::parse(&bytes).map_err(|error| {
+            Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
                 (
                     "flux_config_invalid".to_string(),
                     Some(checks::describe_flux_error(&error)),
@@ -2421,55 +2430,62 @@ impl Reactor {
             }
         };
 
-        let mut selected_uids = BTreeSet::new();
         let mut warnings = Vec::new();
-        if flux.apps.is_empty() {
-            warnings.push("flux.toml selects no apps: nothing will be proxied".to_string());
-        } else {
-            let packages = crate::packages::read().map_err(|error| {
-                (
-                    "packages_list_unreadable".to_string(),
-                    Some(error.to_string()),
-                )
-            })?;
-            let index = PackageIndex::parse(&packages);
-            for selector in &flux.apps {
-                let selection = index.resolve(selector).map_err(|error| {
-                    let detail = match error {
-                        SelectorError::UnknownPackage(package) => {
-                            format!(
-                                "{}: package `{package}` is not installed",
-                                selector.canonical()
-                            )
-                        }
-                        SelectorError::AppIdOutOfRange(app_id) => {
-                            format!("{}: app id {app_id} is out of range", selector.canonical())
-                        }
-                        SelectorError::UserIdOutOfRange(user_id) => format!(
-                            "{}: user id {user_id} is out of range",
-                            selector.canonical()
-                        ),
-                        SelectorError::Malformed(text) => {
-                            format!("{}: selector `{text}` is malformed", selector.canonical())
-                        }
-                    };
-                    ("selector_invalid".to_string(), Some(detail))
+        let selected_uids =
+            if flux.apps_mode == flux_core::config::ListMode::Whitelist && flux.apps.is_empty() {
+                warnings.push("flux.toml selects no apps: nothing will be proxied".to_string());
+                BTreeSet::new()
+            } else {
+                let packages = crate::packages::read().map_err(|error| {
+                    (
+                        "packages_list_unreadable".to_string(),
+                        Some(error.to_string()),
+                    )
                 })?;
-                selected_uids.insert(selection.uid);
-                let siblings = index
-                    .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
-                    .into_iter()
-                    .filter(|package| *package != selector.package)
-                    .collect::<Vec<_>>();
-                if !siblings.is_empty() {
-                    warnings.push(format!(
-                        "uid {} also covers: {}",
-                        selection.uid,
-                        siblings.join(", ")
-                    ));
+                let index = PackageIndex::parse(&packages);
+                let selected = flux.resolve_selected_uids(&index).map_err(|error| {
+                    (
+                        "flux_config_invalid".to_string(),
+                        Some(checks::describe_flux_error(&error)),
+                    )
+                })?;
+                for selector in &flux.apps {
+                    let selection = index.resolve(selector).map_err(|error| {
+                        let detail = match error {
+                            SelectorError::UnknownPackage(package) => {
+                                format!(
+                                    "{}: package `{package}` is not installed",
+                                    selector.canonical()
+                                )
+                            }
+                            SelectorError::AppIdOutOfRange(app_id) => {
+                                format!("{}: app id {app_id} is out of range", selector.canonical())
+                            }
+                            SelectorError::UserIdOutOfRange(user_id) => format!(
+                                "{}: user id {user_id} is out of range",
+                                selector.canonical()
+                            ),
+                            SelectorError::Malformed(text) => {
+                                format!("{}: selector `{text}` is malformed", selector.canonical())
+                            }
+                        };
+                        ("selector_invalid".to_string(), Some(detail))
+                    })?;
+                    let siblings = index
+                        .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
+                        .into_iter()
+                        .filter(|package| *package != selector.package)
+                        .collect::<Vec<_>>();
+                    if !siblings.is_empty() {
+                        warnings.push(format!(
+                            "uid {} also covers: {}",
+                            selection.uid,
+                            siblings.join(", ")
+                        ));
+                    }
                 }
-            }
-        }
+                selected
+            };
 
         let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
         // Insert user policy first so an exact duplicate in the mechanism set
@@ -2491,13 +2507,18 @@ impl Reactor {
             .map(|entry| (entry.cidr.to_lpm_key(), entry.tag))
             .collect();
 
+        let desired = crate::dataplane::DesiredPolicy {
+            apps_mode: flux.apps_mode,
+            cidr_mode: flux.cidr_mode,
+            interfaces_mode: flux.interfaces_mode,
+            interfaces: flux.interfaces.iter().cloned().collect(),
+            selected_uids,
+            bypass_v4,
+            bypass_v6,
+        };
         Ok(PolicyCandidate {
             flux,
-            desired: crate::dataplane::DesiredPolicy {
-                selected_uids,
-                bypass_v4,
-                bypass_v6,
-            },
+            desired,
             warnings,
         })
     }
@@ -2623,6 +2644,18 @@ impl Reactor {
     }
 }
 
+/// Routes config-directory events to the two independent transaction domains.
+/// Any direct child other than the two authority files may be an @file list;
+/// list changes update policy and regenerate the engine candidate (§29.6).
+fn config_event_domains(name: &str) -> (bool, bool) {
+    match name {
+        "flux.toml" => (true, false),
+        "template.json" => (false, true),
+        "" => (false, false),
+        _ => (true, true),
+    }
+}
+
 fn root_manager_from_env() -> RootManagerStatus {
     let name = clean_manager_value(std::env::var("FLUX_ROOT_MANAGER").ok(), "unknown");
     let name = match name.as_str() {
@@ -2698,7 +2731,7 @@ fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
     }
     if counters.direct_tcp > 0 && counters.admit_tcp == 0 {
         hints.push(
-            "selected UIDs are matching but every first SYN chose DIRECT; check bypass_cidrs and active"
+            "selected UIDs are matching but every first SYN chose DIRECT; check the [cidr] mode and list, and active"
                 .to_string(),
         );
     }
@@ -3040,6 +3073,15 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_directory_events_cover_templates_and_list_files() {
+        assert_eq!(config_event_domains("flux.toml"), (true, false));
+        assert_eq!(config_event_domains("template.json"), (false, true));
+        assert_eq!(config_event_domains("apps.txt"), (true, true));
+        assert_eq!(config_event_domains("cidrs.txt"), (true, true));
+        assert_eq!(config_event_domains(""), (false, false));
+    }
 
     #[test]
     fn civil_from_days_matches_known_dates() {

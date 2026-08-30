@@ -8,7 +8,7 @@
 //!   `--raw` disables them.
 //! * `logcat` is NEVER captured by default — it contains other apps' output.
 //!   `--with-logcat` opts in, filtered to Flux-related lines only.
-//! * Raw configuration files are never included: `sing-box.json` carries
+//! * Raw configuration files are never included: `template.json` carries
 //!   proxy credentials. The check output and status JSON describe the config
 //!   without quoting it.
 //!
@@ -340,7 +340,7 @@ fn readme_text(options: &BugreportOptions) -> String {
         "flux-rs bug report\n\
          ==================\n\n\
          Contents are read-only diagnostics. Raw configuration files\n\
-         (sing-box.json, flux.toml) are NEVER included: they may contain\n\
+         (template.json, flux.toml) are NEVER included: they may contain\n\
          proxy server credentials. check.txt describes their validity.\n\n",
     );
     text.push_str(if options.raw {
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn redaction_masks_addresses_but_not_timestamps() {
-        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 cookie \"123456789: at 12:34:56 host api.example.com package com.example.app sing-box.json\n\
+        let input = "peer 192.168.1.5:8443 via fe80::1 mac aa:bb:cc:dd:ee:11 cookie \"123456789: at 12:34:56 host api.example.com package com.example.app template.json\n\
                      plain 10.0.0.1 and version 1.2.3 and 300.1.2.3 stay sane\n";
         let out = redact(input);
         assert!(out.contains("192.x.x.x:8443"), "{out}");
@@ -701,7 +701,7 @@ mod tests {
         assert!(!out.contains("api.example.com"), "{out}");
         assert!(!out.contains("com.example.app"), "{out}");
         assert!(
-            out.contains("sing-box.json"),
+            out.contains("template.json"),
             "file names remain diagnostic: {out}"
         );
     }

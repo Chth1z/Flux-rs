@@ -51,7 +51,7 @@ mod tests {
 
     const FLUXD: &str = env!("CARGO_BIN_EXE_fluxd");
 
-    /// Stands in for a proxy credential inside sing-box.json.
+    /// Stands in for a proxy credential inside template.json.
     const CONFIG_SENTINEL: &str = "credential-sentinel-7b2b";
 
     struct Env {
@@ -123,13 +123,13 @@ mod tests {
         // sentinel tag stands in for proxy credentials: it must never leak
         // into a bug report.
         std::fs::write(
-            root.join("config/sing-box.json"),
+            root.join("config/template.json"),
             serde_json::json!({
                 "outbounds": [ { "type": "direct", "tag": CONFIG_SENTINEL } ]
             })
             .to_string(),
         )
-        .expect("sing-box.json");
+        .expect("template.json");
 
         let mut daemon = env.command(&["daemon"]).spawn().expect("daemon spawns");
         wait_for(&root.join("run/control.sock"), Duration::from_secs(10));
@@ -327,7 +327,7 @@ mod tests {
 
         std::fs::write(
             env.root.join("config/flux.toml"),
-            "apps = []\nbypass_cidrs = [\"203.0.113.0/24\"]\n",
+            "[apps]\nmode = \"whitelist\"\nlist = []\n[cidr]\nmode = \"blacklist\"\nlist = [\"203.0.113.0/24\"]\n",
         )
         .expect("write valid policy");
         let updated = wait_status(env, Duration::from_secs(10), |response| {
@@ -341,7 +341,7 @@ mod tests {
 
         std::fs::write(
             env.root.join("config/flux.toml"),
-            "apps = []\nbypass_cidrs = [true]\n",
+            "[apps]\nmode = \"whitelist\"\nlist = []\n[cidr]\nmode = \"blacklist\"\nlist = [true]\n",
         )
         .expect("write invalid policy");
         let rejected = wait_status(env, Duration::from_secs(10), |response| {
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(rejected.engine.pid, pid);
 
         std::fs::write(
-            env.root.join("config/sing-box.json"),
+            env.root.join("config/template.json"),
             serde_json::json!({
                 "outbounds": [ {
                     "type": "direct",
@@ -381,7 +381,7 @@ mod tests {
 
         std::fs::write(
             env.root.join("config/flux.toml"),
-            "apps = []\nbypass_cidrs = [\"203.0.113.0/24\", \"198.51.100.0/24\"]\n",
+            "[apps]\nmode = \"whitelist\"\nlist = []\n[cidr]\nmode = \"blacklist\"\nlist = [\"203.0.113.0/24\", \"198.51.100.0/24\"]\n",
         )
         .expect("repair policy");
         let repaired = wait_status(env, Duration::from_secs(10), |response| {

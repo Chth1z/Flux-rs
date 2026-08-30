@@ -127,8 +127,15 @@ impl Layout {
         self.config_dir().join("flux.toml")
     }
 
-    pub fn sing_box_json(&self) -> PathBuf {
-        self.config_dir().join("sing-box.json")
+    /// The user-owned sing-box template. The daemon only reads this path.
+    pub fn template_json(&self) -> PathBuf {
+        self.config_dir().join("template.json")
+    }
+
+    /// Raw subscription response cache. Batch C is the first writer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn subscription_raw(&self) -> PathBuf {
+        self.run_dir().join("subscription.raw")
     }
 
     /// The daemon's own log. Appended by the daemon and the engine's captured
@@ -407,6 +414,14 @@ mod tests {
     fn ensure_creates_private_directories() {
         let layout = tmp_layout("ensure");
         layout.ensure().expect("create");
+        assert_eq!(
+            layout.template_json(),
+            layout.config_dir().join("template.json")
+        );
+        assert_eq!(
+            layout.subscription_raw(),
+            layout.run_dir().join("subscription.raw")
+        );
         assert!(layout.mode_error().is_none());
         for dir in [
             layout.root().to_path_buf(),

@@ -34,6 +34,17 @@ impl CheckReport {
     }
 }
 
+/// Parses flux.toml with @file names confined to this layout's config directory.
+/// The core validates each name before invoking the reader, so join cannot
+/// escape the watched directory (§11.2.2, §29.6).
+pub(crate) fn parse_flux_config(layout: &Layout, bytes: &[u8]) -> Result<FluxConfig, ConfigError> {
+    FluxConfig::parse_with_list_files(bytes, |name| {
+        let path = layout.config_dir().join(name);
+        read_capped(&path, MAX_CONFIG_BYTES + 1)
+            .map_err(|error| format!("{error} ({})", path.display()))
+    })
+}
+
 /// The full check: everything [`quick_check`] covers plus an unattached BPF
 /// load and a real `sing-box check -c` subprocess run against a throwaway
 /// effective config. CLI-only; the daemon must use [`quick_check`].
@@ -74,12 +85,12 @@ fn check_bpf(report: &mut CheckReport) {
 }
 
 /// The bounded-time check: `flux.toml`, `packages.list` resolution,
-/// `sing-box.json` structure and §9 constraints, clash_api hardening
+/// `template.json` generation and §9 constraints, clash_api hardening
 /// (`docs/spec/interaction.md` §27.3.2), and engine binary presence. No subprocesses.
 pub fn quick_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
     let mut report = CheckReport::default();
     check_flux_toml(layout, &mut report);
-    check_sing_box_json(layout, &mut report);
+    check_template_json(layout, &mut report);
     check_cross_config(layout, &mut report);
     if !spec.binary.exists() {
         report.errors.push(format!(
@@ -107,7 +118,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
             return;
         }
     };
-    let config = match FluxConfig::parse(&bytes) {
+    let config = match parse_flux_config(layout, &bytes) {
         Ok(config) => config,
         Err(e) => {
             report
@@ -116,7 +127,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
             return;
         }
     };
-    if config.apps.is_empty() {
+    if config.apps_mode == flux_core::config::ListMode::Whitelist && config.apps.is_empty() {
         report
             .warnings
             .push("flux.toml selects no apps: nothing will be proxied".to_string());
@@ -128,7 +139,7 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) {
 /// the candidate invalid (§11.3); shared UIDs remain a warning because the
 /// resulting UID is still deterministic.
 pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
-    if config.apps.is_empty() {
+    if config.apps_mode == flux_core::config::ListMode::Whitelist && config.apps.is_empty() {
         return;
     }
     let text = match crate::packages::read() {
@@ -139,13 +150,23 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
         }
     };
     let index = PackageIndex::parse(&text);
+    if let Err(error) = config.resolve_selected_uids(&index) {
+        report
+            .errors
+            .push(format!("flux.toml: {}", describe_flux_error(&error)));
+        return;
+    }
     for selector in &config.apps {
         match index.resolve(selector) {
             Ok(selection) => {
                 let shared = index.shared_with(selection.uid % 100_000);
                 if shared.len() > 1 {
+                    let effect = match config.apps_mode {
+                        flux_core::config::ListMode::Whitelist => "proxied together",
+                        flux_core::config::ListMode::Blacklist => "excluded together",
+                    };
                     report.warnings.push(format!(
-                        "{} shares its UID with {}: they are proxied together",
+                        "{} shares its UID with {}: they are {effect}",
                         selector.canonical(),
                         shared
                             .iter()
@@ -173,8 +194,8 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
     }
 }
 
-fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
-    let path = layout.sing_box_json();
+fn check_template_json(layout: &Layout, report: &mut CheckReport) {
+    let path = layout.template_json();
     let bytes = match read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -186,7 +207,7 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
         }
         Err(e) => {
             report.errors.push(format!(
-                "sing-box.json unreadable: {e} ({})",
+                "template.json unreadable: {e} ({})",
                 path.display()
             ));
             return;
@@ -204,7 +225,7 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
         Err(_) => {
             report
                 .errors
-                .push("engine_config_invalid: sing-box.json is not UTF-8".to_string());
+                .push("engine_config_invalid: template.json is not UTF-8".to_string());
             return;
         }
     };
@@ -213,7 +234,18 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
         Err(e) => {
             report
                 .errors
-                .push(format!("engine_config_invalid: sing-box.json: {e}"));
+                .push(format!("engine_config_invalid: template.json: {e}"));
+            return;
+        }
+    };
+
+    let generated = match engine_config::generate_from_template(&user, &[]) {
+        Ok(generated) => generated,
+        Err(error) => {
+            report.errors.push(format!(
+                "engine_config_invalid: {}",
+                engine::describe_config_error(&error)
+            ));
             return;
         }
     };
@@ -225,7 +257,7 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
         port_v4: flux_core::abi::LISTEN_PORT_MIN,
         port_v6: flux_core::abi::LISTEN_PORT_MIN + 1,
     };
-    if let Err(e) = engine_config::build_effective(&user, &params) {
+    if let Err(e) = engine_config::build_effective(&generated, &params) {
         report.errors.push(format!(
             "engine_config_invalid: {}",
             engine::describe_config_error(&e)
@@ -235,7 +267,7 @@ fn check_sing_box_json(layout: &Layout, report: &mut CheckReport) {
 
     if !engine_config::has_dns_hijack_rule(&user) {
         report.warnings.push(
-            "sing-box.json has no DNS hijack rule: selected apps' DNS may leak to the physical network"
+            "template.json has no DNS hijack rule: selected apps' DNS may leak to the physical network"
                 .to_string(),
         );
     }
@@ -279,12 +311,22 @@ pub fn validate_fakeip_bypass(flux: &FluxConfig, user: &serde_json::Value) -> Re
     let mut fake_v6 = Vec::new();
     collect_fakeip_ranges(user, &mut fake_v4, &mut fake_v6);
     let (fixed_v4, fixed_v6) = FluxConfig::fixed_bypass();
+    let policy_v4 = if flux.cidr_mode == flux_core::config::ListMode::Blacklist {
+        flux.bypass_v4.as_slice()
+    } else {
+        &[]
+    };
+    let policy_v6 = if flux.cidr_mode == flux_core::config::ListMode::Blacklist {
+        flux.bypass_v6.as_slice()
+    } else {
+        &[]
+    };
 
     for fake in &fake_v4 {
         for bypass in fixed_v4
             .iter()
             .map(|entry| &entry.cidr)
-            .chain(flux.bypass_v4.iter())
+            .chain(policy_v4.iter())
         {
             if overlaps_v4(*fake, *bypass) {
                 return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
@@ -295,7 +337,7 @@ pub fn validate_fakeip_bypass(flux: &FluxConfig, user: &serde_json::Value) -> Re
         for bypass in fixed_v6
             .iter()
             .map(|entry| &entry.cidr)
-            .chain(flux.bypass_v6.iter())
+            .chain(policy_v6.iter())
         {
             if overlaps_v6(*fake, *bypass) {
                 return Err(format!("fakeip_bypass_overlap:{fake} intersects {bypass}"));
@@ -309,10 +351,10 @@ fn check_cross_config(layout: &Layout, report: &mut CheckReport) {
     let Ok(flux_bytes) = read_capped(&layout.flux_toml(), MAX_CONFIG_BYTES + 1) else {
         return;
     };
-    let Ok(flux) = FluxConfig::parse(&flux_bytes) else {
+    let Ok(flux) = parse_flux_config(layout, &flux_bytes) else {
         return;
     };
-    let Ok(engine_bytes) = read_capped(&layout.sing_box_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
+    let Ok(engine_bytes) = read_capped(&layout.template_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
         return;
     };
     let Ok(text) = String::from_utf8(engine_bytes) else {
@@ -449,7 +491,7 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
     if !report.errors.is_empty() || !spec.binary.exists() {
         return;
     }
-    let Ok(bytes) = read_capped(&layout.sing_box_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
+    let Ok(bytes) = read_capped(&layout.template_json(), MAX_ENGINE_CONFIG_BYTES + 1) else {
         return;
     };
     if bytes.len() > MAX_ENGINE_CONFIG_BYTES {
@@ -458,7 +500,10 @@ fn run_engine_check(layout: &Layout, spec: &EngineSpec, report: &mut CheckReport
     let Ok(text) = String::from_utf8(bytes) else {
         return;
     };
-    let Ok(user) = engine_config::parse_jsonc(&text) else {
+    let Ok(template) = engine_config::parse_jsonc(&text) else {
+        return;
+    };
+    let Ok(user) = engine_config::generate_from_template(&template, &[]) else {
         return;
     };
     let params = EngineParams {
@@ -556,13 +601,33 @@ pub fn describe_flux_error(e: &ConfigError) -> String {
             None => format!("unknown key `{key}`"),
         },
         ConfigError::WrongType(detail) => detail.clone(),
+        ConfigError::InvalidValue(detail) => detail.clone(),
         ConfigError::TooManyApps(n) => format!("{n} apps exceed the selection limit"),
         ConfigError::TooManyBypassV4(n) => format!("{n} IPv4 bypass prefixes exceed the limit"),
         ConfigError::TooManyBypassV6(n) => format!("{n} IPv6 bypass prefixes exceed the limit"),
         ConfigError::DuplicateApp(app) => format!("app `{app}` is listed twice"),
-        ConfigError::DuplicateBypass(prefix) => format!("bypass `{prefix}` is listed twice"),
+        ConfigError::DuplicateBypass(prefix) => format!("CIDR `{prefix}` is listed twice"),
+        ConfigError::DuplicateInterface(name) => {
+            format!("interface `{name}` is listed twice")
+        }
+        ConfigError::DuplicateSsid(ssid) => format!("SSID `{ssid}` is listed twice"),
         ConfigError::Selector(e) => describe_selector_error(e),
         ConfigError::Cidr(e) => describe_cidr_error(e),
+        ConfigError::InvalidListPath(path) => {
+            format!("list reference `@{path}` must name one file inside config/")
+        }
+        ConfigError::ListFileUnreadable { path, detail } => {
+            format!("list file `config/{path}` is unreadable: {detail}")
+        }
+        ConfigError::ListFileTooLarge { path, size } => {
+            format!("list file `config/{path}` is {size} bytes, the limit is {MAX_CONFIG_BYTES}")
+        }
+        ConfigError::ListFileNotUtf8(path) => {
+            format!("list file `config/{path}` is not valid UTF-8")
+        }
+        ConfigError::RecursiveListReference { path, line } => format!(
+            "list file `config/{path}` line {line} starts with @; references cannot recurse"
+        ),
     }
 }
 
@@ -640,9 +705,13 @@ mod tests {
     #[test]
     fn clash_api_hardening_is_an_error_not_a_warning() {
         let layout = tmp_layout("clash");
-        std::fs::write(layout.flux_toml(), "apps = []\n").unwrap();
         std::fs::write(
-            layout.sing_box_json(),
+            layout.flux_toml(),
+            "[apps]\nmode = \"whitelist\"\nlist = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            layout.template_json(),
             serde_json::json!({
                 "outbounds": [],
                 "experimental": { "clash_api": {
@@ -671,7 +740,7 @@ mod tests {
     fn loopback_controller_with_secret_passes() {
         let layout = tmp_layout("clash-ok");
         std::fs::write(
-            layout.sing_box_json(),
+            layout.template_json(),
             serde_json::json!({
                 "outbounds": [],
                 "experimental": { "clash_api": {
@@ -684,7 +753,7 @@ mod tests {
         .unwrap();
         let mut report = CheckReport::default();
         let user =
-            engine_config::parse_jsonc(&std::fs::read_to_string(layout.sing_box_json()).unwrap())
+            engine_config::parse_jsonc(&std::fs::read_to_string(layout.template_json()).unwrap())
                 .unwrap();
         check_clash_api(&user, &mut report);
         assert!(report.ok(), "{:?}", report.errors);
@@ -705,6 +774,26 @@ mod tests {
     }
 
     #[test]
+    fn missing_referenced_list_is_a_check_error() {
+        let layout = tmp_layout("missing-list");
+        std::fs::write(
+            layout.flux_toml(),
+            "[apps]\nmode = \"whitelist\"\nlist = [\"@missing.txt\"]\n",
+        )
+        .unwrap();
+        std::fs::write(layout.template_json(), "{\"outbounds\": []}\n").unwrap();
+        let engine = layout.root().join("engine");
+        std::fs::write(&engine, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let report = quick_check(&layout, &loopback_spec(engine));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| { error.contains("list file `config/missing.txt` is unreadable") }));
+        std::fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
     fn fakeip_ranges_may_not_overlap_fixed_or_user_bypass() {
         let user = serde_json::json!({
             "dns": { "servers": [{
@@ -713,11 +802,13 @@ mod tests {
                 "inet6_range": "2001:db8:f::/48"
             }]}
         });
-        let flux = FluxConfig::parse(b"bypass_cidrs = []").unwrap();
+        let flux = FluxConfig::parse(b"[cidr]\nmode = \"blacklist\"\nlist = []").unwrap();
         assert!(validate_fakeip_bypass(&flux, &user).is_ok());
 
-        let overlapping =
-            FluxConfig::parse(b"bypass_cidrs = [\"198.18.0.0/16\", \"2001:db8:10::/48\"]").unwrap();
+        let overlapping = FluxConfig::parse(
+            b"[cidr]\nmode = \"blacklist\"\nlist = [\"198.18.0.0/16\", \"2001:db8:10::/48\"]",
+        )
+        .unwrap();
         let error = validate_fakeip_bypass(&overlapping, &user).unwrap_err();
         assert!(error.starts_with("fakeip_bypass_overlap:198.18.0.0/15"));
 

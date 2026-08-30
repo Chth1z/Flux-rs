@@ -31,7 +31,7 @@ const ALLOWLIST: [&str; 14] = [
     "bin/fluxd",
     "bin/sing-box",
     "etc/default-flux.toml",
-    "etc/default-sing-box.json",
+    "etc/default-template.json",
     "engine.lock",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
@@ -575,7 +575,7 @@ fn collect_entries(
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
     push("etc/default-flux.toml", 0o644, text("module/flux.toml")?);
     push(
-        "etc/default-sing-box.json",
+        "etc/default-template.json",
         0o644,
         text("module/template.json")?,
     );
@@ -887,12 +887,14 @@ pub fn template_check() -> Result<(), String> {
     validate_default_template_shape(&template)?;
     let user = flux_core::engine_config::parse_jsonc(&template)
         .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
+    let generated = flux_core::engine_config::generate_from_template(&user, &[])
+        .map_err(|e| format!("generate default template: {e:?}"))?;
     let params = flux_core::engine_config::EngineParams {
         generation: 1,
         port_v4: flux_core::abi::LISTEN_PORT_MIN,
         port_v6: flux_core::abi::LISTEN_PORT_MIN + 1,
     };
-    let effective = flux_core::engine_config::build_effective(&user, &params)
+    let effective = flux_core::engine_config::build_effective(&generated, &params)
         .map_err(|e| format!("build default effective config: {e:?}"))?;
     let config = cache.join("effective-default.json");
     util::write_bytes(&config, effective.to_string().as_bytes())?;

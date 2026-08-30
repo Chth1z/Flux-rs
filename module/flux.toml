@@ -4,8 +4,8 @@
 # 位置：/data/adb/flux-rs/config/flux.toml
 # 生效：改完先执行 `fluxd check`，确认无误后执行 `fluxd reload`
 #
-# 严格模式：只接受下面两个顶层键。未知键、重复项、非 canonical CIDR
-# 都会使整份候选配置被拒绝；Flux 不会截断或静默修正。
+# 严格模式：只接受下面五个顶层表。未知键、重复项、非 canonical CIDR
+# 与超限内容都会使整份候选配置被拒绝；Flux 不会截断或部分应用。
 #
 # 开关不在本文件里。唯一开关就是你 root 管理器里的模块开关，
 # 拨动后当场生效，不需要重启。等价命令：fluxd enable / fluxd disable
@@ -13,13 +13,38 @@
 # 当前状态直接显示在管理器的模块描述里。
 # ==============================================================================
 
-# 选中的应用。格式为 "userId:packageName"；单用户设备 userId 恒为 0，
-# 可省略 `0:`。共享 UID 会连带捕获同 UID 的其它 package，check 会提示。
-# 空数组表示尚未选择应用，不会代理任何流量。
-apps = []
+[apps]
+# whitelist：只代理清单里的应用；blacklist：代理清单之外的所有应用。
+# 格式为 "userId:packageName"；单用户设备 userId 为 0，可省略 `0:`。
+# `@apps.txt` 会读取同目录列表文件；每行一项，`#` 开头为注释。
+mode = "whitelist"
+list = []
 
-# 额外直连的 canonical CIDR。IPv4 与 IPv6 可以写在同一数组中，
-# Flux 会按地址族分别写入两个 LPM map。
-# 回环、链路本地、私网、多播、广播、listener 地址以及设备自己的地址
-# 由 Flux 固定或动态注入，不需要在这里重复。
-bypass_cidrs = []
+[cidr]
+# blacklist：清单里的目标地址直连；whitelist：只捕获清单里的目标地址。
+# 此处只认 canonical CIDR，不处理域名；IPv4 与 IPv6 可以写在一起。
+mode = "blacklist"
+list = []
+
+[interfaces]
+# blacklist 且空清单表示自动接管所有受支持的物理上游接口。
+mode = "blacklist"
+list = []
+
+[ssid]
+# blacklist：连接到清单里的 Wi-Fi 时不启用。SSID 行为将在后续批次接通。
+mode = "blacklist"
+list = []
+
+[subscription]
+# 空 URL 完全禁用订阅：不抓取、不启用定时器、不创建 subscription.raw。
+url = ""
+interval = 86400
+timeout = 10
+retries = 2
+exclude_pattern = "(expire|traffic|官网|到期|流量|剩余|套餐|重置|联系|群组|通知|平台|网站|时间|建议|反馈|版本|更新)"
+rename = [
+  { match = "【(亚洲|北美洲|欧洲|南美洲|非洲|大洋洲|南极洲)】", replace = "" },
+]
+strip_emoji = true
+max_tag_length = 32

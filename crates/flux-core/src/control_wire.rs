@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ListMode;
+
 /// Maximum accepted request size. Larger requests close the connection.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
@@ -71,20 +73,42 @@ pub struct EngineStatus {
 }
 
 /// Policy population counts (blueprint §24.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PolicyCounts {
+    /// App list direction currently in force (§27.2.2).
+    pub apps_mode: ListMode,
+    /// Destination CIDR list direction currently in force (§27.2.2).
+    pub cidr_mode: ListMode,
+    /// Interface list direction currently in force (§27.2.2).
+    pub interfaces_mode: ListMode,
     /// Selected UIDs.
     pub selected: u32,
     /// Draining UIDs.
     pub draining: u32,
-    /// IPv4 LPM entries, including fixed and user `bypass_cidrs`, but not the
+    /// IPv4 LPM entries, including fixed and user `[cidr]` entries, but not the
     /// separate self-address HASH.
     pub bypass_v4: u32,
-    /// IPv6 LPM entries, including fixed and user `bypass_cidrs`, but not the
+    /// IPv6 LPM entries, including fixed and user `[cidr]` entries, but not the
     /// separate self-address HASH.
     pub bypass_v6: u32,
     /// Dynamically injected device-own address entries.
     pub self_addresses: u32,
+}
+
+impl Default for PolicyCounts {
+    fn default() -> Self {
+        Self {
+            apps_mode: ListMode::Whitelist,
+            cidr_mode: ListMode::Blacklist,
+            interfaces_mode: ListMode::Blacklist,
+            selected: 0,
+            draining: 0,
+            bypass_v4: 0,
+            bypass_v6: 0,
+            self_addresses: 0,
+        }
+    }
 }
 
 /// Root-module manager identity exported by `service.sh` (blueprint §13.2.0).
@@ -303,6 +327,9 @@ mod tests {
                 effective_config: Some("run/sing-box.7.json".to_string()),
             },
             policy: PolicyCounts {
+                apps_mode: ListMode::Whitelist,
+                cidr_mode: ListMode::Blacklist,
+                interfaces_mode: ListMode::Blacklist,
                 selected: 3,
                 draining: 1,
                 bypass_v4: 12,

@@ -1,5 +1,4 @@
-//! Validation of the user's `sing-box.json` and generation of the effective
-//! configuration.
+//! Generation and validation of the user's `template.json`.
 //!
 //! Implements blueprint §9.0, §9.1 and §9.6. Three invariants the generator
 //! enforces:
@@ -9,7 +8,10 @@
 //! * The injected inbounds carry ONLY `type`, `tag`, `listen`, `listen_port`.
 //!   No `sniff*`, `domain_strategy`, `udp_disable_domain_unmapping`,
 //!   `bind_interface`, `routing_mark` or `reuse_addr` (blueprint §9.1–§9.3).
-//! * Flux never touches the user's `dns` / `outbounds` / `route` / `log` /
+//! * Template generation changes only `outbounds`: it fills empty groups and
+//!   appends refined nodes. Replacing that field with the template field must
+//!   recover a deeply equal value (§28.2).
+//! * Inbound injection never touches `dns` / `outbounds` / `route` / `log` /
 //!   `experimental`, and the user may not use a `flux-` prefixed tag (§9.6).
 //!
 //! Everything here is a pure function of a parsed [`serde_json::Value`], so it
@@ -25,7 +27,7 @@ pub use serde_json::Value;
 
 use crate::abi::{LISTEN_V4_STR, LISTEN_V6_STR};
 
-/// Largest accepted user `sing-box.json`, in bytes (blueprint §9.6).
+/// Largest accepted user `template.json`, in bytes (blueprint §9.6).
 pub const MAX_ENGINE_CONFIG_BYTES: usize = 8 * 1024 * 1024;
 
 /// Tag of the injected IPv4 tproxy inbound.
@@ -46,6 +48,18 @@ pub struct EngineParams {
     pub port_v6: u16,
 }
 
+/// One subscription node after Batch C refinement and region grouping.
+///
+/// Batch B feeds an empty slice. Keeping the already-refined outbound and its
+/// group names together makes generation a pure fill-and-append operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinedNode {
+    /// Official sing-box outbound object, including its unique tag.
+    pub outbound: Value,
+    /// Template group tags this node belongs to.
+    pub groups: Vec<String>,
+}
+
 /// Why a user engine configuration was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineConfigError {
@@ -57,11 +71,84 @@ pub enum EngineConfigError {
     InboundsNotArray,
     /// The user used a `flux-` prefixed tag, which Flux reserves.
     ReservedTag(String),
+    /// The template's top-level `outbounds` was absent or not an array.
+    OutboundsNotArray,
+    /// A refined node was not an outbound object.
+    NodeNotAnObject,
+    /// A refined node had no non-empty string tag.
+    NodeTagMissing,
 }
 
-/// Builds the effective sing-box configuration for one generation.
+/// Generates the engine-owned configuration from a user-owned template.
 ///
-/// Deep-copies the user config, asserts it declares no inbound and no reserved
+/// Exactly two mutations are permitted (§28.2): fill an empty selector/urltest
+/// group from the refined node tags, then append the refined outbound objects.
+/// `PROXY`, `GLOBAL` and `AUTO` receive every node; other groups receive nodes
+/// carrying that exact group name. Every other value is cloned unchanged.
+pub fn generate_from_template(
+    template: &Value,
+    nodes: &[RefinedNode],
+) -> Result<Value, EngineConfigError> {
+    let template_object = template.as_object().ok_or(EngineConfigError::NotAnObject)?;
+    template_object
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .ok_or(EngineConfigError::OutboundsNotArray)?;
+
+    let node_tags = nodes
+        .iter()
+        .map(|node| {
+            let object = node
+                .outbound
+                .as_object()
+                .ok_or(EngineConfigError::NodeNotAnObject)?;
+            object
+                .get("tag")
+                .and_then(Value::as_str)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_string)
+                .ok_or(EngineConfigError::NodeTagMissing)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut generated = template.clone();
+    let outbounds = generated
+        .get_mut("outbounds")
+        .and_then(Value::as_array_mut)
+        .expect("template outbounds was checked");
+    for group in outbounds.iter_mut() {
+        let Some(object) = group.as_object_mut() else {
+            continue;
+        };
+        let kind = object.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("selector") | Some("urltest")) {
+            continue;
+        }
+        let Some(members) = object.get("outbounds").and_then(Value::as_array) else {
+            continue;
+        };
+        if !members.is_empty() {
+            continue;
+        }
+        let Some(group_tag) = object.get("tag").and_then(Value::as_str) else {
+            continue;
+        };
+        let all_nodes = matches!(group_tag, "PROXY" | "GLOBAL" | "AUTO");
+        let filled = nodes
+            .iter()
+            .zip(node_tags.iter())
+            .filter(|(node, _)| all_nodes || node.groups.iter().any(|group| group == group_tag))
+            .map(|(_, node_tag)| Value::String(node_tag.clone()))
+            .collect();
+        object.insert("outbounds".to_string(), Value::Array(filled));
+    }
+    outbounds.extend(nodes.iter().map(|node| node.outbound.clone()));
+    Ok(generated)
+}
+
+/// Injects Flux-owned inbounds into one generated engine configuration.
+///
+/// Deep-copies the generated config, asserts it declares no inbound and no reserved
 /// tag, then writes exactly the two tproxy inbounds. Nothing else is altered:
 /// routing and DNS are the user's authority (blueprint §9.6).
 pub fn build_effective(user: &Value, params: &EngineParams) -> Result<Value, EngineConfigError> {
@@ -213,7 +300,7 @@ fn injected_keys_are_minimal(inbound: &Map<String, Value>) -> bool {
 
 /// The sing-box config template shipped with the module, embedded at build time
 /// so the §15.2 test 4 assertion travels with the crate.
-pub const DEFAULT_SING_BOX_JSONC: &str = include_str!("../../../module/template.json");
+pub const DEFAULT_TEMPLATE_JSONC: &str = include_str!("../../../module/template.json");
 
 #[cfg(test)]
 mod tests {
@@ -225,6 +312,65 @@ mod tests {
             port_v4: 61_001,
             port_v6: 61_002,
         }
+    }
+
+    #[test]
+    fn generation_changes_only_outbounds_and_is_pure() {
+        let template = json!({
+            "log": { "level": "warn", "timestamp": true },
+            "dns": { "strategy": "prefer_ipv6" },
+            "outbounds": [
+                { "type": "direct", "tag": "DIRECT", "custom": 1.25 },
+                { "type": "selector", "tag": "PROXY", "outbounds": [] },
+                { "type": "urltest", "tag": "EUROPE", "outbounds": [] },
+                { "type": "selector", "tag": "PINNED", "outbounds": ["DIRECT"] }
+            ],
+            "route": { "rules": [{ "action": "sniff", "preserve": [1, 2, 3] }] },
+            "experimental": { "cache_file": { "enabled": false } },
+            "unknown_future_field": { "must_survive": null }
+        });
+        let nodes = vec![
+            RefinedNode {
+                outbound: json!({ "type": "shadowsocks", "tag": "Paris", "server": "example" }),
+                groups: vec!["EUROPE".to_string()],
+            },
+            RefinedNode {
+                outbound: json!({ "type": "trojan", "tag": "Tokyo", "server": "example" }),
+                groups: vec!["ASIA".to_string()],
+            },
+        ];
+
+        let generated = generate_from_template(&template, &nodes).expect("generation");
+        assert_eq!(
+            generated["outbounds"][1]["outbounds"],
+            json!(["Paris", "Tokyo"])
+        );
+        assert_eq!(generated["outbounds"][2]["outbounds"], json!(["Paris"]));
+        assert_eq!(generated["outbounds"][3], template["outbounds"][3]);
+        assert_eq!(generated["outbounds"].as_array().unwrap().len(), 6);
+
+        // §28.2's required host test: restoring the template outbounds must
+        // recover the complete template, including fields unknown to Flux.
+        let mut restored = generated;
+        restored["outbounds"] = template["outbounds"].clone();
+        assert_eq!(restored, template);
+
+        // Value equality ignores key order, so compare the serialised text too:
+        // §28.2 fails an implementation that reorders keys, and the user reads
+        // the generated file next to the template they wrote.
+        assert_eq!(
+            serde_json::to_string_pretty(&restored).unwrap(),
+            serde_json::to_string_pretty(&template).unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_node_generation_is_the_template_itself() {
+        let template = json!({
+            "outbounds": [{ "type": "selector", "tag": "PROXY", "outbounds": [] }],
+            "route": { "final": "PROXY" }
+        });
+        assert_eq!(generate_from_template(&template, &[]).unwrap(), template);
     }
 
     // Blueprint §15.2 test 3: user JSON forbids its own inbound; effective JSON
@@ -339,7 +485,7 @@ mod tests {
 
     #[test]
     fn default_template_is_valid_with_sniff_and_hijack_dns() {
-        let config = parse_jsonc(DEFAULT_SING_BOX_JSONC).expect("template parses as JSONC");
+        let config = parse_jsonc(DEFAULT_TEMPLATE_JSONC).expect("template parses as JSONC");
 
         // No inbound, so Flux can inject its own.
         let top = config.as_object().expect("template is an object");
@@ -395,7 +541,7 @@ mod tests {
 
     #[test]
     fn a_leading_byte_order_mark_is_not_a_syntax_error() {
-        // Editing sing-box.json on Windows routinely adds one, and the raw
+        // Editing template.json on Windows routinely adds one, and the raw
         // serde message points at an invisible byte.
         let value = parse_jsonc("\u{feff}{\"outbounds\": []}").expect("BOM is skipped");
         assert_eq!(value["outbounds"], json!([]));

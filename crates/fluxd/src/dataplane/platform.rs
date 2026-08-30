@@ -9,6 +9,7 @@ use std::time::Duration;
 #[cfg(test)]
 use flux_core::abi::UidStats;
 use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key};
+use flux_core::config::ListMode;
 use flux_core::control_wire::{Counters, IfaceStatus, PolicyCounts};
 
 use crate::bpf::{self, ProgramIdentity, RingBuffer, Runtime};
@@ -36,11 +37,29 @@ const IFA_F_DADFAILED: u32 = 0x08;
 const IFA_F_TENTATIVE: u32 = 0x40;
 const IFA_F_STABLE_PRIVACY: u32 = 0x800;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredPolicy {
+    pub apps_mode: ListMode,
+    pub cidr_mode: ListMode,
+    pub interfaces_mode: ListMode,
+    pub interfaces: BTreeSet<String>,
     pub selected_uids: BTreeSet<u32>,
     pub bypass_v4: BTreeMap<LpmV4Key, abi::BypassTag>,
     pub bypass_v6: BTreeMap<LpmV6Key, abi::BypassTag>,
+}
+
+impl Default for DesiredPolicy {
+    fn default() -> Self {
+        Self {
+            apps_mode: ListMode::Whitelist,
+            cidr_mode: ListMode::Blacklist,
+            interfaces_mode: ListMode::Blacklist,
+            interfaces: BTreeSet::new(),
+            selected_uids: BTreeSet::new(),
+            bypass_v4: BTreeMap::new(),
+            bypass_v6: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +132,10 @@ pub struct Manager {
     last_control: Option<Control>,
     attached: Vec<OwnedFilter>,
     attachment: Option<AttachmentState>,
+    apps_mode: ListMode,
+    cidr_mode: ListMode,
+    interfaces_mode: ListMode,
+    interfaces: BTreeSet<String>,
     uid_modes: BTreeMap<u32, u8>,
     bypass_v4: BTreeMap<LpmV4Key, abi::BypassTag>,
     bypass_v6: BTreeMap<LpmV6Key, abi::BypassTag>,
@@ -191,6 +214,10 @@ impl Manager {
             last_control: None,
             attached: Vec::new(),
             attachment: None,
+            apps_mode: ListMode::Whitelist,
+            cidr_mode: ListMode::Blacklist,
+            interfaces_mode: ListMode::Blacklist,
+            interfaces: BTreeSet::new(),
             uid_modes: BTreeMap::new(),
             bypass_v4: BTreeMap::new(),
             bypass_v6: BTreeMap::new(),
@@ -213,6 +240,16 @@ impl Manager {
 
     pub fn status(&self) -> &DataplaneStatus {
         &self.status
+    }
+
+    /// Stages the interface dimension before topology admission runs.
+    ///
+    /// This mutates no kernel object. `converge_with_bpf` consumes the staged
+    /// predicate, and `apply_policy` commits the complete policy dimensions.
+    pub fn stage_interface_policy(&mut self, desired: &DesiredPolicy) {
+        self.interfaces_mode = desired.interfaces_mode;
+        self.interfaces.clone_from(&desired.interfaces);
+        self.status.policy.interfaces_mode = desired.interfaces_mode;
     }
 
     pub fn fault_fd(&self) -> Option<RawFd> {
@@ -464,7 +501,8 @@ impl Manager {
             .ok_or_else(|| DataplaneError::new("veth_missing:flxrs0", "owned host veth absent"))?;
         let peer = link_named(&snapshot, PEER_NAME)
             .ok_or_else(|| DataplaneError::new("veth_missing:flxrs1", "owned peer veth absent"))?;
-        let control = inactive_control(host.ifindex, peer.ifindex, 1, 0, 0)?;
+        let mut control = inactive_control(host.ifindex, peer.ifindex, 1, 0, 0)?;
+        control.cidr_mode = cidr_mode_value(self.cidr_mode);
 
         if self.runtime.is_none() {
             let mut runtime = Runtime::load_embedded(object).map_err(DataplaneError::bpf)?;
@@ -484,6 +522,9 @@ impl Manager {
     pub fn apply_policy(&mut self, desired: &DesiredPolicy) -> Result<(), DataplaneError> {
         if self.test_bypass {
             self.status.policy = PolicyCounts {
+                apps_mode: desired.apps_mode,
+                cidr_mode: desired.cidr_mode,
+                interfaces_mode: desired.interfaces_mode,
                 selected: desired.selected_uids.len() as u32,
                 bypass_v4: desired.bypass_v4.len() as u32,
                 bypass_v6: desired.bypass_v6.len() as u32,
@@ -579,6 +620,14 @@ impl Manager {
             self.self_v6.insert(address);
         }
 
+        // The LPM contents are in place before their interpretation changes.
+        // Publishing a new frozen leaf preserves active and generation while
+        // making Batch A's cidr_mode field authoritative for new flows.
+        self.publish_cidr_mode(desired.cidr_mode)?;
+        self.apps_mode = desired.apps_mode;
+        self.interfaces_mode = desired.interfaces_mode;
+        self.interfaces.clone_from(&desired.interfaces);
+
         // Subtractive half. UID entries are downgraded, never deleted within
         // this boot; prefix/address maps delete only keys no longer desired.
         let removed_uids = self
@@ -643,12 +692,6 @@ impl Manager {
         }
 
         self.status.policy = self.policy_counts();
-        if let Some(control) = self.last_control.as_mut() {
-            control.selected_count = self.status.policy.selected;
-            control.draining_count = self.status.policy.draining;
-            control.bypass_v4_count = self.status.policy.bypass_v4;
-            control.bypass_v6_count = self.status.policy.bypass_v6;
-        }
         self.status
             .warnings
             .retain(|warning| !warning.contains("self_addr_lru"));
@@ -658,6 +701,21 @@ impl Manager {
                     .to_string(),
             );
         }
+        Ok(())
+    }
+
+    fn publish_cidr_mode(&mut self, mode: ListMode) -> Result<(), DataplaneError> {
+        let encoded = cidr_mode_value(mode);
+        if let Some(mut control) = self.last_control {
+            if control.cidr_mode != encoded {
+                control.cidr_mode = encoded;
+                self.runtime_mut()?
+                    .publish_control(&control)
+                    .map_err(DataplaneError::bpf)?;
+                self.last_control = Some(control);
+            }
+        }
+        self.cidr_mode = mode;
         Ok(())
     }
 
@@ -747,6 +805,9 @@ impl Manager {
 
     fn policy_counts(&self) -> PolicyCounts {
         PolicyCounts {
+            apps_mode: self.apps_mode,
+            cidr_mode: self.cidr_mode,
+            interfaces_mode: self.interfaces_mode,
             selected: self
                 .uid_modes
                 .values()
@@ -848,8 +909,9 @@ impl Manager {
             .ok_or_else(|| DataplaneError::new("veth_missing:flxrs0", "owned host veth absent"))?;
         let peer = link_named(&snapshot, PEER_NAME)
             .ok_or_else(|| DataplaneError::new("veth_missing:flxrs1", "owned peer veth absent"))?;
-        let control = inactive_control(host.ifindex, peer.ifindex, generation, port_v4, port_v6)?;
-        let mut control = control;
+        let mut control =
+            inactive_control(host.ifindex, peer.ifindex, generation, port_v4, port_v6)?;
+        control.cidr_mode = cidr_mode_value(self.cidr_mode);
         let counts = self.policy_counts();
         control.selected_count = counts.selected;
         control.draining_count = counts.draining;
@@ -1884,6 +1946,10 @@ impl Manager {
             .links
             .iter()
             .filter(|link| is_potential_candidate(link, &snapshot))
+            .filter(|link| {
+                self.interfaces_mode
+                    .includes(self.interfaces.contains(&link.name))
+            })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|link| link.ifindex);
         if candidates.len() > MAX_INTERFACES {
@@ -1891,6 +1957,26 @@ impl Manager {
                 format!("too_many_interfaces:{}", candidates.len()),
                 "the topology candidate exceeds the 64-interface hard limit",
             ));
+        }
+
+        let selected = candidates
+            .iter()
+            .map(|link| (link.name.clone(), link.ifindex))
+            .collect::<BTreeSet<_>>();
+        let stale = self
+            .attached
+            .iter()
+            .filter(|owned| {
+                owned.identity.parent == netlink::TC_H_EGRESS
+                    && owned.identity.handle == abi::TC_HANDLE_EGRESS
+                    && !selected.contains(&(owned.ifname.clone(), owned.identity.ifindex))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for owned in stale {
+            self.detach_identity(&owned)?;
+            self.attached
+                .retain(|candidate| candidate.identity != owned.identity);
         }
 
         let mut statuses = Vec::with_capacity(candidates.len());
@@ -2445,6 +2531,13 @@ fn arphrd_name(arphrd: u16) -> Option<&'static str> {
         519 => Some("rawip"),
         0xfffe => Some("none"),
         _ => None,
+    }
+}
+
+fn cidr_mode_value(mode: ListMode) -> u16 {
+    match mode {
+        ListMode::Blacklist => abi::CidrMode::Blacklist as u16,
+        ListMode::Whitelist => abi::CidrMode::Whitelist as u16,
     }
 }
 

@@ -31,7 +31,6 @@ pub enum SelectorError {
     /// The package was absent from `packages.list`.
     UnknownPackage(String),
 }
-
 /// A resolved selection: one Android UID plus the inputs that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
@@ -170,6 +169,17 @@ impl PackageIndex {
             .unwrap_or_default()
     }
 
+    /// Every installed third-party application id, sorted and de-duplicated.
+    ///
+    /// Blacklist app mode expands this iterator into concrete UIDs. System and
+    /// isolated ranges remain structurally unselectable (§2.3, §11.2.1).
+    pub fn application_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.by_app_id
+            .keys()
+            .copied()
+            .filter(|app_id| (APP_ID_MIN..=APP_ID_MAX).contains(app_id))
+    }
+
     /// Resolves a parsed selector to a concrete [`Selection`].
     ///
     /// Fails if the package is unknown or its app id is outside the application
@@ -293,6 +303,10 @@ android 1000 0 /data/system default none 0
     fn package_index_resolves_and_lists_shared_uids() {
         let index = PackageIndex::parse(SAMPLE_PACKAGES);
         assert_eq!(index.app_id("com.example.browser"), Some(10_231));
+        assert_eq!(
+            index.application_ids().collect::<Vec<_>>(),
+            vec![10_231, 10_232, 10_500]
+        );
 
         let selection = index
             .resolve(&AppSelector::parse("0:com.example.browser").unwrap())
