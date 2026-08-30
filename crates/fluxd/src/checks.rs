@@ -390,9 +390,14 @@ fn overlaps_v6(left: Ipv6Cidr, right: Ipv6Cidr) -> bool {
     u128::from(left.addr) & mask == u128::from(right.addr) & mask
 }
 
-/// `docs/spec/interaction.md` §27.3.2: with `experimental.clash_api` present, an empty `secret`
-/// or a non-loopback `external_controller` is an ERROR, not a warning — either
-/// one hands the proxy control plane to every app (or every Wi-Fi neighbour).
+/// `docs/spec/interaction.md` §27.2.4: with `experimental.clash_api` present, an
+/// empty `secret` or a non-loopback `external_controller` hands the proxy
+/// control plane to every app, or to every Wi-Fi neighbour.
+///
+/// This currently reports an ERROR. §27.2.4 now requires a WARNING instead —
+/// the condition is a diagnosable difference of intent inside sing-box's own
+/// authority, not an undiagnosable failure. Tracked as item 11 of
+/// `docs/plan/implementation.md` §17.0.2.
 fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
     let Some(clash) = user
         .get("experimental")
