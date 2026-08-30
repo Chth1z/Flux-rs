@@ -1288,7 +1288,7 @@ impl Manager {
         });
         let Some(identity) = matches.next() else {
             return Err(DataplaneError::new(
-                "not_first_applicable",
+                "identity_drift",
                 format!(
                     "{ifname} attached filter did not expose a complete identity: dump={filters:?}"
                 ),
@@ -1296,7 +1296,7 @@ impl Manager {
         };
         if matches.next().is_some() {
             return Err(DataplaneError::new(
-                "not_first_applicable",
+                "identity_drift",
                 format!("{ifname} attached filter identity was not unique"),
             ));
         }
@@ -1304,7 +1304,7 @@ impl Manager {
             .map_err(DataplaneError::bpf)?
         {
             return Err(DataplaneError::new(
-                "not_first_applicable",
+                "identity_drift",
                 format!("{ifname} attached program map set is foreign"),
             ));
         }
@@ -1337,7 +1337,7 @@ impl Manager {
             })
             .ok_or_else(|| {
                 DataplaneError::new(
-                    "not_first_applicable",
+                    "identity_drift",
                     format!("{ifname} capture record disappeared after attach"),
                 )
             })?;
@@ -1358,7 +1358,7 @@ impl Manager {
             .map_err(|error| DataplaneError::io("tc_dump_failed", error))?;
         let Some(filter) = filters.iter().find(|filter| owned.identity.matches(filter)) else {
             return Err(DataplaneError::new(
-                "not_first_applicable",
+                "identity_drift",
                 format!(
                     "{} attached filter identity did not round-trip: expected={:?}, dump={filters:?}",
                     owned.ifname, owned.identity
@@ -1373,7 +1373,7 @@ impl Manager {
         .map_err(DataplaneError::bpf)?
         {
             return Err(DataplaneError::new(
-                "not_first_applicable",
+                "identity_drift",
                 format!("{} attached program map set is foreign", owned.ifname),
             ));
         }
@@ -1473,7 +1473,7 @@ impl Manager {
         {
             status.status = "active".to_string();
             status.reason = None;
-            status.first_applicable = Some(true);
+            status.reachable = Some(true);
             if let Some(entry) = status.entry.as_deref() {
                 if let Some(program) = self
                     .runtime
@@ -1505,7 +1505,7 @@ impl Manager {
             status.prog_tag = None;
             // Every caller reaches here after an attach or liveness attempt,
             // so reachability is decided and negative, not merely unknown.
-            status.first_applicable = Some(false);
+            status.reachable = Some(false);
         }
         if let Some(warning) = warning {
             self.status.warnings.push(warning);
@@ -1910,7 +1910,7 @@ impl Manager {
             prog_id: None,
             prog_tag: None,
             pref: None,
-            first_applicable: None,
+            reachable: None,
             reason: None,
         };
 
@@ -1965,7 +1965,7 @@ impl Manager {
             Ok(filters) => filters,
             Err(_) => {
                 // A failed enumeration is not a reachability verdict, so
-                // `first_applicable` stays absent rather than claiming false.
+                // `reachable` stays absent rather than claiming false.
                 status.reason = Some("tc_dump_failed".to_string());
                 return status;
             }
@@ -1986,14 +1986,14 @@ impl Manager {
                     status.prog_id = Some(owned.identity.prog_id);
                     status.prog_tag = Some(hex_tag(owned.identity.prog_tag));
                     status.pref = Some(owned.identity.priority);
-                    status.first_applicable = Some(true);
+                    status.reachable = Some(true);
                     return status;
                 }
                 if self.detach_identity(&owned).is_err() {
                     status.entry = Some(entry.to_string());
-                    status.reason = Some("not_first_applicable".to_string());
+                    status.reason = Some("identity_drift".to_string());
                     status.pref = Some(owned.identity.priority);
-                    status.first_applicable = Some(false);
+                    status.reachable = Some(false);
                     return status;
                 }
                 self.attached.remove(index);
@@ -2014,9 +2014,9 @@ impl Manager {
                         && filter.handle == owned.identity.handle
                 }) {
                     status.entry = Some(entry.to_string());
-                    status.reason = Some("not_first_applicable".to_string());
+                    status.reason = Some("identity_drift".to_string());
                     status.pref = Some(owned.identity.priority);
-                    status.first_applicable = Some(false);
+                    status.reachable = Some(false);
                     return status;
                 }
             }
@@ -2040,7 +2040,7 @@ impl Manager {
         // Reachability is decided by the flx_verify liveness probe, not by
         // where we land in the dump. Leave the field absent until that probe
         // concludes, so `admitted` never advertises an unverified verdict.
-        status.first_applicable = None;
+        status.reachable = None;
         status
     }
 }
@@ -2533,8 +2533,8 @@ fn attachment_reason(error: &DataplaneError) -> &'static str {
         "interface_reused"
     } else if error.code.starts_with("tc_dump") {
         "tc_dump_failed"
-    } else if error.code == "not_first_applicable" {
-        "not_first_applicable"
+    } else if error.code == "identity_drift" {
+        "identity_drift"
     } else {
         "tc_no_usable_pref"
     }

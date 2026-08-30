@@ -139,12 +139,10 @@ pub struct IfaceStatus {
     /// interface, so two interfaces on one device may differ (§8.5.3).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pref: Option<u16>,
-    /// Compatibility field: whether admission proved the filter reachable and
-    /// its numerically smaller-pref (preceding) snapshot has not drifted. It
-    /// does not mean that the filter is first in dump order (§8.5.0). Absent
+    /// Whether liveness verification established filter reachability. Absent
     /// until reachability has actually been decided one way or the other.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub first_applicable: Option<bool>,
+    pub reachable: Option<bool>,
     /// A stable reason token when excluded (blueprint §24.2).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reason: Option<String>,
@@ -302,7 +300,7 @@ mod tests {
                 running: true,
                 pid: Some(1234),
                 sockets_verified: 4,
-                effective_config: Some("run/effective-sing-box.7.json".to_string()),
+                effective_config: Some("run/sing-box.7.json".to_string()),
             },
             policy: PolicyCounts {
                 selected: 3,
@@ -321,7 +319,7 @@ mod tests {
                     prog_id: Some(118),
                     prog_tag: Some("a1b2c3d4e5f60718".to_string()),
                     pref: Some(2),
-                    first_applicable: Some(true),
+                    reachable: Some(true),
                     reason: None,
                 },
                 IfaceStatus {
@@ -333,7 +331,7 @@ mod tests {
                     prog_id: None,
                     prog_tag: None,
                     pref: None,
-                    first_applicable: None,
+                    reachable: None,
                     reason: Some("clat_order_unverified".to_string()),
                 },
             ],
@@ -357,6 +355,28 @@ mod tests {
         assert!(!line.contains('\n'), "a frame must be a single line");
         let back: Response = from_line(&line).expect("deserialise");
         assert_eq!(response, back);
+    }
+
+    #[test]
+    fn reachable_preserves_all_three_wire_states() {
+        let absent: IfaceStatus = from_line(r#"{"name":"wlan0","ifindex":24,"status":"admitted"}"#)
+            .expect("decode absent reachability");
+        assert_eq!(absent.reachable, None);
+        assert!(!to_line(&absent).unwrap().contains("\"reachable\""));
+
+        let unreachable: IfaceStatus =
+            from_line(r#"{"name":"wlan0","ifindex":24,"status":"excluded","reachable":false}"#)
+                .expect("decode negative reachability");
+        assert_eq!(unreachable.reachable, Some(false));
+        assert!(to_line(&unreachable)
+            .unwrap()
+            .contains("\"reachable\":false"));
+
+        let reachable: IfaceStatus =
+            from_line(r#"{"name":"wlan0","ifindex":24,"status":"active","reachable":true}"#)
+                .expect("decode positive reachability");
+        assert_eq!(reachable.reachable, Some(true));
+        assert!(to_line(&reachable).unwrap().contains("\"reachable\":true"));
     }
 
     #[test]

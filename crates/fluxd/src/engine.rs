@@ -387,7 +387,7 @@ fn draw_port() -> io::Result<u16> {
     }
 }
 
-/// §9.4 step 1: writes `run/effective-sing-box.<generation>.json` with
+/// §9.4 step 1: writes `run/sing-box.<generation>.json` with
 /// `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, and fsyncs both the file and its
 /// directory. The path is immutable for the life of the generation.
 pub fn write_effective(

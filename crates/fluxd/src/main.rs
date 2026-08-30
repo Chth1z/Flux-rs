@@ -196,9 +196,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         }
     }
 
-    /// One line per candidate interface. `first_applicable` is rendered as
-    /// reachability, which is what the field actually asserts (§8.5.0); the
-    /// wire name is kept only for compatibility.
+    /// One line per candidate interface with tri-state reachability (§27.3.3).
     fn describe_iface(iface: &flux_core::control_wire::IfaceStatus) -> String {
         let mut detail = Vec::new();
         if let Some(entry) = &iface.entry {
@@ -207,7 +205,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         if let Some(pref) = iface.pref {
             detail.push(format!("pref {pref}"));
         }
-        match iface.first_applicable {
+        match iface.reachable {
             Some(true) => detail.push("reachable".to_string()),
             Some(false) => detail.push("not reachable".to_string()),
             None => detail.push("reachability unverified".to_string()),

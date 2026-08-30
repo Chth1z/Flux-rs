@@ -19,7 +19,7 @@
 | Phase 6 | 已完成并验证 capture semantics | `a36f05d`、`beef81d`、`3627d30` |
 | Phase 7 | 已完成并验证 self-healing | `63cbdff`、`d27d44d` |
 | Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 §20 与 §15.1 门禁约束 |
-| 0.9.1 增量实施 | 文档合同已定稿；§8.5 的 status 缺口已补齐 | `ifaces[].pref` 已加入 wire 与人类输出；`first_applicable` 改为存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 §15.1 分层。完成 Linux CI 与设备回归后才提升 workspace 版本 |
+| 0.9.1 增量实施 | 文档合同已定稿；§8.5 的 status 缺口已补齐 | `ifaces[].pref` 与三态 `reachable` 已加入 wire 与人类输出；`reachable` 在存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 §15.1 分层。完成 Linux CI 与设备回归后才提升 workspace 版本 |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -29,8 +29,8 @@
 |---|---|---|---|
 | 1 | bypass LPM 混装机制保留网段与用户策略 | §1 | 用闲置的 `__u8` value 字节打 `RESERVED`/`POLICY` 标；热路径仍是一次 lookup（§6.1.1） |
 | 2 | 模板声明 listener 地址与端口 | §1 | 反转回注入：预填需要六道门禁，注入需要一道（§9.1） |
-| 3 | `first_applicable` 字段名与语义相反，靠四处文档解释 | §1、§4 | 改名 `reachable`，删掉解释段落（§24） |
-| 4 | listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处 | §4 | 固定 bypass 从运行时参数派生，只留一个来源 |
+| ~~3~~ | ~~`first_applicable` 字段名与语义相反，靠四处文档解释~~ | ~~§1、§4~~ | ~~改名 `reachable`，删掉解释段落（§24）~~ |
+| ~~4~~ | ~~listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处~~ | ~~§4~~ | ~~固定 bypass 从 ABI 常量派生，只留一个来源~~ |
 | 5 | `service.sh` 里的 daemon 重启退避循环 | §7 | 收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案） |
 | 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（§23） |
 | 7 | 0.9.1 留下的一批"必须/不得"式校验 | §1、§2 | 逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进 |
@@ -48,11 +48,11 @@
 | 5 | `webroot/index.html` 进 allowlist | allowlist 当前 14 项，无 webroot | §28.8、§13.1 |
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
 | 7 | 三个维度统一黑/白名单与 `@file` 引用 | `flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键 | §11.2 |
-| 8 | bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump** | loader 恒写 `1`，BPF 只判非空，magic 未变 | §6.1.1、§6.3 |
-| 9 | 运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json` | `layout.rs` 仍用旧名 | §28.1 |
-| 10 | wire 字段 `first_applicable` → `reachable`；排除原因 `not_first_applicable` → `identity_drift` | `control_wire.rs` 仍是旧名 | §24、§27.3.3 |
+| ~~8~~ | ~~bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump**~~ | ~~loader 恒写 `1`，BPF 只判非空，magic 未变~~ | ~~§6.1.1、§6.3~~ |
+| ~~9~~ | ~~运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json`~~ | ~~`layout.rs` 仍用旧名~~ | ~~§28.1~~ |
+| ~~10~~ | ~~wire 字段 `first_applicable` → `reachable`；排除原因 `not_first_applicable` → `identity_drift`~~ | ~~`control_wire.rs` 仍是旧名~~ | ~~§24、§27.3.3~~ |
 | 11 | `clash_api` 的 secret / 监听地址不安全时**告警而非硬拒** | `checks.rs` 仍是 error | §23、§27.2.4 |
-| 12 | listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码 | 两处各写一遍 | §17.0.1 第 4 项 |
+| ~~12~~ | ~~listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码~~ | ~~两处各写一遍~~ | ~~§17.0.1 第 4 项~~ |
 | 13 | 物理 `clsact` 缺失时**排除并等 netd**，不自建 | 需核对 `dataplane` 当前行为 | §8.5 |
 | 14 | 订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试 | 未实现 | §29.3、§29.4 |
 | 15 | `config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代 | 未实现 | §29.6 |
@@ -184,7 +184,7 @@
 
 **退出条件**：
 
-1. **冷启动与热更新事务在设备上闭环，尚无数据面**：`fluxd` 能拉起官方 sing-box、按 PID + inode 核验 4 个 socket、写 `run/effective-sing-box.<generation>.json`、跑 `sing-box check -c`、换代、优雅停止。
+1. **冷启动与热更新事务在设备上闭环，尚无数据面**：`fluxd` 能拉起官方 sing-box、按 PID + inode 核验 4 个 socket、写 `run/sing-box.<generation>.json`、跑 `sing-box check -c`、换代、优雅停止。
 2. **`fluxd` 自己的 socket 核验必须复现 Q2 的结果**（§16.10.2）：4 个 socket，inode 与 `/proc/<pid>/fd` 对得上。这是把 Q2 从"一次性实测"变成"产品自带的持续检查"。
 3. 第二个 `fluxd` 实例启动时被 `flock` 拒绝，并给出可读原因。
 4. `status` 在无数据面时正确报告 `Inactive` 且**说清原因**（不是空输出）。

@@ -107,7 +107,7 @@ Every possible failure point specifies **how it is detected, what action is take
   "engine": {
     "running": true, "pid": 1234,
     "sockets_verified": 4,            // Expect 4; fewer than 4 means readiness has not closed
-    "effective_config": "run/effective-sing-box.7.json"
+    "effective_config": "run/sing-box.7.json"
   },
   "policy": {
     "selected": 3, "draining": 1,

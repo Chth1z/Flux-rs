@@ -74,15 +74,18 @@ template.json  +  subscription.raw  +  flux.toml 的精修规则
 
 ## 验收
 
+**只跑 `AGENTS.md` 列的主机门禁，加上 aarch64 类型检查**：
+
 ```
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p flux-core && cargo test -p xtask
+cargo test -p flux-core && cargo test -p xtask && cargo test -p fluxd --bin fluxd
 cargo xtask doc-check
 cargo clippy -p fluxd --target aarch64-linux-android --all-targets
 ```
 
-最后一条覆盖 Linux-only 的数据面，主机门禁编译不到它。`abi-check` 与 `btf-check` 需要带 BPF 后端的 clang，Windows 开发机上没有，由 Linux CI 跑（§15.1）——跑不了就跳过并说明。
+最后一条覆盖 Linux-only 的数据面，主机门禁编译不到它，改动跨 crate 时漏掉的调用点只有它会报出来。
+
+**Windows 上跑不了、也不要试的**：`cargo clippy --workspace --all-targets`（设备测试 crate 是 Linux-only）、`cargo xtask abi-check`、`cargo xtask btf-check`（需要带 BPF 后端的 clang）。这三条由 Linux CI 跑（§15.1）。跳过它们并说明，**但不要声称它们通过了**。
 
 加上 B2 那条纯函数测试必须存在且通过。
 

@@ -139,8 +139,7 @@ impl Layout {
 
     /// The immutable per-generation engine config (blueprint §11.1).
     pub fn effective_path(&self, generation: u64) -> PathBuf {
-        self.run_dir()
-            .join(format!("effective-sing-box.{generation}.json"))
+        self.run_dir().join(format!("sing-box.{generation}.json"))
     }
 
     /// Creates the root, `run/` and `config/` directories with mode 0700.
@@ -227,7 +226,7 @@ impl Layout {
         }
     }
 
-    /// Deletes stale `run/effective-sing-box.<u64>.json` files. Only called at
+    /// Deletes stale `run/sing-box.<u64>.json` files. Only called at
     /// cold start, after the daemon has confirmed it has no live child of its
     /// own (blueprint §11.1): the daemon just started, so any such file is a
     /// leftover from a previous instance. Strict match only — anything else in
@@ -295,13 +294,13 @@ fn installed_module_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(MODULE_DIR))
 }
 
-/// Strictly `effective-sing-box.<u64>.json`.
+/// Strictly `sing-box.<u64>.json`.
 fn is_effective_name(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
     let Some(middle) = name
-        .strip_prefix("effective-sing-box.")
+        .strip_prefix("sing-box.")
         .and_then(|rest| rest.strip_suffix(".json"))
     else {
         return false;
@@ -474,18 +473,16 @@ mod tests {
         let layout = tmp_layout("stale");
         layout.ensure().expect("create");
         let run = layout.run_dir();
-        for name in [
-            "effective-sing-box.7.json",
-            "effective-sing-box.18446744073709551615.json",
-        ] {
+        for name in ["sing-box.7.json", "sing-box.18446744073709551615.json"] {
             fs::write(run.join(name), b"{}").unwrap();
         }
         // Decoys that must survive: wrong shapes and non-u64 numbers.
         for name in [
-            "effective-sing-box.x.json",
-            "effective-sing-box..json",
-            "effective-sing-box.7.json.bak",
-            "effective-sing-box.99999999999999999999.json", // > u64::MAX
+            "sing-box.x.json",
+            "sing-box..json",
+            "sing-box.7.json.bak",
+            "sing-box.99999999999999999999.json", // > u64::MAX
+            "effective-sing-box.7.json",
             "other.json",
             "daemon.lock",
         ] {
@@ -493,12 +490,13 @@ mod tests {
         }
         let removed = layout.clean_stale_effective().unwrap();
         assert_eq!(removed.len(), 2);
-        assert!(!run.join("effective-sing-box.7.json").exists());
+        assert!(!run.join("sing-box.7.json").exists());
         for name in [
-            "effective-sing-box.x.json",
-            "effective-sing-box..json",
-            "effective-sing-box.7.json.bak",
-            "effective-sing-box.99999999999999999999.json",
+            "sing-box.x.json",
+            "sing-box..json",
+            "sing-box.7.json.bak",
+            "sing-box.99999999999999999999.json",
+            "effective-sing-box.7.json",
             "other.json",
             "daemon.lock",
         ] {
@@ -509,11 +507,12 @@ mod tests {
 
     #[test]
     fn effective_name_matcher_is_exact() {
-        assert!(is_effective_name(OsStr::new("effective-sing-box.1.json")));
-        assert!(is_effective_name(OsStr::new("effective-sing-box.0.json")));
-        assert!(!is_effective_name(OsStr::new("effective-sing-box.-1.json")));
-        assert!(!is_effective_name(OsStr::new("effective-sing-box.1.json2")));
-        assert!(!is_effective_name(OsStr::new("effective-sing-box.json")));
-        assert!(!is_effective_name(OsStr::new("Effective-sing-box.1.json")));
+        assert!(is_effective_name(OsStr::new("sing-box.1.json")));
+        assert!(is_effective_name(OsStr::new("sing-box.0.json")));
+        assert!(!is_effective_name(OsStr::new("sing-box.-1.json")));
+        assert!(!is_effective_name(OsStr::new("sing-box.1.json2")));
+        assert!(!is_effective_name(OsStr::new("sing-box.json")));
+        assert!(!is_effective_name(OsStr::new("Sing-box.1.json")));
+        assert!(!is_effective_name(OsStr::new("effective-sing-box.1.json")));
     }
 }

@@ -196,7 +196,7 @@ mod tests {
                 .as_deref()
                 .expect("effective path reported");
             assert!(
-                effective.ends_with("effective-sing-box.1.json"),
+                effective.ends_with("sing-box.1.json"),
                 "generation-named effective config: {effective}"
             );
             assert!(Path::new(effective).exists());
@@ -514,7 +514,7 @@ mod tests {
             .expect("run dir")
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("effective-sing-box."))
+            .filter(|n| n.starts_with("sing-box."))
             .collect();
         assert!(
             leftovers.is_empty(),

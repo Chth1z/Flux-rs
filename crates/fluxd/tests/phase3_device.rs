@@ -120,7 +120,7 @@ fn assert_ready(manager: &dataplane::Manager) {
                     iface.pref.is_some_and(|pref| pref >= 2),
                     "admitted interface lacks a dynamic preference: {iface:?}"
                 );
-                assert_eq!(iface.first_applicable, None, "{iface:?}");
+                assert_eq!(iface.reachable, None, "{iface:?}");
             }
             "excluded" => {
                 assert!(

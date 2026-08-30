@@ -10,12 +10,13 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 
-use crate::abi::{BypassTag, LpmV4Key, LpmV6Key, LPM_MAX_ENTRIES};
+use crate::abi::{BypassTag, LpmV4Key, LpmV6Key, LISTEN_V4_STR, LISTEN_V6_STR, LPM_MAX_ENTRIES};
 
-/// Prefixes that are permanently in the bypass set, whatever the user config
-/// says.
+/// Non-listener prefixes that are permanently in the bypass set, whatever the
+/// user config says. [`fixed_bypass_v4`] adds the listener host route from the
+/// ABI identity rather than duplicating its address here.
 ///
-/// The listener address is included because sing-box's TProxy UDP write-back
+/// The listener address must be included because sing-box's TProxy UDP write-back
 /// binds the original destination with `IP_TRANSPARENT`; if a selected app could
 /// target the listener, the write-back would collide with the listener itself
 /// (blueprint D7, D16, upstream issue #3646).
@@ -24,27 +25,20 @@ use crate::abi::{BypassTag, LpmV4Key, LpmV6Key, LPM_MAX_ENTRIES};
 /// prefix was overkill for self-loop prevention and it collided with sing-box's
 /// conventional fakeip range, which made fakeip fail silently and completely
 /// (blueprint D21, §9.0).
-pub const FIXED_BYPASS_V4: &[&str] = &[
+const FIXED_BYPASS_V4_PREFIXES: &[&str] = &[
     "0.0.0.0/8",
     "10.0.0.0/8",
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.168.0.0/16",
-    "198.51.100.1/32", // the listener itself, nothing wider
     "224.0.0.0/4",
     "255.255.255.255/32",
 ];
 
-/// IPv6 counterpart of [`FIXED_BYPASS_V4`].
-pub const FIXED_BYPASS_V6: &[&str] = &[
-    "::/128",
-    "::1/128",
-    "fc00::/7",
-    "fe80::/10",
-    "ff00::/8",
-    "2001:db8:0:1::2/128", // the listener itself, nothing wider
-];
+/// IPv6 counterpart of [`FIXED_BYPASS_V4_PREFIXES`].
+const FIXED_BYPASS_V6_PREFIXES: &[&str] =
+    &["::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"];
 
 /// Why a user-supplied prefix was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,32 +228,48 @@ fn mask128(prefix_len: u8) -> u128 {
 }
 
 /// The fixed IPv4 bypass prefixes, parsed once and tagged as mechanism-owned.
+/// The listener `/32` is derived from [`LISTEN_V4_STR`].
 pub fn fixed_bypass_v4() -> &'static [Ipv4Bypass] {
     static CELL: OnceLock<Vec<Ipv4Bypass>> = OnceLock::new();
     CELL.get_or_init(|| {
-        FIXED_BYPASS_V4
+        let mut entries = FIXED_BYPASS_V4_PREFIXES
             .iter()
             .map(|s| {
                 BypassEntry::reserved(
                     Ipv4Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"),
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        entries.push(BypassEntry::reserved(Ipv4Cidr {
+            addr: LISTEN_V4_STR
+                .parse()
+                .expect("IPv4 listener ABI constant is an address"),
+            prefix_len: 32,
+        }));
+        entries
     })
 }
 
 /// The fixed IPv6 bypass prefixes, parsed once and tagged as mechanism-owned.
+/// The listener `/128` is derived from [`LISTEN_V6_STR`].
 pub fn fixed_bypass_v6() -> &'static [Ipv6Bypass] {
     static CELL: OnceLock<Vec<Ipv6Bypass>> = OnceLock::new();
     CELL.get_or_init(|| {
-        FIXED_BYPASS_V6
+        let mut entries = FIXED_BYPASS_V6_PREFIXES
             .iter()
             .map(|s| {
                 BypassEntry::reserved(
                     Ipv6Cidr::parse(s).expect("fixed bypass constant is a canonical prefix"),
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        entries.push(BypassEntry::reserved(Ipv6Cidr {
+            addr: LISTEN_V6_STR
+                .parse()
+                .expect("IPv6 listener ABI constant is an address"),
+            prefix_len: 128,
+        }));
+        entries
     })
 }
 
@@ -325,10 +335,10 @@ mod tests {
 
     #[test]
     fn parses_and_canonicalises_v6() {
-        let c = Ipv6Cidr::parse("2001:db8:0:1::2/128").expect("canonical");
+        let c = Ipv6Cidr::parse("2001:db8::2/128").expect("canonical");
         assert_eq!(c.prefix_len, 128);
         // Display is the canonical compressed form.
-        assert_eq!(c.to_string(), "2001:db8:0:1::2/128");
+        assert_eq!(c.to_string(), "2001:db8::2/128");
 
         assert!(matches!(
             Ipv6Cidr::parse("2001:db8::1/32"),
@@ -361,27 +371,44 @@ mod tests {
     }
 
     #[test]
-    fn fixed_bypass_is_canonical_and_contains_the_listener() {
+    fn fixed_bypass_is_canonical_and_reserved() {
         let (v4, v6) = fixed_bypass();
-        assert_eq!(v4.len(), FIXED_BYPASS_V4.len());
-        assert_eq!(v6.len(), FIXED_BYPASS_V6.len());
+        assert_eq!(v4.len(), FIXED_BYPASS_V4_PREFIXES.len() + 1);
+        assert_eq!(v6.len(), FIXED_BYPASS_V6_PREFIXES.len() + 1);
         assert!(v4.iter().all(|entry| entry.tag == BypassTag::Reserved));
         assert!(v6.iter().all(|entry| entry.tag == BypassTag::Reserved));
-
-        // The listener is bypassed as an exact address, never a wider prefix
-        // (blueprint D21): a /32 and a /128, not the old /15 and /32.
-        assert!(v4
-            .iter()
-            .any(|entry| entry.cidr == Ipv4Cidr::parse("198.51.100.1/32").unwrap()));
-        assert!(v6
-            .iter()
-            .any(|entry| entry.cidr == Ipv6Cidr::parse("2001:db8:0:1::2/128").unwrap()));
 
         // The old fakeip-colliding /15 must NOT be present (blueprint §9.0).
         assert!(!v4.iter().any(|entry| entry.cidr.prefix_len == 15));
 
         let user = BypassEntry::policy(Ipv4Cidr::parse("100.64.0.0/10").unwrap());
         assert_eq!(user.tag, BypassTag::Policy);
+    }
+
+    #[test]
+    fn fixed_bypass_listener_addresses_match_the_abi() {
+        let (v4, v6) = fixed_bypass();
+        let listen_v4: Ipv4Addr = LISTEN_V4_STR.parse().expect("IPv4 listener ABI address");
+        let listen_v6: Ipv6Addr = LISTEN_V6_STR.parse().expect("IPv6 listener ABI address");
+        let expected_v4 = Ipv4Cidr {
+            addr: listen_v4,
+            prefix_len: 32,
+        };
+        let expected_v6 = Ipv6Cidr {
+            addr: listen_v6,
+            prefix_len: 128,
+        };
+
+        // The listener is bypassed as an exact address, never a wider prefix
+        // (blueprint D21): a /32 and a /128, not the old /15 and /32.
+        assert_eq!(
+            v4.iter().filter(|entry| entry.cidr == expected_v4).count(),
+            1
+        );
+        assert_eq!(
+            v6.iter().filter(|entry| entry.cidr == expected_v6).count(),
+            1
+        );
     }
 
     #[test]
