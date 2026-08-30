@@ -77,7 +77,7 @@ warning:    wlan0: tx increased while flx_verify did not; lower-pref filters: pr
 
 关键在最后三行：它区分了"蜂窝在工作"和"Wi-Fi 不工作，因为厂商程序把链终止了"，并且给出了占位者的名字。`reachable` 是实测结论——`flx_verify` 在真实发包窗口里收到了包；`not reachable` 表示网卡在发包而我们一个都没收到。
 
-`fluxd check` 负责区分配置错误；`status` 负责报告当前设备与接口事实；`bugreport` 生成默认脱敏、默认不含 logcat 的诊断包。0.9.1 不提供 `explain` 命令。
+`fluxd check` 负责区分配置错误；`status` 负责报告当前设备与接口事实；`bugreport` 生成默认脱敏、默认不含 logcat 的诊断包。没有 `explain` 命令——先把 `status` 做到完整诚实，再谈解释器。
 
 ---
 

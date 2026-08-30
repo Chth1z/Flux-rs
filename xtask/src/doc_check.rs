@@ -1,4 +1,4 @@
-//! `cargo xtask doc-check` — the five mechanical documentation checks of
+//! `cargo xtask doc-check` — the seven mechanical documentation checks of
 //! `docs/plan/implementation.md` §17.4 (exit criterion 6).
 //!
 //! Each one has caught a real defect before it was automated, which is why it
@@ -33,6 +33,8 @@ pub fn run() -> Result<(), String> {
     check_identifiers(&root, &map, &mut failures)?;
     check_sections(&root, &mut failures)?;
     check_overturns(&root, &mut failures)?;
+    let commands = check_xtask_commands(&root, &mut failures)?;
+    println!("doc-check: commands — {commands} `cargo xtask` citations resolved");
 
     if failures.is_empty() {
         Ok(())
@@ -132,7 +134,7 @@ fn check_chapter_map(root: &Path, failures: &mut Vec<String>) -> Result<Vec<u32>
     Ok(rows.iter().map(|r| r.0).collect())
 }
 
-// ---------------------------------------------------- 3. identifier registry
+// ---------------------------------------------------- 2. identifier registry
 
 /// Every prefix registered in `docs/index.md` §1, and the heading pattern that
 /// defines one of its identifiers.
@@ -480,7 +482,7 @@ fn heading_for_part(text: &str, part: u32) -> bool {
     false
 }
 
-// --------------------------------------------------------------- 2. links
+// --------------------------------------------------------------- 3. links
 
 /// Every `[text](target)` in `docs/**/*.md` with a relative target must
 /// resolve to an existing path. External URLs and same-file anchors are out
@@ -526,6 +528,65 @@ fn check_links(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
         files.len()
     );
     Ok(())
+}
+
+/// Every `cargo xtask <sub>` named in a document or a workflow must be a task
+/// that still exists.
+///
+/// Blueprint §15.4 rule 3 orders this check by name. It was written after an
+/// audit found CI calling a task that had been deleted while documents listed
+/// others that had been retired — the kind of drift that stays invisible until
+/// someone copies the command.
+fn check_xtask_commands(root: &Path, failures: &mut Vec<String>) -> Result<usize, String> {
+    let mut sources = collect_checked_markdown(root)?;
+    let workflows = root.join(".github/workflows");
+    if workflows.is_dir() {
+        let entries = std::fs::read_dir(&workflows).map_err(|e| format!("read workflows: {e}"))?;
+        for entry in entries {
+            let path = entry.map_err(|e| format!("read workflows: {e}"))?.path();
+            if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+                sources.push(path);
+            }
+        }
+    }
+
+    let mut checked = 0usize;
+    for source in &sources {
+        let text = util::read_text(source)?;
+        let shown = source.strip_prefix(root).unwrap_or(source).display();
+        for (idx, line) in text.lines().enumerate() {
+            for name in cited_xtask_tasks(line) {
+                checked += 1;
+                if !crate::TASKS.contains(&name.as_str()) {
+                    failures.push(format!(
+                        "{shown}:{}: `cargo xtask {name}` is not a task",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+    }
+    Ok(checked)
+}
+
+/// Task names following `cargo xtask` on one line.
+fn cited_xtask_tasks(line: &str) -> Vec<String> {
+    const MARKER: &str = "cargo xtask ";
+    let mut found = Vec::new();
+    let mut rest = line;
+    while let Some(at) = rest.find(MARKER) {
+        let after = &rest[at + MARKER.len()..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if !name.is_empty() {
+            found.push(name);
+        }
+        let Some(next) = after.get(1..) else { break };
+        rest = next;
+    }
+    found
 }
 
 /// Every markdown file the checks apply to: all of `docs/`, plus the
@@ -585,7 +646,7 @@ fn link_targets(line: &str) -> Vec<&str> {
     targets
 }
 
-// ------------------------------------------------- 3. ELF section names
+// ------------------------------------------------- 4. ELF section names
 
 /// The section names measured loadable AND attachable via legacy `tc` on the
 /// baseline device (`docs/history/phase0.md` §16.8.2). `action` loads
@@ -672,7 +733,7 @@ fn check_sections(root: &Path, failures: &mut Vec<String>) -> Result<(), String>
     Ok(())
 }
 
-// ------------------------------------------------ 4. overturn numbering
+// ------------------------------------------------ 5. overturn numbering
 
 /// Cross-check every overturn count the documentation states:
 ///

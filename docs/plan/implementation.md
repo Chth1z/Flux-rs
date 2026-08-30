@@ -46,7 +46,7 @@
 1. **阶段结束时仓库必须可 build、R091-15 对当前平台适用的测试全绿、Linux CI 全绿。** 不允许"下个阶段再修"的破窗。
 2. **不为下一阶段预建抽象。** 这条是旧审计"24+ 无人居住的脚手架"（`../spec/blueprint.md` §18.4）的规则化闭环。需要一个 trait 时再抽，不要提前。
 3. **发现真实回归时，只为该不变量加一个聚焦测试**，不要顺手补一套。测试数量不是质量指标。
-4. **实测结果与蓝图冲突时**：按 GOV-3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `../history/review-log.md`，并在下一份增量蓝图新增修订；**冻结蓝图原文不改，也不得静默偏离**。代码与当前合同不一致时，先明确修订再改代码。
+4. **实测结果与蓝图冲突时**：按 GOV-3 的更正协议处理——把"原说法 / 实际 / 处置"写进 `../history/review-log.md`，并**就地改正 `../spec/blueprint.md`**（章节号不动，AUTH-7.2）；**不得静默偏离**。代码与当前合同不一致时，先改合同再改代码。
 5. **遇到 GOV-1.2 列出的决策**（改全局系统语义、产品能力边界变化、引入新依赖、放宽失败语义）：**停下，问所有者**，不要自行决定。
 6. **改 ABI 走 GOV-4.2**：`flux_abi.h` 是唯一真相源，`crates/flux-core/src/abi.rs` 是手工镜像，`FLUX_ABI_MAGIC` 必须 bump，`xtask abi-check` 必须通过。
 7. **设备测试遵守 GOV-2.3**：每个改设备状态的脚本都要有覆盖全部退出路径的 cleanup，并在结束时打印残留检查。
@@ -124,12 +124,18 @@
 
 1. **在 Windows 上** `cargo test -p flux-core` 全绿。这条是硬要求：`flux-core` 不得有任何 I/O 或平台依赖，否则后面所有逻辑就只能在设备上调。
 2. §15.2 的八个逻辑测试全部存在且通过。
-3. `cargo xtask abi-check` **真正实现并通过**：用 clang 算出 `flux_abi.h` 各结构的偏移，与 `abi.rs` 的镜像逐字段比对。CI 里那行 `continue-on-error: true` 在本阶段结束时**必须删掉**。
+3. `cargo xtask abi-check` **真正实现并通过**：用 clang 算出 `flux_abi.h` 各结构的偏移，与 `abi.rs` 的镜像逐字段比对。CI 里那行 `continue-on-error: true` **已按本条删除**，workflow 中不再有任何 `continue-on-error`。
 4. `cargo xtask package` 连续两次 clean build 产出的 hash 一致（可复现构建）。
 5. `xtask` 校验 `engine.lock` 的两个 sha256 与 size；任一不匹配就拒绝打包。**这条已经手工验证过一次**：2026-08-26 下载 v1.13.19 的 asset，archive 与 binary 两个 digest 与 `engine.lock` 逐字相符（§16.10）。`xtask` 要做的是把它自动化。
-6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖五项机械检查：`docs/index.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；**每个被引用的标识符（`§N`、`PHIL-N`、`GOV-N`、`AUTH-N`）真实存在，且蓝图之外的文档不占用 `§`**；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`../history/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
+6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖以下机械检查：`docs/index.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；**每个被引用的标识符（`§N`、`PHIL-N`、`GOV-N`、`AUTH-N`）真实存在，且蓝图之外的文档不占用 `§`**；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`../history/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
 
-   **这四项都是真实抓到过缺陷的检查**，不是假想的整洁度指标：章节映射曾指向已移出的文件；推翻计数曾同时存在 5 / 7 / 8 三个互相矛盾的说法；§18 曾把一个已执行完的迁移计划写成待办，还错称归档目录被 `.gitignore` 排除。用 Rust 写在 `xtask` 里，不要写成 PowerShell 脚本——跨平台、CI 天然能跑、且不需要绕执行策略。
+   第六项：`DN` / `CN` 的状态登记与文档实际定义的集合**双向相等**，状态取自固定词表，`superseded` 必须写明取代者。
+
+   第七项（§15.4 第 3 条点名要求）：文档与 workflow 里出现的每个 `cargo xtask <sub>` 都是真实存在的任务。
+
+   **每一项都是真实抓到过缺陷的检查**，不是假想的整洁度指标：章节映射曾指向已移出的文件；推翻计数曾同时存在 5 / 7 / 8 三个互相矛盾的说法；§18 曾把一个已执行完的迁移计划写成待办，还错称归档目录被 `.gitignore` 排除；标识符检查上线当天就抓出 `AGENTS.md` 引用了一条从没写过的 AUTH-0.5。用 Rust 写在 `xtask` 里，不要写成 PowerShell 脚本——跨平台、CI 天然能跑、且不需要绕执行策略。
+
+   **检查范围是 `docs/`、`tools/` 与根目录的 markdown。** 根目录曾被漏在walk之外，同时携带三条已漂移的断言。
 
 **本阶段答的 Phase 0 问题**：无（纯逻辑，无内核交互）。
 
@@ -321,7 +327,7 @@
 |---|---|
 | `fmt / clippy / test` | 阶段 1 |
 | `bpf object`（编译 + **verifier gate**） | 阶段 0 起（已绿） |
-| `bpf object` 的 `abi-check` | **阶段 1 结束时删掉 `continue-on-error`** |
+| `bpf object` 的 `abi-check` | 硬门禁，无 `continue-on-error`（阶段 1 已删除） |
 | `aarch64-linux-android` 交叉编译 | 阶段 1 |
 | `cargo deny` | 阶段 1 |
 | `shellcheck` | 阶段 8（`module/*.sh` 出现时）；`tools/phase0/*.sh` 已在阶段 0 通过 |

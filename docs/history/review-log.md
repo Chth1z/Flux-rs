@@ -66,7 +66,9 @@
 |---|---|---|
 | D1–D6 | current | — |
 | D7 | superseded | D20、D21（地址前缀方案作废；防自环结论保留） |
-| D8–D15 | current | — |
+| D8–D12 | current | — |
+| D13 | executed | 清库重建已完成（C1），是一次性动作而非持续约束 |
+| D14–D15 | current | — |
 | D16 | superseded | D21（收窄为 listener 精确 /32 与 /128） |
 | D17–D21 | current | — |
 | D22 | superseded | §11.2（容量结论保留；`.srs` 输入方案未进入 schema） |

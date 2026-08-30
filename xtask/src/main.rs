@@ -26,6 +26,25 @@ mod zip;
 
 use std::process::{Command, ExitCode};
 
+/// Every dispatchable task name.
+///
+/// Exists so that `doc-check` can reject a `cargo xtask <sub>` cited in a
+/// document or a workflow that no longer resolves — blueprint §15.4 rule 3
+/// orders that check, after an audit found CI invoking a task that had been
+/// deleted and documents listing retired ones.
+pub const TASKS: [&str; 10] = [
+    "ci",
+    "abi-check",
+    "btf-check",
+    "template-check",
+    "doc-check",
+    "fidelity",
+    "build-bpf",
+    "package",
+    "verify-package",
+    "release",
+];
+
 fn usage() -> &'static str {
     "\
 cargo xtask <TASK>
@@ -35,7 +54,7 @@ TASKS:
     abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
     btf-check      clang .BTF flux_decision layout vs the hand-written blob
     template-check pinned official sing-box validates the shipped default template
-    doc-check      the five mechanical documentation checks (implementation.md \u{a7}17.4)
+    doc-check      the seven mechanical documentation checks (implementation.md \u{a7}17.4)
     fidelity A B   what a re-issue of a document dropped: citations, cross-refs,
                    identifiers, constants
     build-bpf      compile bpf/flux.bpf.c with clang
@@ -120,12 +139,32 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    debug_assert!(
+        TASKS.contains(&task.as_str()),
+        "`{task}` dispatched but missing from TASKS, which doc-check validates against"
+    );
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("xtask {task}: {message}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{usage, TASKS};
+
+    #[test]
+    fn every_task_is_documented_in_usage() {
+        let text = usage();
+        for task in TASKS {
+            assert!(
+                text.contains(task),
+                "`{task}` is dispatchable but absent from usage()"
+            );
         }
     }
 }

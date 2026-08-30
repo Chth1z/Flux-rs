@@ -1,6 +1,6 @@
 # 第 27 部分：交互合同
 
-> **规范性合同。** 实现与本文不一致时，错的是实现。面向读者的内容分两处：[`../guide/introduction.md`](../guide/introduction.md) 讲这是什么、为什么这么设计，[`../guide/how-to.md`](../guide/how-to.md) 讲怎么装怎么配、出问题怎么办。
+> **规范性合同。** 实现与本文不一致时，错的是实现。面向读者的内容分三处：[`../guide/introduction.md`](../guide/introduction.md) 讲这是什么、边界在哪（给用户），[`../guide/architecture.md`](../guide/architecture.md) 讲为什么是这个形状（给实现者），[`../guide/how-to.md`](../guide/how-to.md) 讲怎么装怎么配、出问题怎么办。
 >
 > §27 是 0.9.0 编号空间之后新开的一部分。这些条款此前住在 `docs/ux.md` 里，用它自己的 §1–§8 编号，与蓝图的 §1–§8 冲突——`rg "§3"` 会返回两个不相干的东西，引用必须靠文件名消歧。那违反了 `../AUTH-1.1 的全局稳定编号规则，所以拆分时并入了全局编号。
 

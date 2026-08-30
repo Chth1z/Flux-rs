@@ -1,9 +1,14 @@
 # Architecture
 
-This is the short 0.9.1 orientation. The binding contract is the frozen
-[`../spec/blueprint.md`](../spec/blueprint.md) baseline plus
-[`../spec/blueprint-0.9.1.md`](../spec/blueprint-0.9.1.md); the 0.9.1 delta wins where it
-explicitly amends the baseline.
+A short orientation for implementers: why the system has this shape, not how to
+operate it. The binding contract is [`../spec/blueprint.md`](../spec/blueprint.md),
+and where this document disagrees with it, this one is wrong.
+
+Until the 0.9.5 fold completes, two incremental layers still sit on top of the
+baseline — [`../spec/blueprint-0.9.1.md`](../spec/blueprint-0.9.1.md) and
+[`../spec/blueprint-0.9.2.md`](../spec/blueprint-0.9.2.md) — and the later layer
+wins where it explicitly amends an earlier one. That arrangement is being
+retired, not extended (`../authoring.md` AUTH-7.2).
 
 ## Shape
 

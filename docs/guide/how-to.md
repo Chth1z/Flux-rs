@@ -52,7 +52,7 @@ Transparent per-app proxying via eBPF and an unmodified official sing-box.
 
 出问题时它会说是哪一种问题，比如 `🤯 [Inactive] unsupported_lpm_trie_kernel:6.6.30`，或者 `😴 [Disabled] toggle this module on to enable Flux`。
 
-要更细的信息就跑 `fluxd status`：逐接口一行、流量计数器、draining 与本机地址数量，以及每条排除的具体原因。
+要更细的就跑 `fluxd status`。它逐接口报告，包括某个接口为什么被排除——完整示例与怎么读见 [`introduction.md`](introduction.md#状态会直接列出覆盖面)。
 
 ## 出问题怎么自救
 

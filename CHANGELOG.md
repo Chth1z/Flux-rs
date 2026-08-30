@@ -43,9 +43,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   automated `engine.lock` digest/size/`p_align` verification that refuses to
   package on any mismatch, `p_align >= 0x4000` enforcement for `fluxd`, and a
   deterministic ZIP — two clean builds hash identically, asserted in CI.
-- `cargo xtask doc-check` (in CI): chapter map, relative links,
-  `FLUX_SEC_*`/`SEC_*` identity within the measured-usable set, and overturn
-  numbering consistency.
+- `cargo xtask doc-check` (in CI), over `docs/`, `tools/` and the root markdown:
+  chapter map, relative links, identifier resolution across the registered
+  namespaces, decision status registries, `FLUX_SEC_*`/`SEC_*` identity within
+  the measured-usable set, and overturn numbering consistency.
 - Phase 2–7 runtime: root-only control socket and event-driven reactor;
   typed rtnetlink ownership/cleanup; embedded raw-syscall BPF loader; exact TC
   attachment and liveness admission; official sing-box check/readiness,

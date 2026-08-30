@@ -150,7 +150,7 @@
 | 真机序列号进仓库 | F-07 | §18.1 第 0 步匿名化 + 新仓库 CI grep 检查 |
 | Proof 与活跃 engine 共享 socket queue | F-08 | 架构性关闭：无 production Proof daemon、不复制 engine 的 fd。readiness 用 SOCK_DIAG 只读枚举（§9.5） |
 | CI 调用已删除的 xtask 命令、文档列退役命令 | F-09、F-13 | 规则化关闭：§15.4(3) 命令一致性自检 |
-| fmt/clippy 红、ABI 测试断言 C 源字符串 | F-10 | 规则化关闭：§15.4(2)；`cargo xtask ci` 是硬门禁 |
+| fmt/clippy 红、ABI 测试断言 C 源字符串 | F-10 | 规则化关闭：§15.4(2)；`cargo xtask ci` 是硬门禁 ⚠️ |
 | Clash / Generation 互斥只实现单向 | F-11 | 架构性关闭：0.9.0 无 Clash 控制面（§1.3） |
 | 真机资格证据未闭环 | F-12 | §16 Phase 0 + §20 发布验收；证据字段从 catalog 改为一次性 smoke 记录 |
 | 迁移残留 + 单次巨型提交 | F-14 | §17 分阶段交付，每阶段可 build；§18.2 清理矩阵按 allowlist 重建 |
@@ -173,4 +173,6 @@
 | 24+ 无人居住的脚手架、先铺横向权限再做纵向闭环 | 过度设计 P0 #4 | 规则化关闭：§17"每阶段保持可 build，不为下一阶段预建抽象" |
 
 审计里被判为"**不是缺陷**"的两项也保留：默认打包配置只读（pre-release 边界，非缺陷）；Clash 的同 UID 控制 socket 边界设计正确——后者在 0.9.0 因删除 Clash 而不适用。
+
+> **⚠️ 2026-08-30 复核：F-10 的关闭理由有一处不成立。** 上表说"`cargo xtask ci` 是硬门禁"，但**没有任何 workflow 调用它**——`.github/workflows/ci.yml` 直接跑 `cargo fmt`、`cargo clippy`、`cargo test` 与各项 `xtask` 子命令。结论（fmt/clippy 红不得进主干）仍然成立且确实被 CI 强制，但**依据不是那个聚合任务**。按 GOV-3，记录原文保留，更正记在此处；`cargo xtask ci` 目前只是本地开发环的便捷入口，也是唯一接上 `cargo deny` 的地方。
 

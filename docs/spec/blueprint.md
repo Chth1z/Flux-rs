@@ -1940,8 +1940,11 @@ xtask 由它生成：`module.prop version=v0.9.0`；`versionCode = major*1_000_0
 
 - `cargo fmt --check`；`cargo clippy` 高价值 lint；`cargo build --target aarch64-linux-android`。
 - `cargo test -p flux-core`（**必须能在 Windows 主机上跑**）。
-- BPF：`-Wall -Wextra -Werror` 编译通过；在 CI 的 Linux runner 上实际 `BPF_PROG_LOAD` 到 verifier 通过（**必须**用 5.15 内核的 runner 或 VM；在更新内核上通过不代表 5.15 verifier 通过）。
-- shell 用目标 BusyBox `ash -n` 语法检查。
+- BPF：`-Wall -Wextra -Werror` 编译通过；在 CI 的 Linux runner 上实际 `BPF_PROG_LOAD` 到 verifier 通过。
+
+  **在更新的内核上通过，不代表 5.15 的 verifier 会通过。** CI 用的是 `ubuntu-latest`，内核远新于基线，所以这一关只证明"程序在某个现代 verifier 下成立"。**基线 verifier 的证据来自设备**：Phase 3–8 的真机套件在 SM-S9180（5.15.211）上加载同一批程序，那才是 5.15 的一手结论。CI 这一关的作用是早失败，不是终局判据；两者都通过才算数（GOV-4.1 的分层）。
+
+- shell：CI 用 `shellcheck --shell=sh --severity=warning` 检查 `module/*.sh`。**目标运行时是 BusyBox `ash`，而 shellcheck 不是 `ash`**，因此它查的是可移植性问题而非目标解释器的语法接受度；`tools/**` 下的脚本目前不在检查范围内，它们只在开发机与设备上手工执行。
 - ELF 静态检查：`fluxd` 每个 LOAD `p_align >= 0x4000`；官方 engine 精确匹配 engine.lock 且仍是 `0x1000`。
 - clean staging allowlist、版本一致性、两次打包 hash 一致。
 
