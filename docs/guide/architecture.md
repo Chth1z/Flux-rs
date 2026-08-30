@@ -5,8 +5,8 @@ operate it. The binding contract is [`../spec/blueprint.md`](../spec/blueprint.m
 and where this document disagrees with it, this one is wrong.
 
 Until the 0.9.5 fold completes, two incremental layers still sit on top of the
-baseline — [`../spec/blueprint-0.9.1.md`](../spec/blueprint-0.9.1.md) and
-[`../spec/blueprint-0.9.2.md`](../spec/blueprint-0.9.2.md) — and the later layer
+baseline — [`../history/blueprint-0.9.1.md`](../history/blueprint-0.9.1.md) and
+[`../history/blueprint-0.9.2.md`](../history/blueprint-0.9.2.md) — and the later layer
 wins where it explicitly amends an earlier one. That arrangement is being
 retired, not extended (`../authoring.md` AUTH-7.2).
 
@@ -80,7 +80,7 @@ repository's over-design review: raw netlink message construction lives only in
 `nlmsghdr`.
 
 The four deep modules are policy, dataplane, engine, and reactor. Their
-interfaces are defined in `../spec/blueprint-0.9.1.md` R091-14; no public trait is
+interfaces are defined in `../history/blueprint-0.9.1.md` R091-14; no public trait is
 introduced for a single implementation.
 
 ## Failure semantics

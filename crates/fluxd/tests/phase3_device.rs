@@ -115,7 +115,7 @@ fn assert_ready(manager: &dataplane::Manager) {
                 // Phase 3 stops at ownership; the liveness probe that decides
                 // reachability lands in Phase 5. Admission must therefore
                 // publish the chosen preference and leave the verdict absent
-                // rather than guess from dump order (R091-05).
+                // rather than guess from dump order (blueprint §8.5.0).
                 assert!(
                     iface.pref.is_some_and(|pref| pref >= 2),
                     "admitted interface lacks a dynamic preference: {iface:?}"

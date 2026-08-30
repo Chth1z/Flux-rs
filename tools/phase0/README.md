@@ -1,10 +1,14 @@
 # Phase 0 tooling
 
-These tools preserve the measured 0.9.0 test shapes and raw evidence. For a
-0.9.1 design claim, read the frozen `docs/spec/blueprint.md` baseline and then apply
-`docs/spec/blueprint-0.9.1.md`; in particular, R091-05 replaces dump-first ordering
-with reachability and R091-08 uses distinct v4/v6 listener ports even though
-the historical Q2 harness isolated the lookup test with one shared port.
+These tools preserve the measured test shapes and the raw evidence as they were
+when taken. **For any design claim, read `docs/spec/blueprint.md`**, which is the
+whole contract; the incremental layers these tools were written against have
+been folded into it.
+
+Two places where the tooling still shows its age, and the blueprint is the
+authority: the harness reasons about dump-first ordering, which §8.5.0 replaced
+with measured reachability, and the historical Q2 harness isolated the lookup
+test with one shared port where §9.1 now uses distinct v4 and v6 listener ports.
 
 Phase 0 is the falsification step that runs **before** implementation. Its
 purpose is to break assumptions cheaply, on real hardware, while changing them

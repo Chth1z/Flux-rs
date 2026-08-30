@@ -7,7 +7,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Incremental 0.9.1 design contract (`docs/spec/blueprint-0.9.1.md`) that leaves
+- Incremental 0.9.1 design contract (`docs/history/blueprint-0.9.1.md`) that leaves
   the 0.9.0 blueprint content unchanged, records every known cross-document
   conflict as a stable `R091-*` correction, and defines baseline-plus-delta
   precedence without changing the workspace version or release status.

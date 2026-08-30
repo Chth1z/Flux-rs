@@ -395,7 +395,7 @@ enum flux_counter {
  * ifindex, ifname, parent/direction, kind == "bpf", direct-action, program
  * name, the program's map set, the identity snapshot of numerically smaller
  * preferences, and the positive liveness result. The filter need not be first in dump order
- * (docs/spec/blueprint-0.9.1.md R091-05).
+ * (docs/spec/blueprint.md §8.5.3).
  */
 #define FLUX_TC_CHAIN 0
 #define FLUX_TC_HANDLE_EGRESS 0x1

@@ -359,7 +359,7 @@ mod tests {
             "default template lacks a hijack-dns rule"
         );
 
-        // A shipped default must never open a control port (R091-03, C10).
+        // A shipped default must never open a control port (§27.2.3, C10).
         assert!(
             config.pointer("/experimental/clash_api").is_none(),
             "the template must not ship a clash_api listener"

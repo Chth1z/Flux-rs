@@ -2,7 +2,7 @@
 
 - 文档编号：`FLUX-BP-0.9.2-DELTA`
 - 状态：**草案**（2026-08-29，Asia/Hong_Kong）
-- 基线：[`../spec/blueprint.md`](../spec/blueprint.md)（`FLUX-BP-0.9.0-FINAL`）+ [`../spec/blueprint-0.9.1.md`](../spec/blueprint-0.9.1.md)（`FLUX-BP-0.9.1-DELTA`）
+- 基线：[`../spec/blueprint.md`](../spec/blueprint.md)（`FLUX-BP-0.9.0-FINAL`）+ [`blueprint-0.9.1.md`](blueprint-0.9.1.md)（`FLUX-BP-0.9.1-DELTA`）
 - 性质：0.9.2 的**规范性增量合同**
 - 主题：把交互与配置模型做对，并把已有事件源用满
 

@@ -686,7 +686,7 @@ pub fn build_bpf() -> Result<(), String> {
 /// user configs: no inbound of its own (Flux injects two), no listening control
 /// surface, no credential to leak, and the two route rules the capture design
 /// depends on. Everything else about the file is the user's business, so this
-/// deliberately does not enumerate allowed keys (R091-03).
+/// deliberately does not enumerate allowed keys (blueprint §27.2.3).
 fn validate_default_template_shape(template: &str) -> Result<(), String> {
     let user = flux_core::engine_config::parse_jsonc(template)
         .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
@@ -703,7 +703,7 @@ fn validate_default_template_shape(template: &str) -> Result<(), String> {
     // Users who want `clash_api` add it themselves, with a secret they chose.
     if user.pointer("/experimental/clash_api").is_some() {
         return Err(
-            "module/template.json must not ship experimental.clash_api (R091-03, C10)".into(),
+            "module/template.json must not ship experimental.clash_api (§27.2.3, C10)".into(),
         );
     }
 

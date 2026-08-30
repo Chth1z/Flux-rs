@@ -2,7 +2,7 @@
 
 > Former Parts 23 and 24 of blueprint.md. **Section numbers are unchanged**: every §N.x here is the same §N.x cited throughout the repository (see AUTH-1.1).
 >
-> Audience: anyone looking up the meaning of an error code. This document projects 0.9.1; the normative contract is the frozen `docs/spec/blueprint.md` plus `docs/spec/blueprint-0.9.1.md`, with the latter taking precedence in a conflict.
+> Audience: anyone looking up the meaning of an error code. This document projects 0.9.1; the normative contract is the frozen `docs/spec/blueprint.md` plus `docs/history/blueprint-0.9.1.md`, with the latter taking precedence in a conflict.
 
 ---
 

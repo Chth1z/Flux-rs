@@ -52,8 +52,8 @@
 | `chizi-sing-box-ebpf-cilium` | 打补丁路线的对照（D19）；`TC_ACT_UNSPEC` 在 TCX 上同样必要；**LPM trie 在 6.6.0–6.6.46 的崩溃**（D20） |
 | `dae`、`honk` | TC → veth → `sk_assign` 原语；也反证了 `TC_ACT_OK` 在 Android 会遮挡系统 filter |
 | `asteriskd`、`bpf2socks` | 加载器加固清单；TC 槽位冲突的"fail closed"对照；legacy map 定义的适用边界 |
-| `Vector`、`NeoZygisk` | 发布工程与社区流程的研究样本；0.9.1 当前只采纳 GOV-7.1 / R091-12 列出的最小路径，其余仍是候选 |
-| `Flux-original` | 订阅转换与节点精修的领域知识（URI 列表 → outbound、机场公告条目过滤、按地区分组）。0.9.1 不实现订阅；所有者已确认后续版本要做，届时以此为参考源（C11、R091-03） |
+| `Vector`、`NeoZygisk` | 发布工程与社区流程的研究样本；当前只采纳 GOV-7.1 与 §13 列出的最小路径，其余仍是候选 |
+| `Flux-original` | 订阅转换与节点精修的领域知识（URI 列表 → outbound、机场公告条目过滤、按地区分组）。**订阅已进入 0.9.5 范围**（C11，所有者 2026-08-30 确认），规范见 §28，本仓库是它的主要参考源 |
 | `kernel-src`、`gki` | §4 的内核机制清单与 config 核对 |
 | `mihomo`、`tun2socks`、`hev-socks5-tunnel` | 反例：确认它们是 TUN/用户态栈方案，**没有 eBPF 数据面**，不必在那里花时间 |
 

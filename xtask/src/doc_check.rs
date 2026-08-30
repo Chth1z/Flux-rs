@@ -37,6 +37,8 @@ pub fn run() -> Result<(), String> {
     println!("doc-check: commands — {commands} `cargo xtask` citations resolved");
     let agents = check_agents_budget(&root, &mut failures)?;
     println!("doc-check: routing — AGENTS.md is {agents} lines, budget 80");
+    let cited = check_code_citations(&root, &mut failures)?;
+    println!("doc-check: citations — {cited} source lines carry no retired R09x identifier");
 
     if failures.is_empty() {
         Ok(())
@@ -564,6 +566,80 @@ fn check_links(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
         "doc-check: links — {} markdown files, {checked} relative links resolved",
         files.len()
     );
+    Ok(())
+}
+
+/// Files permitted to mention a retired `R09x` identifier, because they define
+/// or exercise the identifier grammar itself.
+const R09X_GRAMMAR_FILES: [&str; 2] = ["xtask/src/fidelity.rs", "xtask/src/doc_check.rs"];
+
+/// Code cites `§N.N`, never a version-scoped `R09x-NN`.
+///
+/// `../governance.md` GOV-6.2 gives the reason: a section number travels with
+/// its content and survives a re-issue, while a revision number dies when its
+/// layer is folded away. The 0.9.5 fold retired `R09x` entirely, so a citation
+/// to one now resolves only through a mapping table — which is exactly the
+/// indirection the fold removed.
+fn check_code_citations(root: &Path, failures: &mut Vec<String>) -> Result<usize, String> {
+    let mut checked = 0usize;
+    for dir in ["crates", "bpf", "module", "xtask", "tools"] {
+        let mut files = Vec::new();
+        collect_source(&root.join(dir), &mut files)?;
+        for file in files {
+            let shown = file
+                .strip_prefix(root)
+                .unwrap_or(&file)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if R09X_GRAMMAR_FILES.contains(&shown.as_str()) {
+                continue;
+            }
+            let text = util::read_text(&file)?;
+            for (idx, line) in text.lines().enumerate() {
+                checked += 1;
+                if let Some(at) = line.find("R09") {
+                    let tail = &line[at..];
+                    if tail.len() > 4 && tail.as_bytes()[4] == b'-' {
+                        failures.push(format!(
+                            "{shown}:{}: cites a retired R09x identifier; cite the § that \
+                             carries it (governance.md GOV-6.2)",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(checked)
+}
+
+/// Source and manifest files that may carry a citation.
+fn collect_source(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "results")
+            {
+                continue;
+            }
+            collect_source(&path, out)?;
+        } else if path.extension().is_some_and(|e| {
+            matches!(
+                e.to_str(),
+                Some("rs" | "c" | "h" | "sh" | "json" | "toml" | "md" | "prop")
+            )
+        }) {
+            out.push(path);
+        }
+    }
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 //! Control-protocol wire types.
 //!
-//! Implements the 0.9.0 blueprint §10.3/§24 as corrected by R091-11. The
+//! Implements the blueprint §10.3 and §24. The
 //! transport is `SOCK_SEQPACKET` with a root-only peer check and one single-line
 //! JSON message per packet; this module owns only the encoding, so it is fully
 //! testable on any host (0.9.0 §15.2 test 7).
@@ -136,12 +136,12 @@ pub struct IfaceStatus {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prog_tag: Option<String>,
     /// The TC preference this interface's capture filter occupies. Chosen per
-    /// interface, so two interfaces on one device may differ (R091-05).
+    /// interface, so two interfaces on one device may differ (§8.5.3).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pref: Option<u16>,
     /// Compatibility field: whether admission proved the filter reachable and
     /// its numerically smaller-pref (preceding) snapshot has not drifted. It
-    /// does not mean that the filter is first in dump order (R091-05). Absent
+    /// does not mean that the filter is first in dump order (§8.5.0). Absent
     /// until reachability has actually been decided one way or the other.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub first_applicable: Option<bool>,

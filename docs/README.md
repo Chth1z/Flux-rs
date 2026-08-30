@@ -22,7 +22,7 @@
 | **我是用户，这东西是干什么的** | **`guide/introduction.md`**（不含术语） |
 | **要评审或提出一个设计** | **`philosophy.md`**（英文），先过 PHIL-10 的 checklist |
 | **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
-| 实现某个模块 | `spec/blueprint.md`，从头读到尾；0.9.5 折叠完成前，再依次读 `spec/blueprint-0.9.1.md`、`spec/blueprint-0.9.2.md` 的覆盖项 |
+| 实现某个模块 | `spec/blueprint.md`，从头读到尾。它是完整合同，不需要再叠任何东西 |
 | 了解技术架构 | `guide/architecture.md` |
 | 怎么装、怎么配、出问题怎么办 | `guide/how-to.md` |
 | 上机跑测试 | `history/phase0.md` + `../tools/phase0/README.md` |
@@ -34,11 +34,13 @@
 | 写或改这些文档 | `authoring.md`；引用与编号看 `index.md` |
 | **引用某个 §、发一个新号** | **`index.md`** |
 
-## 合同暂时还是三层，正在折成一层
+## 合同只有一份
 
-现状：冻结的 0.9.0 基线 [`spec/blueprint.md`](spec/blueprint.md)，增量修订 [`spec/blueprint-0.9.1.md`](spec/blueprint-0.9.1.md)，再叠 [`spec/blueprint-0.9.2.md`](spec/blueprint-0.9.2.md)（草案）。按这个顺序读，冲突时取最新一层。
+[`spec/blueprint.md`](spec/blueprint.md)，从头读到尾就是全部合同，**不需要再叠任何东西**。
 
-**这个形态正在被取消。** 0.9.5 把三层折成一份全量蓝图，两份增量移入 `history/`，此后只维护 `spec/blueprint.md` 一份、就地编辑——增量蓝图机制已废除，理由见 AUTH-7.2。`R09x-NN` 编号同时退役，由 0.9.5 的对照表映射到承载它的 §。
+它一度是三层：冻结的 0.9.0 基线加两份增量修订，读者要在脑子里叠"§8.5，经 R091-05 修订，再经 R092-11 修订"。0.9.5 把三层折成一份，两份增量移入 [`history/`](history/) 冻结为记录，增量机制废除（AUTH-7.2），`R09x-NN` 编号退役——代码里的引用已全部改写成 `§`，并由 `doc-check` 的 citations 检查守住。
+
+**章节号一个都没变。** 折叠动的是层次，不是编号：`§8.5.3` 折叠前后指同一件事，1158 处引用一处没断。
 
 ## 为什么这么拆
 

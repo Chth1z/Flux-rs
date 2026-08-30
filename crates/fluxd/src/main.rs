@@ -65,7 +65,7 @@ COMMANDS:
     bugreport  Write a diagnostic zip (--with-logcat, --raw, -o <dir>)
     version    Print version and ABI magic
 
-The 0.9.1 design contract is docs/spec/blueprint.md plus docs/spec/blueprint-0.9.1.md.
+The design contract is docs/spec/blueprint.md.
 "
 }
 
@@ -197,7 +197,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
     }
 
     /// One line per candidate interface. `first_applicable` is rendered as
-    /// reachability, which is what the field actually asserts (R091-05); the
+    /// reachability, which is what the field actually asserts (§8.5.0); the
     /// wire name is kept only for compatibility.
     fn describe_iface(iface: &flux_core::control_wire::IfaceStatus) -> String {
         let mut detail = Vec::new();

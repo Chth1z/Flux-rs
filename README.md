@@ -169,7 +169,7 @@ publishes the exact sing-box Corresponding Source archive pinned by
 ## Documentation and license
 
 The normative 0.9.1 implementation contract is the frozen
-`docs/spec/blueprint.md` baseline plus `docs/spec/blueprint-0.9.1.md`; when they conflict,
+`docs/spec/blueprint.md` baseline plus `docs/history/blueprint-0.9.1.md`; when they conflict,
 the delta wins. `docs/guide/architecture.md` is the short engineering orientation.
 The data-plane ABI source of truth is `bpf/include/flux_abi.h`, mirrored and
 layout-tested in Rust.

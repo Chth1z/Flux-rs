@@ -1,4 +1,4 @@
-// Flux-rs bootstrap configuration (blueprint §9.6, R091-03).
+// Flux-rs bootstrap configuration (blueprint §9.6, §27.2.3).
 //
 // Adapted from the original Flux module's conf/template.json so both projects
 // present users the same shape. Three deliberate differences, each forced:
@@ -7,7 +7,7 @@
 //     an immutable per-generation copy, and a template inbound would compete
 //     with them for the listener (blueprint §9.1);
 //   * no "experimental.clash_api": a shipped default must not open a control
-//     port, and the original ships one with no secret (R091-03, C10);
+//     port, and the original ships one with no secret (§27.2.3, C10);
 //   * PROXY starts as a one-member group pointing at DIRECT, because an empty
 //     selector cannot be resolved and a fresh install must pass `fluxd check`
 //     before the user has edited anything;
