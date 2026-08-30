@@ -11,10 +11,12 @@ MODDIR=${0%/*}
 FLUXD="$MODDIR/bin/fluxd"
 RUNTIME_ROOT=/data/adb/flux-rs
 
-# `disable` publishes active=0 before stopping the engine. `stop` then exits
-# the daemon cleanly; neither command flushes system objects (§8.8).
+# `stop` publishes active=0, terminates the engine and exits the daemon
+# cleanly, without flushing system objects (§8.8). It deliberately does not
+# call `disable` first: the switch lives in this module directory, which the
+# manager is about to delete, so writing it would be a no-op with a chance of
+# leaving a stray file behind if removal is interrupted.
 if [ -x "$FLUXD" ]; then
-	"$FLUXD" disable >/dev/null 2>&1
 	"$FLUXD" stop >/dev/null 2>&1
 fi
 

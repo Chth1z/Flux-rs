@@ -238,7 +238,7 @@ struct Reactor {
     epoll: OwnedFd,
     signal_fd: OwnedFd,
     inotify_fd: OwnedFd,
-    root_wd: i32,
+    module_wd: i32,
     config_wd: i32,
     packages_wd: Option<i32>,
     debounce_timer: OwnedFd,
@@ -283,6 +283,9 @@ struct Reactor {
     bad_page_size: Option<i64>,
     /// Root manager identity supplied by the sole boot entry, `service.sh`.
     root_manager: RootManagerStatus,
+    /// Last status line written to `module.prop`, so an unchanged state does
+    /// not rewrite the manager's file on every event.
+    module_prop_status: Option<String>,
 }
 
 impl Reactor {
@@ -293,7 +296,7 @@ impl Reactor {
         let spec = EngineSpec::product(&layout);
         let epoll = epoll_create()?;
         let signal_fd = make_signalfd()?;
-        let (inotify_fd, root_wd, config_wd, packages_wd) = make_inotify(&layout)?;
+        let (inotify_fd, module_wd, config_wd, packages_wd) = make_inotify(&layout)?;
         let debounce_timer = make_timerfd()?;
         let backoff_timer = make_timerfd()?;
         let control_timer = make_timerfd()?;
@@ -338,7 +341,7 @@ impl Reactor {
             epoll,
             signal_fd,
             inotify_fd,
-            root_wd,
+            module_wd,
             config_wd,
             packages_wd,
             debounce_timer,
@@ -374,11 +377,13 @@ impl Reactor {
             policy_retry_available: true,
             bad_page_size,
             root_manager,
+            module_prop_status: None,
         })
     }
 
     fn run(&mut self) -> u8 {
         self.converge("cold start");
+        self.sync_module_prop();
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
         loop {
             // SAFETY: events is a valid buffer of the stated length; -1 means
@@ -450,9 +455,71 @@ impl Reactor {
             }
             if self.shutdown_requested && self.engine.is_none() && self.engine_transaction.is_none()
             {
+                self.sync_module_prop();
                 self.finish_shutdown();
                 return 0;
             }
+            // Once per wakeup rather than per transition: the state a user
+            // should see is the settled one, and the write is skipped unless
+            // the rendered line actually changed.
+            self.sync_module_prop();
+        }
+    }
+
+    /// Mirrors the current state into the manager's `module.prop`, so the
+    /// module list doubles as a status readout (`docs/spec/interaction.md` §27.1.3).
+    ///
+    /// Best effort by construction: `module.prop` belongs to the manager, and
+    /// a status readout must never be able to fail the daemon.
+    fn sync_module_prop(&mut self) {
+        let status = self.module_prop_line();
+        if self.module_prop_status.as_deref() == Some(status.as_str()) {
+            return;
+        }
+        let path = self.layout.module_prop();
+        let Ok(current) = fs::read_to_string(&path) else {
+            return;
+        };
+        let updated = flux_core::version::module_prop_with_status(&current, &status);
+        if updated != current && write_replace(&path, updated.as_bytes()).is_err() {
+            return;
+        }
+        self.module_prop_status = Some(status);
+    }
+
+    /// The one-line status the manager shows. Built from committed in-memory
+    /// state only — no BPF or netlink read — because it runs on every wakeup.
+    fn module_prop_line(&self) -> String {
+        let dataplane = self.dataplane.status();
+        if self.layout.disabled() {
+            return if self.engine.is_some() || self.convergence_busy() {
+                "\u{1f634} [Disabled] stopping".to_string()
+            } else {
+                "\u{1f634} [Disabled] toggle this module on to enable Flux".to_string()
+            };
+        }
+        if dataplane.active && self.engine.is_some() && self.activation_role.is_none() {
+            let ifaces: Vec<&str> = dataplane
+                .ifaces
+                .iter()
+                .filter(|iface| iface.status == "active")
+                .map(|iface| iface.name.as_str())
+                .collect();
+            return format!(
+                "\u{1f970} [Active] gen {} \u{b7} {} apps \u{b7} {}",
+                self.generation,
+                dataplane.policy.selected,
+                ifaces.join(", ")
+            );
+        }
+        match self
+            .policy_error
+            .as_ref()
+            .map(|(token, _)| token.as_str())
+            .or(self.last_error.as_deref())
+        {
+            Some(error) => format!("\u{1f92f} [Inactive] {error}"),
+            None => "\u{1f914} [Inactive] converging".to_string(),
         }
     }
 
@@ -864,7 +931,7 @@ impl Reactor {
                 if event.mask & libc::IN_Q_OVERFLOW != 0 {
                     policy_changed = true;
                     engine_config_changed = true;
-                } else if event.wd == self.root_wd && name == "disable" {
+                } else if event.wd == self.module_wd && name == "disable" {
                     switch_changed = true;
                 } else if event.wd == self.config_wd && name == "flux.toml" {
                     policy_changed = true;
@@ -2761,7 +2828,8 @@ fn make_signalfd() -> io::Result<OwnedFd> {
     }
 }
 
-/// Inotify on the switch/config directories and the parent of packages.list.
+/// Inotify on the manager's module directory (the switch), the config
+/// directory and the parent of packages.list.
 fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32, Option<i32>)> {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: plain inotify_init1; the fd is immediately owned.
@@ -2783,8 +2851,10 @@ fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32, Option<i32>)>
         Ok(wd)
     };
 
-    let root_wd = add(
-        layout.root(),
+    // The manager creates and removes `disable` here when the user toggles the
+    // module, which is why the toggle takes effect without a reboot.
+    let module_wd = add(
+        layout.module_dir(),
         libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM,
     )?;
     let config_wd = add(
@@ -2811,7 +2881,7 @@ fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32, Option<i32>)>
             )
             .ok()
         });
-    Ok((fd, root_wd, config_wd, packages_wd))
+    Ok((fd, module_wd, config_wd, packages_wd))
 }
 
 fn make_timerfd() -> io::Result<OwnedFd> {
@@ -2864,6 +2934,37 @@ fn drain_timer(fd: &OwnedFd) {
     unsafe {
         libc::read(fd.as_raw_fd(), expirations.as_mut_ptr().cast(), 8);
     }
+}
+
+/// Replaces a file's contents through a same-directory temporary and a rename,
+/// so a reader (the manager parsing `module.prop`) never observes a half-written
+/// file and a failed write leaves the original intact.
+fn write_replace(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    // SAFETY: getpid has no preconditions and cannot fail.
+    let pid = unsafe { libc::getpid() };
+    let tmp = dir.join(format!(
+        ".{}.flux.{pid}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp")
+    ));
+    let result = (|| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o644)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 // -------------------------------------------------------------------- logging

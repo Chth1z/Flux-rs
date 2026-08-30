@@ -7,10 +7,10 @@
 # 严格模式：只接受下面两个顶层键。未知键、重复项、非 canonical CIDR
 # 都会使整份候选配置被拒绝；Flux 不会截断或静默修正。
 #
-# 开关不在本文件里。唯一开关是 /data/adb/flux-rs/disable：
-#   停用：fluxd disable
-#   启用：fluxd enable
-# fresh install 默认停用，填好两份配置并通过 check 后再启用。
+# 开关不在本文件里。唯一开关就是你 root 管理器里的模块开关，
+# 拨动后当场生效，不需要重启。等价命令：fluxd enable / fluxd disable
+# fresh install 装完即为停用状态，填好两份配置并通过 check 后再启用。
+# 当前状态直接显示在管理器的模块描述里。
 # ==============================================================================
 
 # 选中的应用。格式为 "userId:packageName"；单用户设备 userId 恒为 0，

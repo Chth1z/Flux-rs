@@ -4,9 +4,12 @@
 //! on a file the daemon holds open for its whole life, so it is released by the
 //! kernel even on `SIGKILL` — there is no stale-lock recovery path to get wrong.
 //!
-//! The on/off switch is the presence of the `disable` file (owner decision C9,
-//! `docs/ux.md` §1): present = disabled, absent = enabled. There is no second
-//! truth source; `fluxd enable`/`fluxd disable` only create or remove it.
+//! The on/off switch is the presence of `disable` in the root manager's own
+//! module directory (owner decision C9, `docs/spec/interaction.md` §27.1): present = disabled,
+//! absent = enabled. That is the same file Magisk, KernelSU and APatch create
+//! when you toggle the module in their UI, so the manager toggle takes effect
+//! immediately through inotify instead of waiting for a reboot. There is
+//! exactly one switch; `fluxd enable`/`fluxd disable` write that same file.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -18,10 +21,21 @@ use std::path::{Path, PathBuf};
 /// Root of all runtime state (blueprint §1.1).
 pub const RUNTIME_ROOT: &str = "/data/adb/flux-rs";
 
+/// The root manager's module directory: where the `disable` switch and
+/// `module.prop` live. Note the underscore, and note that this directory
+/// belongs to the manager — Flux writes only those two files and never
+/// creates, moves or deletes the directory itself.
+pub const MODULE_DIR: &str = "/data/adb/modules/flux_rs";
+
 /// Environment override for the runtime root. A test hook only: it lets the
 /// integration tests run a full daemon against a temp directory as an ordinary
 /// user. Production (`service.sh`) never sets it.
 pub const RUNTIME_ROOT_ENV: &str = "FLUX_RUNTIME_ROOT";
+
+/// Environment override for the module directory. Same status as
+/// [`RUNTIME_ROOT_ENV`]: a test hook so integration tests can own a writable
+/// switch directory. Production never sets it.
+pub const MODULE_DIR_ENV: &str = "FLUX_MODULE_DIR";
 
 /// Environment override for the engine binary path. Same status as
 /// [`RUNTIME_ROOT_ENV`]: a test hook, never set in production, where the
@@ -34,24 +48,54 @@ pub const ENGINE_BIN_ENV: &str = "FLUX_ENGINE_BIN";
 #[derive(Debug, Clone)]
 pub struct Layout {
     root: PathBuf,
+    module_dir: PathBuf,
 }
 
 impl Layout {
-    /// The production layout, honouring the [`RUNTIME_ROOT_ENV`] test hook.
+    /// The production layout, honouring the [`RUNTIME_ROOT_ENV`] and
+    /// [`MODULE_DIR_ENV`] test hooks.
     pub fn product() -> Self {
-        match std::env::var_os(RUNTIME_ROOT_ENV) {
-            Some(root) if !root.is_empty() => Self::at(PathBuf::from(root)),
-            _ => Self::at(PathBuf::from(RUNTIME_ROOT)),
+        let root = match std::env::var_os(RUNTIME_ROOT_ENV) {
+            Some(root) if !root.is_empty() => PathBuf::from(root),
+            _ => PathBuf::from(RUNTIME_ROOT),
+        };
+        let module_dir = match std::env::var_os(MODULE_DIR_ENV) {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => installed_module_dir(),
+        };
+        Self::at(root).with_module_dir(module_dir)
+    }
+
+    /// A layout rooted at an arbitrary directory, with the switch in that same
+    /// directory (tests use temp dirs they own).
+    pub fn at(root: PathBuf) -> Self {
+        Self {
+            module_dir: root.clone(),
+            root,
         }
     }
 
-    /// A layout rooted at an arbitrary directory (tests use temp dirs).
-    pub fn at(root: PathBuf) -> Self {
-        Self { root }
+    /// Points the switch and `module.prop` at the manager's module directory,
+    /// which is a different tree from the runtime state root.
+    pub fn with_module_dir(mut self, module_dir: PathBuf) -> Self {
+        self.module_dir = module_dir;
+        self
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The manager's module directory. Flux writes `disable` and the
+    /// `description=` line of `module.prop` here and nothing else.
+    pub fn module_dir(&self) -> &Path {
+        &self.module_dir
+    }
+
+    /// The manager's `module.prop`, whose `description=` doubles as the live
+    /// status readout in the manager's module list.
+    pub fn module_prop(&self) -> PathBuf {
+        self.module_dir.join("module.prop")
     }
 
     pub fn run_dir(&self) -> PathBuf {
@@ -62,9 +106,11 @@ impl Layout {
         self.root.join("config")
     }
 
-    /// The switch file: present = disabled (C9, `docs/ux.md` §1).
+    /// The switch file: present = disabled (C9, `docs/spec/interaction.md` §27.1). This is the
+    /// manager's own module toggle, so the manager UI and `fluxd enable` /
+    /// `fluxd disable` drive one file rather than two.
     pub fn disable_file(&self) -> PathBuf {
-        self.root.join("disable")
+        self.module_dir.join("disable")
     }
 
     /// Single-instance lock (blueprint §10.3).
@@ -230,6 +276,23 @@ impl Layout {
             None => PathBuf::from("sing-box"),
         }
     }
+}
+
+/// The module directory Flux is actually installed in.
+///
+/// Derived from the running binary (`<module>/bin/fluxd`) rather than hardcoded
+/// so a renamed or side-loaded module still watches its own switch. Falls back
+/// to [`MODULE_DIR`], which makes a wrong deployment fail loudly at the inotify
+/// watch instead of silently watching a directory nobody writes.
+fn installed_module_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            let bin = exe.parent()?;
+            (bin.file_name() == Some(OsStr::new("bin")))
+                .then(|| bin.parent().map(Path::to_path_buf))?
+        })
+        .unwrap_or_else(|| PathBuf::from(MODULE_DIR))
 }
 
 /// Strictly `effective-sing-box.<u64>.json`.

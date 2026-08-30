@@ -285,6 +285,7 @@ mod tests {
             let output = Command::new(&self.fluxd)
                 .args(args)
                 .env("FLUX_RUNTIME_ROOT", &self.root)
+                .env("FLUX_MODULE_DIR", &self.root)
                 .stdin(Stdio::null())
                 .output()?;
             if !output.status.success() {
@@ -378,6 +379,7 @@ mod tests {
         command
             .arg("daemon")
             .env("FLUX_RUNTIME_ROOT", root)
+            .env("FLUX_MODULE_DIR", root)
             .env("FLUX_ENGINE_BIN", engine)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

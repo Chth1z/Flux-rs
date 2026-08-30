@@ -5,7 +5,7 @@
 # mysteriously at boot. Anything that needs a live kernel probe is deliberately
 # NOT checked here — capability verification happens at activation by actually
 # performing the operation, never by parsing version strings
-# (docs/blueprint.md §4, §12.7).
+# (docs/spec/blueprint.md §4, §12.7).
 
 # Read by the manager's installer after it sources this script, not by us.
 # shellcheck disable=SC2034
@@ -26,7 +26,6 @@ for payload in \
 	module.prop \
 	customize.sh \
 	service.sh \
-	action.sh \
 	uninstall.sh \
 	bin/fluxd \
 	bin/sing-box \
@@ -77,7 +76,9 @@ fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 [ -d "$MODPATH/bin" ] && set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 
-RUNTIME_ROOT=/data/adb/flux-rs
+# FLUX_RUNTIME_ROOT is the same test seam service.sh uses. Root managers never
+# set it, so production always installs to the fixed path.
+RUNTIME_ROOT=${FLUX_RUNTIME_ROOT:-/data/adb/flux-rs}
 FRESH_INSTALL=0
 [ -d "$RUNTIME_ROOT" ] || FRESH_INSTALL=1
 
@@ -98,13 +99,21 @@ if [ ! -e "$RUNTIME_ROOT/config/sing-box.json" ]; then
 	chmod 0600 "$RUNTIME_ROOT/config/sing-box.json"
 fi
 
-# Installation itself must never start capturing traffic. Preserve the user's
-# switch on upgrades; create it only for a genuinely fresh state root.
+# Installation itself must never start capturing traffic. The switch is the
+# manager's own module toggle, so a fresh install lands as a disabled module and
+# the user turns it on in the manager UI after configuring. Upgrades must not
+# touch it: whatever the user chose stays chosen.
 if [ "$FRESH_INSTALL" = 1 ]; then
-	: >"$RUNTIME_ROOT/disable"
-	chown 0:0 "$RUNTIME_ROOT/disable"
-	chmod 0600 "$RUNTIME_ROOT/disable"
+	: >"$MODPATH/disable"
 fi
 
-ui_print "- Runtime files initialized; fresh installs start disabled."
-ui_print "- Edit both configs, run 'fluxd check', then enable Flux-rs."
+ui_print "- Runtime files initialized."
+if [ "$FRESH_INSTALL" = 1 ]; then
+	ui_print "- Flux-rs is installed DISABLED, on purpose."
+	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and sing-box.json"
+	ui_print "- 2. Run 'fluxd check'"
+	ui_print "- 3. Enable this module in your manager, then REBOOT once."
+	ui_print "-    Later toggles take effect immediately; only the first"
+	ui_print "-    one needs a reboot, because a disabled module never got"
+	ui_print "-    to start the daemon that watches the switch."
+fi

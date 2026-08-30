@@ -22,12 +22,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
-const ALLOWLIST: [&str; 15] = [
+const ALLOWLIST: [&str; 14] = [
     "module.prop",
     "skip_mount",
     "customize.sh",
     "service.sh",
-    "action.sh",
     "uninstall.sh",
     "bin/fluxd",
     "bin/sing-box",
@@ -571,7 +570,6 @@ fn collect_entries(
     push("skip_mount", 0o644, Vec::new());
     push("customize.sh", 0o755, text("module/customize.sh")?);
     push("service.sh", 0o755, text("module/service.sh")?);
-    push("action.sh", 0o755, text("module/action.sh")?);
     push("uninstall.sh", 0o755, text("module/uninstall.sh")?);
     push("bin/fluxd", 0o755, util::read_bytes(fluxd)?);
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
@@ -682,18 +680,30 @@ pub fn build_bpf() -> Result<(), String> {
     Ok(())
 }
 
-/// Runs the pinned official host binary's real `check -c` against the exact
-/// shipped template after applying Flux's two generated inbounds.
+/// Shape constraints on the shipped bootstrap template.
+///
+/// These are the properties a *default* must have, not a general validator for
+/// user configs: no inbound of its own (Flux injects two), no listening control
+/// surface, no credential to leak, and the two route rules the capture design
+/// depends on. Everything else about the file is the user's business, so this
+/// deliberately does not enumerate allowed keys (R091-03).
 fn validate_default_template_shape(template: &str) -> Result<(), String> {
     let user = flux_core::engine_config::parse_jsonc(template)
         .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
     let top = user
         .as_object()
         .ok_or_else(|| "module/template.json must be a JSON object".to_string())?;
-    if top.len() != 2 || !top.contains_key("outbounds") || !top.contains_key("route") {
+
+    // Flux owns the inbound side entirely; a template inbound would compete
+    // with the two generated tproxy listeners.
+    if top.contains_key("inbounds") {
+        return Err("module/template.json must not declare inbounds: Flux injects its own".into());
+    }
+    // A default must never open a control port, least of all without a secret.
+    // Users who want `clash_api` add it themselves, with a secret they chose.
+    if user.pointer("/experimental/clash_api").is_some() {
         return Err(
-            "module/template.json must contain only the blueprint bootstrap outbounds and route"
-                .into(),
+            "module/template.json must not ship experimental.clash_api (R091-03, C10)".into(),
         );
     }
 
@@ -701,34 +711,42 @@ fn validate_default_template_shape(template: &str) -> Result<(), String> {
         .get("outbounds")
         .and_then(|value| value.as_array())
         .ok_or_else(|| "module/template.json outbounds must be an array".to_string())?;
-    let direct = outbounds
-        .first()
-        .and_then(|value| value.as_object())
-        .filter(|_| outbounds.len() == 1)
-        .ok_or_else(|| {
-            "module/template.json must contain exactly one direct outbound".to_string()
-        })?;
-    if direct.len() != 2
-        || direct.get("type").and_then(|value| value.as_str()) != Some("direct")
-        || direct.get("tag").and_then(|value| value.as_str()) != Some("DIRECT")
-    {
-        return Err(
-            "module/template.json must contain only the tagged official direct outbound".into(),
-        );
+    let has_direct = outbounds
+        .iter()
+        .any(|outbound| outbound.get("type").and_then(|value| value.as_str()) == Some("direct"));
+    if !has_direct {
+        return Err("module/template.json must contain an official direct outbound".into());
+    }
+    // An empty selector cannot be resolved, so a fresh install would fail
+    // `fluxd check` before the user ever edited anything.
+    for outbound in outbounds {
+        let kind = outbound.get("type").and_then(|value| value.as_str());
+        if matches!(kind, Some("selector") | Some("urltest"))
+            && outbound
+                .get("outbounds")
+                .and_then(|value| value.as_array())
+                .is_none_or(|list| list.is_empty())
+        {
+            return Err(format!(
+                "module/template.json {} '{}' has no members; a bootstrap default must resolve",
+                kind.unwrap_or("group"),
+                outbound
+                    .get("tag")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("<untagged>")
+            ));
+        }
     }
 
-    let route = user
-        .get("route")
-        .and_then(|value| value.as_object())
-        .ok_or_else(|| "module/template.json route must be an object".to_string())?;
-    if route.len() != 2 || route.get("final").and_then(|value| value.as_str()) != Some("DIRECT") {
-        return Err("module/template.json route must contain only rules and final=DIRECT".into());
-    }
-    let rules = route
-        .get("rules")
+    let rules = user
+        .pointer("/route/rules")
         .and_then(|value| value.as_array())
         .ok_or_else(|| "module/template.json route.rules must be an array".to_string())?;
-    if rules.len() != 2 || rules[0].get("action").and_then(|value| value.as_str()) != Some("sniff")
+    if rules
+        .first()
+        .and_then(|rule| rule.get("action"))
+        .and_then(|value| value.as_str())
+        != Some("sniff")
     {
         return Err("module/template.json must begin with the blueprint sniff rule".into());
     }

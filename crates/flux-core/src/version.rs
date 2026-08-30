@@ -70,6 +70,60 @@ pub fn module_prop(version: &str) -> Option<String> {
     ))
 }
 
+/// The two-character escape the root managers render as a line break inside
+/// `description=`. It is a literal backslash followed by `n`, not a newline:
+/// `module.prop` is strictly one key per physical line.
+const DESCRIPTION_BREAK: &str = "\\n";
+
+/// The base description with any previously appended status line removed.
+///
+/// The daemon rewrites `description=` on every state change, so this has to be
+/// idempotent: appending to an already-appended value would grow the line
+/// without bound.
+pub fn description_base(prop: &str) -> Option<&str> {
+    let line = prop
+        .lines()
+        .find_map(|line| line.strip_prefix("description="))?;
+    let base = match line.find(DESCRIPTION_BREAK) {
+        Some(at) => &line[..at],
+        None => line,
+    };
+    Some(base.trim())
+}
+
+/// Rewrites `description=` so the manager list doubles as a live status
+/// readout, preserving every other key and the file's line order.
+///
+/// A missing `description=` is appended rather than treated as an error: the
+/// file still belongs to the manager, and refusing to report status because one
+/// key was edited away would be worse than reporting it.
+pub fn module_prop_with_status(prop: &str, status: &str) -> String {
+    let base = description_base(prop).unwrap_or(MODULE_DESCRIPTION);
+    let base = if base.is_empty() {
+        MODULE_DESCRIPTION
+    } else {
+        base
+    };
+    let rendered = format!("description={base}{DESCRIPTION_BREAK}{status}");
+
+    let mut out = String::with_capacity(prop.len() + status.len() + 16);
+    let mut replaced = false;
+    for line in prop.lines() {
+        if line.starts_with("description=") && !replaced {
+            out.push_str(&rendered);
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !replaced {
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +188,66 @@ mod tests {
     fn module_prop_rejects_unrepresentable_versions() {
         assert_eq!(module_prop("0.9.0-rc1"), None);
         assert_eq!(module_prop("0.1000.0"), None);
+    }
+
+    #[test]
+    fn status_rewrite_preserves_every_other_key_and_order() {
+        let prop = module_prop("0.9.0").expect("valid version");
+        let out = module_prop_with_status(&prop, "[Active] gen 7");
+        let keys: Vec<&str> = out
+            .lines()
+            .map(|line| line.split('=').next().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "name",
+                "version",
+                "versionCode",
+                "author",
+                "description"
+            ]
+        );
+        assert!(out.contains(
+            "description=Transparent per-app proxying via eBPF and an unmodified official sing-box.\\n[Active] gen 7"
+        ));
+        assert!(!out.contains('\r'));
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn status_rewrite_is_idempotent_and_does_not_accumulate() {
+        let prop = module_prop("0.9.0").expect("valid version");
+        let once = module_prop_with_status(&prop, "[Active] gen 7");
+        let twice = module_prop_with_status(&once, "[Disabled]");
+        let thrice = module_prop_with_status(&twice, "[Disabled]");
+        assert_eq!(twice, thrice);
+        assert_eq!(twice.matches("\\n").count(), 1);
+        assert_eq!(
+            description_base(&thrice),
+            Some(MODULE_DESCRIPTION),
+            "the base description must survive repeated rewrites"
+        );
+    }
+
+    #[test]
+    fn status_rewrite_recovers_from_a_missing_or_empty_description() {
+        let out = module_prop_with_status("id=flux_rs\nversion=v0.9.0\n", "[Inactive]");
+        assert!(out.starts_with("id=flux_rs\nversion=v0.9.0\n"));
+        assert!(out.ends_with(&format!("description={MODULE_DESCRIPTION}\\n[Inactive]\n")));
+
+        let blank = module_prop_with_status("description=\n", "[Inactive]");
+        assert_eq!(
+            blank,
+            format!("description={MODULE_DESCRIPTION}\\n[Inactive]\n")
+        );
+    }
+
+    #[test]
+    fn description_base_strips_only_the_status_suffix() {
+        assert_eq!(description_base("description=A B\\n[Active]"), Some("A B"));
+        assert_eq!(description_base("description=  A B  "), Some("A B"));
+        assert_eq!(description_base("name=x\n"), None);
     }
 }

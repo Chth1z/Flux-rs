@@ -63,6 +63,9 @@ mod tests {
             let mut cmd = Command::new(FLUXD);
             cmd.args(args)
                 .env("FLUX_RUNTIME_ROOT", &self.root)
+                // The switch lives in the manager's module directory. Tests own
+                // a writable stand-in instead of touching /data/adb/modules.
+                .env("FLUX_MODULE_DIR", &self.root)
                 .env(
                     "FLUX_ENGINE_BIN",
                     std::env::current_exe().expect("own path"),
@@ -478,7 +481,7 @@ mod tests {
         }
         assert!(
             !contains("logcat.txt"),
-            "logcat MUST NOT be included by default (docs/ux.md §6)"
+            "logcat MUST NOT be included by default (docs/spec/interaction.md §27.6)"
         );
         assert!(
             !contains(CONFIG_SENTINEL),

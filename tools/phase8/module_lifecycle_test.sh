@@ -41,43 +41,55 @@ run_service apatch 'apatch|10800|n/a' \
 run_service magisk 'magisk|28.1|n/a' \
 	MAGISK_VER=28.1
 
-# action.sh reads status before acting, calls an explicit enable/disable, never
-# reads stdin, and refreshes module.prop from the post-action status.
-ACTION="$WORK/action"
-mkdir -p "$ACTION/bin"
-cp "$ROOT/module/action.sh" "$ACTION/action.sh"
-cat >"$ACTION/module.prop" <<'EOF'
-id=flux_rs
-description=initial
-EOF
-cat >"$ACTION/bin/fluxd" <<'EOF'
-#!/bin/sh
-ROOT=${0%/*}/..
-case "$1" in
-status) cat "$ROOT/status.json" ;;
-enable)
-	echo 'fluxd: enabled'
-	printf '%s\n' '{"state":"Active","generation":7,"policy":{"selected":3},"counters":{"admit_tcp":41,"admit_udp":388}}' >"$ROOT/status.json"
-	;;
-disable)
-	echo 'fluxd: disabled'
-	printf '%s\n' '{"state":"Disabled","generation":7,"policy":{"selected":3},"counters":{"admit_tcp":41,"admit_udp":388}}' >"$ROOT/status.json"
-	;;
-*) exit 1 ;;
-esac
-EOF
-chmod 0755 "$ACTION/bin/fluxd"
-printf '%s\n' '{"state":"Disabled","generation":0,"policy":{"selected":3},"counters":{"admit_tcp":0,"admit_udp":0}}' >"$ACTION/status.json"
+# There is no action.sh: the manager's own module toggle is the switch, and
+# fluxd reacts to it through inotify (C9).
+[ ! -e "$ROOT/module/action.sh" ] || fail 'action.sh is forbidden; the switch is the manager toggle'
 
-first=$(sh "$ACTION/action.sh" </dev/null)
-printf '%s' "$first" | grep -q 'Enabling' || fail 'action did not explicitly enable'
-grep -q '^description=\[Active\] gen 7 · 3 apps · 41 tcp / 388 udp$' \
-	"$ACTION/module.prop" || fail 'active description does not reflect status'
+# customize.sh must land a fresh install DISABLED, and the switch it creates
+# must be the manager's own module toggle rather than a second file under the
+# runtime root. Stub the manager helpers customize.sh expects.
+install_module() {
+	dest=$1
+	runtime=$2
+	shift 2
+	mkdir -p "$dest/bin" "$dest/etc" "$dest/licenses"
+	for payload in module.prop customize.sh service.sh uninstall.sh \
+		bin/fluxd bin/sing-box etc/default-flux.toml \
+		etc/default-sing-box.json engine.lock LICENSE \
+		THIRD_PARTY_NOTICES.md licenses/sing-box-LICENSE \
+		licenses/DEPENDENCIES.md; do
+		echo payload >"$dest/$payload"
+	done
+	: >"$dest/skip_mount"
+	cp "$ROOT/module/customize.sh" "$dest/customize.sh"
+	cp "$ROOT/module/flux.toml" "$dest/etc/default-flux.toml"
+	cp "$ROOT/module/template.json" "$dest/etc/default-sing-box.json"
 
-second=$(sh "$ACTION/action.sh" </dev/null)
-printf '%s' "$second" | grep -q 'Disabling' || fail 'action did not explicitly disable'
-grep -q '^description=\[Disabled\] gen 7 · 3 apps · 41 tcp / 388 udp$' \
-	"$ACTION/module.prop" || fail 'disabled description does not reflect status'
+	env FLUX_RUNTIME_ROOT="$runtime" MODPATH="$dest" ARCH=arm64 MAGISK_VER=28.1 \
+		sh -c '
+			ui_print() { :; }
+			abort() { echo "abort: $*" >&2; exit 1; }
+			grep_prop() { echo 0.9.0; }
+			set_perm_recursive() { :; }
+			. "$MODPATH/customize.sh"
+		'
+}
+
+FRESH="$WORK/fresh"
+FRESH_RUNTIME="$WORK/fresh-runtime"
+install_module "$FRESH" "$FRESH_RUNTIME"
+[ -f "$FRESH/disable" ] || fail 'fresh install must land as a disabled module'
+[ ! -e "$FRESH_RUNTIME/disable" ] || fail 'the runtime root must not hold a second switch'
+[ -f "$FRESH_RUNTIME/config/flux.toml" ] || fail 'fresh install did not seed flux.toml'
+[ -f "$FRESH_RUNTIME/config/sing-box.json" ] || fail 'fresh install did not seed sing-box.json'
+
+# An upgrade must never re-disable a module the user turned on, and must never
+# replace either authority file.
+echo 'user edit' >"$FRESH_RUNTIME/config/flux.toml"
+UPGRADE="$WORK/upgrade"
+install_module "$UPGRADE" "$FRESH_RUNTIME"
+[ ! -e "$UPGRADE/disable" ] || fail 'upgrade must preserve the user switch, not force disable'
+[ "$(cat "$FRESH_RUNTIME/config/flux.toml")" = 'user edit' ] || fail 'upgrade overwrote flux.toml'
 
 # Product scripts keep the narrow lifecycle boundaries from blueprint §13.
 body=$(sed '/^[[:space:]]*#/d' "$ROOT/module/uninstall.sh")
