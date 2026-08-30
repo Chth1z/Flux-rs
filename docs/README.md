@@ -22,9 +22,9 @@
 | **我是用户，这东西是干什么的** | **`guide/introduction.md`**（不含术语） |
 | **要评审或提出一个设计** | **`philosophy.md`**（英文），先过 PHIL-10 的 checklist |
 | **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
-| 实现某个模块 | `spec/blueprint.md`，从头读到尾；再依次读 `spec/blueprint-0.9.1.md`、`spec/blueprint-0.9.2.md` 的覆盖项 |
+| 实现某个模块 | `spec/blueprint.md`，从头读到尾；0.9.5 折叠完成前，再依次读 `spec/blueprint-0.9.1.md`、`spec/blueprint-0.9.2.md` 的覆盖项 |
 | 了解技术架构 | `guide/architecture.md` |
-| 怎么用、出问题怎么办 | `guide/using-flux.md` |
+| 怎么装、怎么配、出问题怎么办 | `guide/how-to.md` |
 | 上机跑测试 | `history/phase0.md` + `../tools/phase0/README.md` |
 | 查一个错误码的含义 | `spec/failures.md` |
 | 改用户看得见的东西 | `spec/interaction.md`（§27） |
@@ -34,11 +34,11 @@
 | 写或改这些文档 | `authoring.md`；引用与编号看 `index.md` |
 | **引用某个 §、发一个新号** | **`index.md`** |
 
-## 合同当前是三层
+## 合同暂时还是三层，正在折成一层
 
-冻结的 0.9.0 基线 [`spec/blueprint.md`](spec/blueprint.md)，增量修订 [`spec/blueprint-0.9.1.md`](spec/blueprint-0.9.1.md)，再叠 [`spec/blueprint-0.9.2.md`](spec/blueprint-0.9.2.md)（草案）。按这个顺序读，冲突时取最新一层。0.9.5 会把三层折进一份全量蓝图，届时前两层移入 `history/`。
+现状：冻结的 0.9.0 基线 [`spec/blueprint.md`](spec/blueprint.md)，增量修订 [`spec/blueprint-0.9.1.md`](spec/blueprint-0.9.1.md)，再叠 [`spec/blueprint-0.9.2.md`](spec/blueprint-0.9.2.md)（草案）。按这个顺序读，冲突时取最新一层。
 
-0.9.1 做的是文档与实现对账，不改产品形态；0.9.2 改的正是产品形态（配置模型、订阅、黑白名单、自动化），因此它大量覆盖 0.9.1 自己的条款。
+**这个形态正在被取消。** 0.9.5 把三层折成一份全量蓝图，两份增量移入 `history/`，此后只维护 `spec/blueprint.md` 一份、就地编辑——增量蓝图机制已废除，理由见 AUTH-7.2。`R09x-NN` 编号同时退役，由 0.9.5 的对照表映射到承载它的 §。
 
 ## 为什么这么拆
 
