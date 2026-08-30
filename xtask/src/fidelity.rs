@@ -11,7 +11,19 @@
 //! 1. evidence citations (`FileSystem.kt:524-625`),
 //! 2. cross-references (`§8.5.3`),
 //! 3. decision identifiers (`D18`, `C9`, `Q10`, `R091-05`),
-//! 4. numeric and address constants (`65536`, `198.51.100.1`, `0x4000`).
+//! 4. numeric constants (`65536`, `198.51.100.1/24`, `0x4000`, `16 KiB`).
+//!
+//! Everything here scans for a pattern and checks that its neighbours are
+//! boundaries, rather than splitting the text into tokens first. Splitting is
+//! what an English-language draft of this file did, and it made the tool blind
+//! on the documents it exists to protect: these are Chinese, `、` is the
+//! ordinary list separator, and `D20、D21` is one token to any splitter that
+//! only knows ASCII. Since no CJK character is ASCII-alphanumeric, scanning
+//! gets that case right without enumerating punctuation.
+//!
+//! False positives are cheap here and false negatives are not. A year like
+//! `2026` counts as a constant, but it appears on both sides of a faithful
+//! re-issue and so cancels; a dropped capacity that goes unreported does not.
 //!
 //! A re-issue may deliberately drop or add any of these. The tool reports the
 //! difference and lets the author account for it; it is not a gate.
@@ -92,102 +104,262 @@ fn resolve(root: &Path, arg: &str) -> std::path::PathBuf {
     }
 }
 
-/// `tproxy.sh:980-1012`, `FileSystem.kt:524`: a source file and a line span.
-/// Requires an extension so that `20260:100` style numbers do not qualify.
+/// A match may start or end here. Every CJK character and every piece of CJK
+/// punctuation satisfies this, which is the whole point.
+fn boundary(text: &[char], at: usize) -> bool {
+    match text.get(at) {
+        None => true,
+        Some(c) => !c.is_ascii_alphanumeric(),
+    }
+}
+
+fn run_of(text: &[char], from: usize, accept: impl Fn(char) -> bool) -> usize {
+    let mut end = from;
+    while end < text.len() && accept(text[end]) {
+        end += 1;
+    }
+    end
+}
+
+fn slice(text: &[char], from: usize, to: usize) -> String {
+    text[from..to].iter().collect()
+}
+
+/// `tproxy.sh:980-1012`, `net/core/skbuff.c:5518-5523`: a source file and a
+/// line span. Requires an extension so that `20260:100` does not qualify, and
+/// tolerates whatever punctuation follows, since these usually sit mid-sentence
+/// in Chinese prose where the terminator is `。` or `、`.
 fn citations(text: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut found = BTreeSet::new();
-    for token in tokens(text) {
-        let Some((file, lines)) = token.rsplit_once(':') else {
+
+    for colon in 0..chars.len() {
+        if chars[colon] != ':' {
             continue;
-        };
-        let is_span = !lines.is_empty()
-            && lines
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '-' || c == '\u{2013}');
-        let has_ext = file
-            .rsplit_once('.')
-            .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().all(|c| c.is_ascii_alphabetic()));
-        if is_span && has_ext && lines.chars().any(|c| c.is_ascii_digit()) {
-            found.insert(token.to_string());
+        }
+        let first = run_of(&chars, colon + 1, |c| c.is_ascii_digit());
+        if first == colon + 1 {
+            continue;
+        }
+        // Optional `-1012` or `–1012` continuation of the span.
+        let mut end = first;
+        if matches!(chars.get(end), Some('-' | '\u{2013}')) {
+            let tail = run_of(&chars, end + 1, |c| c.is_ascii_digit());
+            if tail > end + 1 {
+                end = tail;
+            }
+        }
+
+        let mut start = colon;
+        while start > 0
+            && (chars[start - 1].is_ascii_alphanumeric()
+                || matches!(chars[start - 1], '.' | '_' | '-' | '/'))
+        {
+            start -= 1;
+        }
+        let path = slice(&chars, start, colon);
+        if has_source_extension(&path) {
+            found.insert(format!("{path}{}", slice(&chars, colon, end)));
         }
     }
     found
 }
 
+/// A trailing `.ext` of one to four ASCII letters, on a non-empty stem.
+fn has_source_extension(path: &str) -> bool {
+    match path.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty()
+                && !ext.is_empty()
+                && ext.len() <= 4
+                && ext.chars().all(|c| c.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
 /// `§8.5.3`, `§16`. Normalised to the number alone so that a re-issue may
-/// change the sigil without registering as a loss.
+/// change the sigil, and de-escaped so that `§8\.5\.3` — which appears inside
+/// `rg` examples — reads the same as the plain form.
 fn sections(text: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut found = BTreeSet::new();
-    let mut rest = text;
-    while let Some(at) = rest.find('\u{a7}') {
-        let after = &rest[at + '\u{a7}'.len_utf8()..];
-        let number: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect();
+
+    for at in 0..chars.len() {
+        if chars[at] != '\u{a7}' {
+            continue;
+        }
+        let mut number = String::new();
+        let mut cursor = at + 1;
+        while let Some(&c) = chars.get(cursor) {
+            match c {
+                '\\' => cursor += 1, // escape before `.`; drop it and keep going
+                c if c.is_ascii_digit() || c == '.' => {
+                    number.push(c);
+                    cursor += 1;
+                }
+                _ => break,
+            }
+        }
         let number = number.trim_end_matches('.');
         if !number.is_empty() {
             found.insert(number.to_string());
         }
-        rest = after;
     }
     found
 }
 
 /// `D18`, `C9`, `Q10`, `PHIL-4`, `GOV-7.1`, `AUTH-6`, `R091-05`.
+///
+/// Scanning rather than splitting is what makes `D20、D21` and `C8/C10/C11`
+/// two and three matches respectively instead of one unrecognisable token.
 fn identifiers(text: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut found = BTreeSet::new();
-    for token in tokens(text) {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        let head: String = token.chars().take_while(char::is_ascii_alphabetic).collect();
-        let tail = &token[head.len()..];
-        let is_id = match head.as_str() {
-            "D" | "C" | "Q" => tail.chars().all(|c| c.is_ascii_digit()) && !tail.is_empty(),
-            "PHIL" | "GOV" | "AUTH" | "R" => {
-                tail.starts_with('-') || tail.starts_with(|c: char| c.is_ascii_digit())
-            }
-            _ => false,
-        };
-        if is_id && head != "R" {
-            found.insert(token.to_string());
-        } else if head == "R" && token.starts_with("R09") {
-            found.insert(token.to_string());
-        }
-    }
-    found
-}
 
-/// Numbers that a re-issue must not quietly change: capacities, ports,
-/// addresses, hex constants. Small integers carry no such weight and are
-/// skipped, or every "two" and "three" in the prose would drown the signal.
-fn constants(text: &str) -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    for token in tokens(text) {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
-        if token.starts_with("0x") && token.len() > 2 {
-            found.insert(token.to_ascii_lowercase());
+    for at in 0..chars.len() {
+        if !boundary(&chars, at.wrapping_sub(1)) && at > 0 {
             continue;
         }
-        // Dotted quads and prefix lengths keep their punctuation; bare integers
-        // must be four digits or more to count.
-        let looks_addressy = token.contains('.') && token.split('.').count() == 4;
-        let digits_only = !token.is_empty() && token.chars().all(|c| c.is_ascii_digit());
-        if looks_addressy && token.split('.').all(|p| p.parse::<u16>().is_ok()) {
-            found.insert(token.to_string());
-        } else if digits_only && token.len() >= 4 {
-            found.insert(token.to_string());
+        let letters = run_of(&chars, at, |c| c.is_ascii_uppercase());
+        if letters == at {
+            continue;
+        }
+        let head = slice(&chars, at, letters);
+        let digits = run_of(&chars, letters, |c| c.is_ascii_digit());
+
+        let end = match head.as_str() {
+            // `D18`, `C9`, `Q10`: letter then a small number, nothing else.
+            "D" | "C" | "Q" if digits > letters && digits - letters <= 3 => digits,
+            // `R091-05`: the version-scoped revision namespace.
+            "R" if digits - letters == 3 && slice(&chars, letters, digits).starts_with("09") => {
+                match chars.get(digits) {
+                    Some('-') => {
+                        let tail = run_of(&chars, digits + 1, |c| c.is_ascii_digit());
+                        if tail > digits + 1 {
+                            tail
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            // `PHIL-4`, `GOV-7.1`, `AUTH-6`: dash, then a dotted number.
+            "PHIL" | "GOV" | "AUTH" if chars.get(letters) == Some(&'-') => {
+                let tail = run_of(&chars, letters + 1, |c| c.is_ascii_digit() || c == '.');
+                if tail > letters + 1 {
+                    tail
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        if boundary(&chars, end) {
+            found.insert(slice(&chars, at, end).trim_end_matches('.').to_string());
         }
     }
     found
 }
 
-/// Split on whitespace and markdown furniture, keeping `:`, `.`, `-` and `/`
-/// because the facets above are built out of them.
-fn tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '`' | '|' | '(' | ')' | '[' | ']' | '*' | '"' | ',' | '，')
-    })
-    .filter(|t| !t.is_empty())
+/// Numbers a re-issue must not quietly change: capacities, ports, addresses,
+/// prefixes, hex constants, and sizes carrying a unit.
+///
+/// The unit case is why small integers are not simply skipped. `16 KiB`
+/// silently becoming `4 KiB` would be the most consequential single-character
+/// change possible in this project — it is the base-page-size boundary the
+/// whole packaging gate exists to defend — and both numbers are too small to
+/// survive a naive digit-count filter.
+fn constants(text: &str) -> BTreeSet<String> {
+    const UNITS: [&str; 8] = ["KiB", "MiB", "GiB", "KB", "MB", "GB", "ms", "µs"];
+    let chars: Vec<char> = text.chars().collect();
+    let mut found = BTreeSet::new();
+
+    let mut at = 0;
+    while at < chars.len() {
+        if !(at == 0 || boundary(&chars, at - 1)) || !chars[at].is_ascii_digit() {
+            at += 1;
+            continue;
+        }
+
+        // `0x4000`
+        if chars[at] == '0' && matches!(chars.get(at + 1), Some('x' | 'X')) {
+            let end = run_of(&chars, at + 2, |c| c.is_ascii_hexdigit());
+            if end > at + 2 {
+                found.insert(slice(&chars, at, end).to_ascii_lowercase());
+                at = end;
+                continue;
+            }
+        }
+
+        let digits = run_of(&chars, at, |c| c.is_ascii_digit());
+        let mut end = digits;
+        let mut kind = Kind::Bare;
+
+        // `198.51.100.1`, optionally `/24`
+        if chars.get(digits) == Some(&'.') {
+            let dotted = run_of(&chars, at, |c| c.is_ascii_digit() || c == '.');
+            let body = slice(&chars, at, dotted);
+            if body.split('.').count() == 4 && body.split('.').all(|p| p.parse::<u8>().is_ok()) {
+                end = dotted;
+                kind = Kind::Address;
+            }
+        } else if chars.get(digits) == Some(&':') {
+            // `2001:db8::/48` — hex groups and colons, needing at least one colon.
+            let v6 = run_of(&chars, at, |c| c.is_ascii_hexdigit() || c == ':');
+            let body = slice(&chars, at, v6);
+            if body.contains(':') && !body.ends_with(':') || body.contains("::") {
+                end = v6;
+                kind = Kind::Address;
+            }
+        }
+
+        if kind == Kind::Address && chars.get(end) == Some(&'/') {
+            let prefix = run_of(&chars, end + 1, |c| c.is_ascii_digit());
+            if prefix > end + 1 {
+                end = prefix;
+            }
+        }
+
+        // `16 KiB`, `4 KiB` — a unit makes any magnitude load-bearing.
+        if kind == Kind::Bare {
+            let after_space = if chars.get(end) == Some(&' ') {
+                end + 1
+            } else {
+                end
+            };
+            let word = run_of(&chars, after_space, |c| {
+                c.is_ascii_alphabetic() || c == '\u{b5}'
+            });
+            let unit = slice(&chars, after_space, word);
+            if UNITS.contains(&unit.as_str()) {
+                found.insert(format!("{} {unit}", slice(&chars, at, digits)));
+                at = word;
+                continue;
+            }
+        }
+
+        match kind {
+            Kind::Address => {
+                found.insert(slice(&chars, at, end));
+            }
+            // A bare number is only worth tracking once it is big enough to be
+            // a capacity or a port rather than a count in the prose.
+            Kind::Bare if digits - at >= 4 && boundary(&chars, end) => {
+                found.insert(slice(&chars, at, end));
+            }
+            Kind::Bare => {}
+        }
+        at = end.max(at + 1);
+    }
+    found
+}
+
+#[derive(PartialEq)]
+enum Kind {
+    Bare,
+    Address,
 }
 
 #[cfg(test)]
@@ -203,11 +375,19 @@ mod tests {
     }
 
     #[test]
-    fn sections_normalise_away_the_sigil() {
-        let found = sections("§8.5.3 and §16, plus §22.2.1");
+    fn citations_survive_chinese_punctuation() {
+        let found = citations("依据 net/core/skbuff.c:5518-5523、FileSystem.kt:524-625。");
+        assert!(found.contains("net/core/skbuff.c:5518-5523"), "{found:?}");
+        assert!(found.contains("FileSystem.kt:524-625"), "{found:?}");
+    }
+
+    #[test]
+    fn sections_normalise_the_sigil_and_escapes() {
+        let found = sections("§8.5.3 和 §16，还有 §22.2.1 与 rg 例子里的 §8\\.5\\.3");
         assert!(found.contains("8.5.3"));
         assert!(found.contains("16"));
         assert!(found.contains("22.2.1"));
+        assert_eq!(found.len(), 3, "escaped form must fold into the plain one");
     }
 
     #[test]
@@ -220,18 +400,44 @@ mod tests {
     }
 
     #[test]
-    fn constants_skip_small_integers() {
-        let found = constants("65536 and 198.51.100.1 and 0x4000, but not 53 or 20");
-        assert!(found.contains("65536"));
-        assert!(found.contains("198.51.100.1"));
-        assert!(found.contains("0x4000"));
-        assert!(!found.contains("53"));
+    fn identifiers_split_on_chinese_and_ascii_separators() {
+        let found = identifiers("随后被 D20、D21 覆盖；C8/C10/C11 已延期，见 R091-03。");
+        for id in ["D20", "D21", "C8", "C10", "C11", "R091-03"] {
+            assert!(found.contains(id), "missing {id} in {found:?}");
+        }
+    }
+
+    #[test]
+    fn constants_cover_addresses_prefixes_and_units() {
+        let found = constants("65536 与 198.51.100.1，段 198.18.0.0/15 和 2001:db8:f::/48，0x4000，对齐 16 KiB，端口 61000");
+        for c in [
+            "65536",
+            "198.51.100.1",
+            "198.18.0.0/15",
+            "2001:db8:f::/48",
+            "0x4000",
+            "16 KiB",
+            "61000",
+        ] {
+            assert!(found.contains(c), "missing {c} in {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_size_regression_is_visible() {
+        let before = constants("每个 LOAD 段必须 16 KiB 对齐");
+        let after = constants("每个 LOAD 段必须 4 KiB 对齐");
+        assert!(
+            before.difference(&after).next().is_some(),
+            "16 KiB becoming 4 KiB must register as a loss"
+        );
     }
 
     #[test]
     fn a_faithful_reissue_drops_nothing() {
-        let before = "§8.5 cites `tproxy.sh:980-1012`, overturned by D18, cap 65536.";
-        let after = "Section §8.5 rests on `tproxy.sh:980-1012` (D18); the cap is 65536 entries.";
+        let before = "§8.5 引用 `tproxy.sh:980-1012`，被 D18 推翻，容量 65536，对齐 16 KiB。";
+        let after = "Section §8.5 rests on `tproxy.sh:980-1012` (D18); the cap is 65536 and \
+                     alignment is 16 KiB.";
         for facet in &FACETS {
             let old = (facet.extract)(before);
             let new = (facet.extract)(after);

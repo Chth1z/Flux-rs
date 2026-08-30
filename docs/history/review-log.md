@@ -72,6 +72,8 @@
 | D22 | superseded | §11.2（容量结论保留；`.srs` 输入方案未进入 schema） |
 | D23 | current | — |
 
+### 0.3.1 D1–D18：与旧蓝图的实质差异
+
 | # | 旧蓝图做法 | 本文做法 | 理由 |
 |---|---|---|---|
 | **D1** | egress 对每个 packet 做 `bpf_sk_lookup_tcp()` 反向查找 app full socket，再取 SK_STORAGE | 直接 `bpf_sk_fullsock(skb->sk)` 取 full socket | 省掉每包一次 socket hash 查找；并消除"反查到错误 socket / `sk_bound_dev_if` 不匹配导致查不到"的正确性风险。已核验 helper 可用且不需 release。 |

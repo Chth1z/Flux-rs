@@ -48,8 +48,8 @@ is wrong?**
 - **`scratch/` holds real subscription credentials.** It is gitignored. Never
   stage it, never quote its contents into a document.
 - **`§` belongs to the blueprint alone.** Other documents use `PHIL-`, `GOV-`,
-  `AUTH-`. Section numbers are never reused or renumbered: 327 of them are
-  cited from code across 44 files.
+  `AUTH-`. Section numbers are never reused or renumbered: 318 of them are
+  cited from code across 39 files under `crates bpf module xtask`.
 - **`git commit -F <file>`**, because PowerShell has no heredoc.
 
 ## Gates

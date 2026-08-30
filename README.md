@@ -147,7 +147,7 @@ and `--raw` disables address redaction with a warning.
 ## Build and verify
 
 The Rust toolchain, Cargo lockfile, Android NDK revision, engine asset, and BPF
-ABI are pinned. Packaging has one entry point and an exact 15-file allowlist.
+ABI are pinned. Packaging has one entry point and an exact 14-file allowlist.
 
 ```sh
 cargo test --workspace

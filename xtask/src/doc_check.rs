@@ -180,9 +180,7 @@ fn check_identifiers(root: &Path, parts: &[u32], failures: &mut Vec<String>) -> 
         defined.insert(prefix, ids);
     }
 
-    let mut files = Vec::new();
-    collect_markdown(&root.join("docs"), &mut files)?;
-    files.sort();
+    let files = collect_checked_markdown(root)?;
 
     // A meta document must not use the section sign for its own sections.
     for (_, file) in NAMESPACES {
@@ -244,77 +242,87 @@ fn check_identifiers(root: &Path, parts: &[u32], failures: &mut Vec<String>) -> 
     Ok(())
 }
 
-/// Where each decision namespace is defined, and where its status registry is.
-const DECISION_REGISTRIES: [(&str, &str); 2] = [
-    ("D", "docs/history/review-log.md"),
-    ("C", "docs/history/rejected-and-deferred.md"),
+/// Each decision namespace: its prefix, the document that defines it, and the
+/// heading of that document's status registry.
+const DECISION_REGISTRIES: [(&str, &str, &str); 2] = [
+    ("D", "docs/history/review-log.md", "D 条目状态登记"),
+    (
+        "C",
+        "docs/history/rejected-and-deferred.md",
+        "C 条目状态登记",
+    ),
 ];
 
 /// The only statuses a decision may carry.
 const DECISION_STATUSES: [&str; 4] = ["current", "superseded", "deferred", "executed"];
 
-/// Every decision defined in a history document must appear in that document's
-/// status registry, with a status from the fixed vocabulary, and anything
-/// marked superseded must say by what.
+/// The set of decisions a document defines must equal the set its status
+/// registry covers, every status must come from the fixed vocabulary, and
+/// anything superseded must name what replaced it.
 ///
 /// Without this, a decision that has been replaced reads exactly like one that
 /// still binds. That is how settled questions get re-litigated: R092-03 was
 /// decided, reversed, and reversed back inside one day.
+///
+/// Both directions of the equality matter, and an earlier version of this
+/// check asserted only one. It also treated the status vocabulary as a filter
+/// for deciding which rows were status rows, so a misspelled status made a row
+/// invisible rather than wrong, and a single `| D1-D99 | current |` row could
+/// silently claim every decision was current. The registry is now delimited by
+/// its heading: inside that section every table row is a status row and must
+/// parse, which leaves a typo nowhere to hide.
 fn check_decision_status(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    for (prefix, file) in DECISION_REGISTRIES {
+    for (prefix, file, heading) in DECISION_REGISTRIES {
         let text = util::read_text(&root.join(file))?;
+        let Some((first, last)) = registry_bounds(&text, heading) else {
+            failures.push(format!("{file}: has no `{heading}` section"));
+            continue;
+        };
 
-        // Identifiers the document actually defines, as `**D7**` in a table.
-        let mut defined: Vec<u32> = Vec::new();
-        for line in text.lines() {
-            let mut rest = line;
-            while let Some(at) = rest.find(&format!("**{prefix}")) {
-                let after = &rest[at + prefix.len() + 2..];
-                let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-                if !digits.is_empty() && after[digits.len()..].starts_with("**") {
-                    if let Ok(n) = digits.parse() {
-                        defined.push(n);
-                    }
-                }
-                rest = &after[digits.len().min(after.len())..];
-            }
-        }
-        defined.sort_unstable();
-        defined.dedup();
-
-        // Rows of the status registry: `| D7 | superseded | ... |` and ranges
-        // like `| D1-D6 | current | - |`.
+        let lines: Vec<&str> = text.lines().collect();
         let mut covered: Vec<u32> = Vec::new();
-        for (idx, line) in text.lines().enumerate() {
-            if !line.starts_with('|') {
-                continue;
-            }
-            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-            if cells.len() < 4 {
-                continue;
-            }
-            let Some(range) = parse_id_range(cells[1], prefix) else {
+
+        for (offset, line) in lines[first..last].iter().enumerate() {
+            let number = first + offset + 1;
+            let Some(cells) = table_row(line) else {
                 continue;
             };
-            let status = cells[2];
-            if !DECISION_STATUSES.contains(&status) {
-                continue; // not a status row; some tables reuse the id column
+            if cells.len() < 3 || cells[0].starts_with("---") || !cells[0].starts_with(prefix) {
+                continue; // header row, alignment row, or prose
             }
-            if status == "superseded" && (cells[3].is_empty() || cells[3] == "—" || cells[3] == "-")
-            {
+            let Some(range) = parse_id_range(cells[0], prefix) else {
                 failures.push(format!(
-                    "{file}:{}: {} is superseded but names no replacement",
-                    idx + 1,
-                    cells[1].trim_matches('*')
+                    "{file}:{number}: `{}` is not a {prefix} identifier or range",
+                    cells[0]
+                ));
+                continue;
+            };
+            let status = cells[1];
+            if !DECISION_STATUSES.contains(&status) {
+                failures.push(format!(
+                    "{file}:{number}: `{status}` is not one of {}",
+                    DECISION_STATUSES.join(" / ")
                 ));
             }
-            covered.extend(range);
+            // A replacement has to be something you can look up, so require at
+            // least one alphanumeric: an em dash or a stray `？` is not one.
+            if status == "superseded" && !cells[2].chars().any(|c| c.is_alphanumeric()) {
+                failures.push(format!(
+                    "{file}:{number}: {} is superseded but names no replacement",
+                    cells[0]
+                ));
+            }
+            for id in range {
+                if covered.contains(&id) {
+                    failures.push(format!(
+                        "{file}:{number}: {prefix}{id} appears twice in the status registry"
+                    ));
+                }
+                covered.push(id);
+            }
         }
 
-        if covered.is_empty() {
-            failures.push(format!("{file}: has no {prefix} status registry"));
-            continue;
-        }
+        let defined = defined_decisions(&lines, prefix, first, last);
         for id in &defined {
             if !covered.contains(id) {
                 failures.push(format!(
@@ -322,11 +330,81 @@ fn check_decision_status(root: &Path, failures: &mut Vec<String>) -> Result<(), 
                 ));
             }
         }
+        for id in &covered {
+            if !defined.contains(id) {
+                failures.push(format!(
+                    "{file}: the status registry covers {prefix}{id}, which is never defined"
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-/// `D7` or `D1–D6` (either dash) into the numbers it covers.
+/// Line range of the registry section: from its heading to the next heading of
+/// the same or higher level.
+fn registry_bounds(text: &str, heading: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with('#') && l.contains(heading))?;
+    let depth = lines[start].chars().take_while(|c| *c == '#').count();
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with('#') && l.chars().take_while(|c| *c == '#').count() <= depth)
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    Some((start, end))
+}
+
+/// Cells of a markdown table row, without the leading and trailing empties.
+fn table_row(line: &str) -> Option<Vec<&str>> {
+    let line = line.trim();
+    if !line.starts_with('|') {
+        return None;
+    }
+    Some(
+        line.trim_matches('|')
+            .split('|')
+            .map(|c| c.trim().trim_matches('*').trim())
+            .collect(),
+    )
+}
+
+/// Decisions the document defines, which is to say those appearing in the first
+/// cell of a table row outside the registry.
+///
+/// Restricting this to the first cell matters in both directions: bold text is
+/// used for emphasis throughout these documents, so scanning for `**D24**`
+/// anywhere invented definitions out of ordinary prose, while requiring the
+/// bold markers meant an unemphasised `| D18 |` row went unseen.
+fn defined_decisions(lines: &[&str], prefix: &str, skip_from: usize, skip_to: usize) -> Vec<u32> {
+    let mut defined = Vec::new();
+    for (number, line) in lines.iter().enumerate() {
+        if (skip_from..skip_to).contains(&number) {
+            continue;
+        }
+        let Some(cells) = table_row(line) else {
+            continue;
+        };
+        let Some(first) = cells.first() else {
+            continue;
+        };
+        let Some(body) = first.strip_prefix(prefix) else {
+            continue;
+        };
+        if !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(id) = body.parse() {
+                if !defined.contains(&id) {
+                    defined.push(id);
+                }
+            }
+        }
+    }
+    defined.sort_unstable();
+    defined
+}
+
+/// `D7` or `D1–D6` (any dash) into the numbers it covers.
 fn parse_id_range(cell: &str, prefix: &str) -> Option<Vec<u32>> {
     let cell = cell.trim_matches('*').trim();
     let body = cell.strip_prefix(prefix)?;
@@ -408,14 +486,12 @@ fn heading_for_part(text: &str, part: u32) -> bool {
 /// resolve to an existing path. External URLs and same-file anchors are out
 /// of scope; fenced code blocks are skipped.
 fn check_links(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
-    let mut files = Vec::new();
-    collect_markdown(&root.join("docs"), &mut files)?;
-    files.sort();
+    let files = collect_checked_markdown(root)?;
 
     let mut checked = 0usize;
     for file in &files {
         let text = util::read_text(file)?;
-        let dir = file.parent().expect("markdown files live inside docs/");
+        let dir = file.parent().expect("every markdown file has a parent");
         let mut in_fence = false;
         for (idx, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("```") {
@@ -450,6 +526,32 @@ fn check_links(root: &Path, failures: &mut Vec<String>) -> Result<(), String> {
         files.len()
     );
     Ok(())
+}
+
+/// Every markdown file the checks apply to: all of `docs/`, plus the
+/// repository-root documents and `tools/`.
+///
+/// The root files were outside the walk until they were found to be carrying
+/// three drifted claims at once. `AGENTS.md` in particular is read at the start
+/// of every session, so an unchecked stale line there is more expensive than
+/// the same line buried in `docs/`.
+fn collect_checked_markdown(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    collect_markdown(&root.join("docs"), &mut files)?;
+    collect_markdown(&root.join("tools"), &mut files)?;
+    for name in [
+        "AGENTS.md",
+        "README.md",
+        "CHANGELOG.md",
+        "THIRD_PARTY_NOTICES.md",
+    ] {
+        let path = root.join(name);
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {

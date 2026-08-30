@@ -102,7 +102,9 @@ fn main() -> ExitCode {
             let mut args = std::env::args().skip(2);
             match (args.next(), args.next()) {
                 (Some(before), Some(after)) => fidelity::run(&before, &after),
-                _ => Err("fidelity takes two document paths: the earlier, then the re-issue".into()),
+                _ => {
+                    Err("fidelity takes two document paths: the earlier, then the re-issue".into())
+                }
             }
         }
         "build-bpf" => package::build_bpf(),
