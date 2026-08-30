@@ -105,7 +105,9 @@ cargo test -p xtask
 cargo xtask doc-check
 ```
 
-Windows 再跑 `cargo test -p fluxd --bin fluxd`。Linux CI 必须额外通过：
+加跑 `cargo test -p fluxd --bin fluxd`。它当前**不含测试用例**，作用是把 `fluxd` 的 host-safe 子集编一遍——在 Windows 上这是唯一能碰到那份代码的门禁，所以列在这里；不要把它的绿色当成 daemon 有测试覆盖。
+
+Linux CI 必须额外通过：
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -120,7 +122,7 @@ Android-only Phase 3–8 suite 按对应 env flag/脚本在设备上执行，且
 
 1. 同步另一边。
 2. 结构布局变了 → bump `FLUX_ABI_MAGIC`；只是加了纯用户态常量 → 不用 bump（头文件里有 scope note 说明界线）。
-3. `abi.rs` 的 offset 断言必须更新。**它们是编译期 `const _: ()` 而不是测试**，因为撑不住自身不变量的 ABI 不该编译通过。
+3. `abi.rs` 的 offset 断言必须更新。分工是：**关系型不变量**（`Counter::MAX <= COUNTER_SLOTS`、ringbuf 页对齐、handle 互异）写成编译期 `const _: ()`，因为撑不住自身不变量的 ABI 不该编译通过；**具体的 size/offset** 由 `cargo xtask abi-check` 交给 clang 用 `_Static_assert` 逐条核对头文件与镜像，`abi.rs` 里另有单元测试守住镜像侧。真正的跨语言证据在 `abi-check`，不在 `abi.rs` 里。
 
 ### GOV-4.3 提交实测结果之前
 
@@ -159,16 +161,20 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 | `docs/spec/blueprint-0.9.1.md` | 0.9.1 增量，**待 0.9.5 折叠后移入 `history/`** | 不再修改 |
 | `docs/spec/blueprint-0.9.2.md` | 0.9.2 增量（草案），**待折叠后移入 `history/`** | 不再修改 |
 | `docs/philosophy.md` | **设计哲学**：技术决策的判据。蓝图与它冲突时改蓝图 | 判据本身被推翻时，走 GOV-3 协议 |
-| `docs/guide/architecture.md` | 面向新读者的导览 | 架构变化时 |
+| `docs/index.md` | 标识符命名空间登记 + `§N → 文件` 唯一映射 | 开新命名空间或章节搬家时 |
+| `docs/guide/introduction.md` | [explanation] 面向用户：是什么、取向、刻意不做 | 产品形态或边界变化时 |
+| `docs/guide/architecture.md` | [explanation] 面向实现者：为什么是这个形状 | 架构变化时 |
+| `docs/guide/how-to.md` | [how-to] 怎么装、怎么配、出问题怎么办 | 安装或恢复流程变化时 |
 | `docs/governance.md` | 本文，过程规范 | 过程变化时 |
 | `docs/spec/interaction.md` | 交互与体验设计 | 用户可见行为变化时 |
 | `docs/authoring.md` | 文档撰写规范（制作规范） | 极少 |
+| `AGENTS.md` | agent 会话入口：路由 + 代码里看不出的约束，≤80 行 | 路由或不成文约束变化时（AUTH-0.5） |
 | `tools/phase0/results/*` | 实测原始记录，**只增不改** | 每次上机 |
 | `CHANGELOG.md` | 对外可见的变化 | 发布时 |
 
 ### GOV-6.2 章节编号是稳定标识符
 
-`spec/blueprint.md` 的 `§N.N` 编号被全仓库交叉引用（含 commit message 与代码注释）。**编号一旦发布就不再复用，冻结版本的正文也不再改写**：
+`spec/blueprint.md` 的 `§N.N` 编号被全仓库交叉引用（含 commit message 与代码注释）。**编号一旦发布就不再复用**——但正文可以就地改写，改的是内容不是编号（AUTH-7.2）：
 
 - 插入新内容 → 用新的子编号（`§8.5.3`、`§8.5.4`），不要重排既有编号。
 - 某节作废 → 保留编号，内容改成「已废弃，见 §X」，不要删除留空。

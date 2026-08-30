@@ -27,12 +27,13 @@
 | SK_STORAGE map 创建失败 | `BPF_MAP_CREATE` errno | `Inactive` | `"map_create:tcp_decision:EINVAL"` |
 | program verifier 拒绝 | `BPF_PROG_LOAD` errno | `Inactive`，**把 verifier log 前 N 行写进日志与 status**（§12.7 第 11 条） | `"prog_load:flx_cap_l2:EACCES"` + log 摘要 |
 | BPF load/attach 被 SELinux 拒 | `EPERM`/`EACCES` | `Inactive`，**不注入 sepolicy**（§1.3 非目标） | `"bpf_denied:check root manager policy"` |
-| `packages.list` 不可读 | `open` errno | 保持当前策略；冷启动则 `Inactive` | `"packages_list:EACCES"` |
-| 配置里的 package 不存在 | 解析后查表 miss | 整个候选配置失败，**不部分应用** | `"unknown_package:0:com.foo"` |
-| `appId` 越界 | 范围检查 | 同上 | `"app_id_out_of_range:1000"` |
+| `packages.list` 不可读 | `open` errno | 保持当前策略；冷启动则 `Inactive` | `"packages_list_unreadable"`（`fluxd check` 里带 `: <errno>`） |
+| 配置里的 package 不存在 | 解析后查表 miss | 整个候选配置失败，**不部分应用** | `"selector_invalid"` + detail 指出是哪一条 |
+| `appId` 越界 | 范围检查 | 同上 | `"selector_invalid"` + detail |
 | engine binary 缺失（module 未装全 / 测试环境） | `stat` engine 路径 | `Inactive`，不进入 §9.4 事务 | `"engine_binary_missing:<path>"` |
 | `config/sing-box.json` 缺失或不可读 | `open` errno | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
-| 用户 sing-box.json 解析/校验失败（自带 inbound、保留 tag、非对象） | `flux-core` 的 `build_effective` | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_invalid"` + 具体原因进 warnings |
+| 用户 sing-box.json 解析失败（非 UTF-8、JSONC 语法错） | `parse_jsonc` | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_config_invalid"` + 具体原因进 warnings |
+| 用户 sing-box.json 校验失败（自带 inbound、保留 tag、非对象） | `flux-core` 的 `build_effective` | 同上 | `"flux_config_invalid"` + 具体原因进 warnings |
 | `sing-box check` 失败 | 子进程退出码 + stderr | 冷启动 `Inactive`；热更新保留当前 generation | `"engine_check_failed"` + stderr 前若干行 |
 | engine 起不来 | pidfd 立即可读 | backoff 重试（1/2/4/8/30 s） | `"engine_exited:code=1"` |
 | 4 个 socket 未在 deadline 内出现 | SOCK_DIAG 退避重查超时 | 停止 candidate，`Inactive` | `"engine_not_ready:2/4 sockets"` |
@@ -98,7 +99,9 @@
   "version": "0.9.0",                // 唯一来源是 workspace manifest，随发布 bump
   "abi_magic": "0xF10C0903",
   "state": "Disabled" | "Inactive" | "Active",
+  "root_manager": "KernelSU",         // 探测到的管理器；未知时为 null
   "generation": 7,
+  "backoff_seconds": null,            // engine 正在退避重试时是剩余秒数
   "engine": {
     "running": true, "pid": 1234,
     "sockets_verified": 4,            // 期望 4；少于 4 说明 readiness 未闭环

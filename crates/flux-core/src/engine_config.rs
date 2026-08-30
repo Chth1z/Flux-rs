@@ -16,9 +16,12 @@
 //! is fully testable on any host. Running `sing-box check` is the daemon's job
 //! (blueprint §9.4); this module produces the JSON that check then validates.
 
+use serde_json::json;
 #[cfg(test)]
 use serde_json::Map;
-use serde_json::{json, Value};
+/// Re-exported because [`parse_jsonc`] returns it: without this a caller
+/// outside the crate cannot name the type it is handed.
+pub use serde_json::Value;
 
 use crate::abi::{LISTEN_V4_STR, LISTEN_V6_STR};
 

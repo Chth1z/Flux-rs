@@ -60,16 +60,21 @@ description=Transparent per-app proxying via eBPF and an unmodified official sin
 ### 27.2.1 路径与职责
 
 ```text
+/data/adb/modules/flux_rs/
+└── disable                          管理器拥有；唯一开关（§27.1.1）
+
 /data/adb/flux-rs/
-├── disable
 ├── config/
 │   ├── flux.toml
 │   └── sing-box.json
+├── fluxd.log
 └── run/
     ├── daemon.lock
     ├── control.sock
     └── effective-sing-box.<generation>.json
 ```
+
+**状态根下没有 `disable`。** 开关只有一个，在模块目录里，由 root 管理器创建和删除。
 
 - `config/flux.toml`：选择 app 与 CIDR bypass；
 - `config/sing-box.json`：用户拥有的完整官方 sing-box 配置；
@@ -107,9 +112,9 @@ bypass_cidrs = [
 | 约束 | 为什么 |
 |---|---|
 | 无 `inbounds` | Flux 运行时注入两个 tproxy inbound，模板 inbound 会与之抢监听 |
-| 无 `experimental.clash_api` | 默认值不开控制端口；见 §2.4 |
+| 无 `experimental.clash_api` | 默认值不开控制端口；用户自己开的规矩见 §27.2.4 |
 | 每个 selector/urltest 至少一个成员 | 空 selector 无法解析，用户还没编辑就会 `check` 失败 |
-| fakeip 的 v6 段避开 `fc00::/7` | Flux 固定 bypass 整个 ULA，落在里面的 fakeip 会被直连，IPv6 fakeip 静默全废 |
+| fakeip 段避开固定 bypass | Flux 无条件 bypass 整个 ULA `fc00::/7`，落在里面的 fakeip 会被直连，IPv6 fakeip 静默全废。按解析后的前缀与 `flux_core::cidr::fixed_bypass` 求包含关系判定，不按字符串前缀——`fd00::/8` 与 `FD00::/8` 必须都被拒绝 |
 
 模板里没有任何服务器、订阅或凭据：`PROXY` 起手只指向 `DIRECT`。用户随后把它替换为自己的完整 sing-box JSON。Flux 不替用户生成节点、规则组或订阅内容。
 

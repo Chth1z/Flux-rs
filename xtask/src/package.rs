@@ -753,8 +753,73 @@ fn validate_default_template_shape(template: &str) -> Result<(), String> {
     if !flux_core::engine_config::has_dns_hijack_rule(&user) {
         return Err("module/template.json has no hijack-dns route rule".into());
     }
+    validate_fakeip_outside_fixed_bypass(&user)?;
 
     Ok(())
+}
+
+/// A fakeip range must not land inside a prefix Flux bypasses unconditionally.
+///
+/// Overlap is silent and total: every fakeip address would be routed direct, so
+/// IPv6 fakeip stops working with nothing logged. The v6 range is the one that
+/// bites, because `fc00::/7` is a fixed bypass and `fd00::/8` is the obvious
+/// place to put a private range.
+///
+/// This compares parsed prefixes against `flux_core::cidr::fixed_bypass`. The
+/// string test it replaced — reject anything starting `fc` or `fd` — matched
+/// the right addresses for the wrong reason and missed uppercase entirely.
+fn validate_fakeip_outside_fixed_bypass(
+    user: &flux_core::engine_config::Value,
+) -> Result<(), String> {
+    use flux_core::cidr::{fixed_bypass, Ipv4Cidr, Ipv6Cidr};
+    use flux_core::engine_config::Value;
+    let (bypass_v4, bypass_v6) = fixed_bypass();
+
+    for fakeip in fakeip_sources(user) {
+        if let Some(range) = fakeip.get("inet6_range").and_then(Value::as_str) {
+            let parsed = Ipv6Cidr::parse(range)
+                .map_err(|e| format!("module/template.json fakeip inet6_range `{range}`: {e:?}"))?;
+            if let Some(hit) = bypass_v6.iter().find(|b| b.contains_prefix(&parsed)) {
+                return Err(format!(
+                    "module/template.json fakeip inet6_range {range} lies inside the fixed \
+                     bypass {hit}; every fakeip address would be routed direct"
+                ));
+            }
+        }
+        if let Some(range) = fakeip.get("inet4_range").and_then(Value::as_str) {
+            let parsed = Ipv4Cidr::parse(range)
+                .map_err(|e| format!("module/template.json fakeip inet4_range `{range}`: {e:?}"))?;
+            if let Some(hit) = bypass_v4.iter().find(|b| b.contains_prefix(&parsed)) {
+                return Err(format!(
+                    "module/template.json fakeip inet4_range {range} lies inside the fixed \
+                     bypass {hit}; every fakeip address would be routed direct"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every object in the config that carries fakeip ranges.
+///
+/// sing-box 1.12 moved fakeip from a `dns.fakeip` object to a `dns.servers`
+/// entry of `type: "fakeip"`. Both shapes are accepted here because a user
+/// config may still carry the old one, and reading only the modern path is how
+/// the first version of this check silently passed everything.
+fn fakeip_sources(user: &flux_core::engine_config::Value) -> Vec<&flux_core::engine_config::Value> {
+    use flux_core::engine_config::Value;
+    let mut found = Vec::new();
+    if let Some(legacy) = user.pointer("/dns/fakeip") {
+        found.push(legacy);
+    }
+    if let Some(servers) = user.pointer("/dns/servers").and_then(Value::as_array) {
+        found.extend(
+            servers
+                .iter()
+                .filter(|s| s.get("type").and_then(Value::as_str) == Some("fakeip")),
+        );
+    }
+    found
 }
 
 pub fn template_check() -> Result<(), String> {
@@ -859,6 +924,33 @@ mod tests {
         let root = util::repo_root();
         let template = util::read_text(&root.join("module/template.json")).unwrap();
         validate_default_template_shape(&template).unwrap();
+    }
+
+    /// The shipped template with its fakeip v6 range swapped for `replacement`.
+    fn template_with_fakeip_v6(replacement: &str) -> String {
+        let root = util::repo_root();
+        let template = util::read_text(&root.join("module/template.json")).unwrap();
+        let swapped = template.replace("2001:db8:f::/48", replacement);
+        assert_ne!(swapped, template, "the template moved; update this test");
+        swapped
+    }
+
+    #[test]
+    fn fakeip_inside_the_fixed_bypass_is_rejected() {
+        // fc00::/7 is bypassed unconditionally, so a fakeip range inside it
+        // would be routed direct with nothing logged.
+        let error = validate_default_template_shape(&template_with_fakeip_v6("fd00::/8"))
+            .expect_err("a fakeip range inside fc00::/7 must not pass");
+        assert!(error.contains("fixed bypass"), "{error}");
+    }
+
+    #[test]
+    fn a_non_canonical_fakeip_range_is_rejected_rather_than_ignored() {
+        // The string test this replaced looked for a lowercase `fc`/`fd`
+        // prefix, so uppercase walked straight past it.
+        let error = validate_default_template_shape(&template_with_fakeip_v6("FD00::/8"))
+            .expect_err("uppercase must not be a way around the check");
+        assert!(error.contains("inet6_range"), "{error}");
     }
 
     #[test]

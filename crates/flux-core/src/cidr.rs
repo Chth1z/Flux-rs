@@ -125,6 +125,15 @@ impl Ipv4Cidr {
             addr: self.addr.octets(),
         }
     }
+
+    /// Whether every address in `other` is also in `self`.
+    ///
+    /// A shorter prefix cannot be contained in a longer one however the bits
+    /// line up, so the length test comes first.
+    pub fn contains_prefix(self, other: &Self) -> bool {
+        other.prefix_len >= self.prefix_len
+            && u32::from(other.addr) & mask32(self.prefix_len) == u32::from(self.addr)
+    }
 }
 
 impl std::fmt::Display for Ipv4Cidr {
@@ -160,6 +169,13 @@ impl Ipv6Cidr {
             prefixlen: u32::from(self.prefix_len),
             addr: self.addr.octets(),
         }
+    }
+
+    /// Whether every address in `other` is also in `self`. See
+    /// [`Ipv4Cidr::contains_prefix`].
+    pub fn contains_prefix(self, other: &Self) -> bool {
+        other.prefix_len >= self.prefix_len
+            && u128::from(other.addr) & mask128(self.prefix_len) == u128::from(self.addr)
     }
 }
 
