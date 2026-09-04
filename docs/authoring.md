@@ -214,6 +214,7 @@ docs/
     introduction.md                    [explanation] 面向用户：是什么、取向、老实话、刻意不做
     architecture.md                    [explanation] 面向实现者：为什么是这个形状
     how-to.md                          [how-to] 怎么装、怎么配、出问题怎么办
+    dev-setup.md                       [how-to] 面向维护者：从零搭一台能跑全部门禁的开发机
   history/                           [记录] 只增不改
     review-log.md                      §0 独立复核记录 + D 状态登记 + 更正对照表
     phase0.md                          §16 Phase 0 十问 + 实测 + 外推分层

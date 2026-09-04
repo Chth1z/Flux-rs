@@ -25,7 +25,8 @@
 | 实现某个模块 | `spec/blueprint.md`，从头读到尾。它是完整合同，不需要再叠任何东西 |
 | 了解技术架构 | `guide/architecture.md` |
 | 怎么装、怎么配、出问题怎么办 | `guide/how-to.md` |
-| 上机跑测试 | `history/phase0.md` + `../tools/phase0/README.md` |
+| 新机器上把全部门禁跑起来 | `guide/dev-setup.md` |
+| 上机跑测试 | `history/phase0.md` + `../tools/phase0/README.md`；0.9.5 的整张回归表在 `plan/device-regression-0.9.5.md` |
 | 查一个错误码的含义 | `spec/failures.md` |
 | 改用户看得见的东西 | `spec/interaction.md`（§27） |
 | 质疑某条断言的依据 | `history/review-log.md` |
