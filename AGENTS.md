@@ -44,8 +44,9 @@ is wrong?**
 - **`scratch/` holds real subscription credentials.** It is gitignored. Never
   stage it, never quote its contents into a document.
 - **`§` belongs to the blueprint alone.** Other documents use `PHIL-`, `GOV-`,
-  `AUTH-`. Section numbers are never reused or renumbered: 318 of them are
-  cited from code across 39 files under `crates bpf module xtask`.
+  `AUTH-`. Section numbers are never reused or renumbered: hundreds of them
+  are cited from code under `crates bpf module xtask` (`rg '§' crates bpf
+  module xtask` counts the current number).
 - **`git commit -F <file>`**, because PowerShell has no heredoc.
 
 ## Gates
@@ -63,4 +64,7 @@ and `cargo test --workspace`; the Phase 3–8 suites run on a device. A Windows
 pass never substitutes for either (`docs/spec/blueprint.md` §15.1).
 
 To type-check the Linux-only data plane from Windows:
-`cargo clippy -p fluxd --target aarch64-linux-android --all-targets`.
+`cargo clippy -p fluxd --target aarch64-linux-android --all-targets`. Since
+`ureq` brought `ring`, this needs an NDK clang on `PATH`; this host has none,
+so run it in WSL (NDK 27.3 under `~/Android/Sdk/ndk`), where the two Linux CI
+gates above can run too. Use a `CARGO_TARGET_DIR` under `/tmp`, not `target/`.
