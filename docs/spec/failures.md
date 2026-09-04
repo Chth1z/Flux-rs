@@ -116,6 +116,11 @@ Every possible failure point specifies **how it is detected, what action is take
     "bypass_v4": 12, "bypass_v6": 6,  // RESERVED + POLICY prefixes; local addresses are separate
     "self_addresses": 4               // Total dynamic local addresses in the two exact HASH maps
   },
+  "ssid": {                            // The [ssid] dimension of §29; null when its list is empty
+    "connected": true,                 // A station interface has a BSS; null when nl80211 could not be read
+    "paused": false,                   // The dimension is holding Flux Inactive (§29.5)
+    "matched_entry": null              // 1-based position in the expanded list of the entry that caused a pause
+  },                                   // The SSID itself never appears here (§29.5)
   "ifaces": [
     { "name": "wlan0", "ifindex": 24, "arphrd": "ether",
       "entry": "flx_cap_l2", "status": "active",
@@ -177,6 +182,8 @@ Four prefix classes support routing:
 | Captured :53 traffic has `sk_uid == 1051` | `"enforce_dns_uid appears enabled; system DNS is not per-app attributable on this device"` (boundary ②) |
 | The user set outbound `routing_mark` / `bind_interface` | `"user-set outbound routing_mark/bind_interface: Android network consequences are yours"` |
 | Flux did not create `clsact` | `"clsact on wlan0 pre-existed; it will never be deleted by Flux"` |
+| `[ssid]` has entries but `nl80211` is unavailable or the interface dump failed | `"ssid_unreadable: Wi-Fi state cannot be read; the [ssid] list is not applied"` (§29.5 — activation is not blocked) |
+| The `[ssid]` dimension is holding Flux inactive | `"ssid_paused: the connected Wi-Fi network is excluded by [ssid]; Flux resumes when it changes"` |
 
 ## 24.4 Hints that MUST be produced: turning counter combinations into hypotheses
 

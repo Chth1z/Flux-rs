@@ -2542,7 +2542,7 @@ There are exactly three top-level states:
 | State | Meaning |
 |---|---|
 | `Disabled` | the `disable` file exists — the only switch, C9, §27.1. No engine is started and no data plane is created or activated. |
-| `Inactive` | the `disable` file is absent, but Flux is starting or restarting, or is blocked by a definite error. control `active == 0`. |
+| `Inactive` | the `disable` file is absent, but Flux is starting or restarting, is blocked by a definite error, or is paused by the `[ssid]` dimension (§29.5). control `active == 0`. |
 | `Active` | control `active == 1`, **and at least one interface has passed the liveness verification of §8.5.4**. An `active` flag with no reachable capture interface is not Active; it is Inactive with a reason. |
 
 An invalid hot candidate **keeps the current `Active` generation** and attaches the candidate error to it. It MUST NOT create a fourth persistent state — a state that exists only to describe a failed attempt is a state every transition afterwards has to account for. A daemon restart re-evaluates from the authority files alone.
@@ -2656,6 +2656,8 @@ One thread, one epoll. The sources:
 | control socket | CLI requests |
 | timerfd | configuration debounce, readiness backoff, the 1/2/4/8/30 s crash backoff, and the subscription refresh of §29.3 |
 | child stdout pipe | output of `sing-box check`, **non-blocking**, with a deadline |
+| eventfd | completion of a subscription fetch on its worker thread (§28.3); the reactor never blocks on the network |
+| generic netlink (`nl80211`, multicast group `mlme`) | Wi-Fi connect, roam and disconnect for the SSID dimension of §29. Each event is a trigger to re-read `NL80211_CMD_GET_INTERFACE` through the debounce, never a value acted on directly (§29.2). Opened only while `[ssid]` has entries |
 
 **No per-second polling, no busy loop, no BPF timer, no periodic counter sampling, no heartbeat.** §29.3 records the one deliberate exception and why a one-shot timer is not polling. Backoff resets once a child has been stable for 60 s, and recovery continues at a low rate for as long as the switch is on: there is **no "failed N times, locked out permanently"** state, because a user who fixes the cause deserves the next attempt to succeed.
 
@@ -3338,6 +3340,7 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
 | inotify: `flux.toml` changed | update the validation result only | attempt activation again | policy transaction, add then subtract |
 | inotify: `template.json` or a `@file` list changed | update the validation result only | attempt activation again | regenerate (§28.2), then the engine candidate switch |
 | inotify: `packages.list` changed | ignore | re-parse | re-parse, then a policy transaction |
+| nl80211: connect, roam or disconnect | ignore | re-read the SSID set (§29.2); if it no longer pauses, attempt activation | re-read the SSID set; if it now pauses, publish `active=0`, stop the engine, go Inactive (§29.5); otherwise no action |
 | pidfd: engine exited | should not occur | record, restart with backoff | publish `active=0`, restart with backoff, new generation |
 | ringbuf: current-generation fault | should not occur | clear the latch | publish `active=0`, restart the generation |
 | ringbuf: old-generation or duplicate fault | ignore | ignore | **clear the latch and ignore** — the handler is idempotent per generation |
@@ -3611,6 +3614,22 @@ the same `@file` reference and the same meaning for an empty list. A user who
 has understood one of them has understood all four, which is the point of
 spending a fourth dimension on the same shape rather than inventing a switch.
 
+An entry matches a connected station interface's SSID **byte for byte**, the
+entry taken as UTF-8 — no wildcards, no case folding. A Wi-Fi name is an
+identifier the user copies from the phone's own settings, not a pattern, and a
+pattern language would turn one stray character into a silent non-match. Only
+`NL80211_IFTYPE_STATION` interfaces count: a P2P client or an access point the
+phone is hosting is not "the network the user is on". With several connected
+station interfaces, the dimension considers the set of their SSIDs.
+
+| `mode` | Flux pauses when |
+|---|---|
+| `blacklist` | some connected SSID is in the list |
+| `whitelist` | Wi-Fi is connected and no connected SSID is in the list |
+
+Neither mode pauses when no Wi-Fi is connected (§29.5): the dimension speaks
+only about Wi-Fi networks, so on cellular it has nothing to say.
+
 ## 29.2 SSID comes from nl80211, never from binder
 
 Flux MUST read the SSID over generic netlink (`NL80211_CMD_GET_INTERFACE`). It
@@ -3625,6 +3644,33 @@ reference implementation** rather than merely equivalent to it.
 
 SSID changes are themselves events: the `NL80211_CMD_CONNECT` and
 `NL80211_CMD_DISCONNECT` multicast groups. Nothing here polls.
+
+**How the family is reached.** Generic netlink families have no fixed id, so
+Flux resolves `nl80211` once at start through the controller family
+(`GENL_ID_CTRL`, `CTRL_CMD_GETFAMILY` with `CTRL_ATTR_FAMILY_NAME`), whose reply
+carries the family id and, under `CTRL_ATTR_MCAST_GROUPS`, the id of the `mlme`
+multicast group (Verified: `clone/kernel-src/v5.15/include/uapi/linux/genetlink.h`;
+`NL80211_MULTICAST_GROUP_MLME` in `nl80211.h:50`). Flux joins that group
+**before** the first dump, for the reason §10.4.1 gives for rtnetlink. A kernel
+without cfg80211 answers the resolution with `ENOENT`, and the dimension is then
+inert (§29.5).
+
+**What the dump says.** `NL80211_CMD_GET_INTERFACE` with `NLM_F_DUMP` answers
+one `NL80211_CMD_NEW_INTERFACE` per wireless interface, carrying
+`NL80211_ATTR_IFINDEX`, `NL80211_ATTR_IFTYPE` and — for a station, P2P-client or
+ad-hoc interface that has a current BSS — `NL80211_ATTR_SSID`, taken from that
+BSS's SSID element (Verified: `clone/kernel-src/v5.15/net/wireless/nl80211.c:3612-3633`,
+`nl80211_send_iface`). An interface without the attribute is not associated.
+Attribute parsing follows the allowlist discipline of §8.5: an unknown attribute
+is skipped, a malformed message fails the dump, and a failed dump is
+`ssid_unreadable`, never "no Wi-Fi".
+
+**Events are triggers, not values.** `NL80211_CMD_CONNECT`, `ROAM`,
+`DISCONNECT`, `DEAUTHENTICATE` and `DISASSOCIATE` arrive on `mlme`. Each one
+schedules a fresh dump through the existing debounce, exactly as an rtnetlink
+event does (§10.4.1); the SSID is never read out of the event itself, which
+would mean two parsers for one fact and a decision taken on a message that may
+already be stale.
 
 ## 29.3 A one-shot timer is not polling
 
@@ -3660,11 +3706,32 @@ event Flux is already subscribed to.
   MUST warn, and MUST NOT block activation. An unreadable SSID is a diagnosable
   failure, not a reason to refuse to run (§23, PHIL-6).
 
+**What "does not activate" is.** A paused Flux does exactly what the module
+switch does when it is turned off (§26, `disable` row): publish `active=0`, stop
+the engine, keep every kernel object, keep waiting for events. It differs in one
+thing only — the switch is on, so the top-level state is `Inactive`, and `status`
+says why through the `ssid` object of §24.1. The moment the SSID set stops
+matching, the ordinary activation of §8.7 runs again from the authority files;
+nothing is remembered across a pause. This reuses one transition rather than
+adding a fourth state, which §26 forbids.
+
+**The SSID never leaves the daemon.** It appears in no `status` field, no
+`module.prop` line, no log line and therefore no bug report. `status` reports
+`ssid.connected`, `ssid.paused` and, when a pause is caused by one list entry,
+that entry's position in the expanded list — enough to diagnose, because the
+user can see the network name on the phone itself. A network name is location
+history, and no diagnostic here needs it.
+
+When `[ssid]` is empty the dimension does nothing, reads nothing and subscribes
+to nothing; an empty list MUST cost no generic netlink traffic.
+
 ## 29.6 What the existing event sources already cover
 
-Flux has six event sources on one epoll: signalfd, inotify, rtnetlink, pidfd,
-ringbuf and timerfd. The automation below adds **no new mechanism** — each item
-connects an event already being watched to a behaviour the user can observe.
+Flux's event sources all sit on one epoll: signalfd, inotify, rtnetlink, generic
+netlink for `nl80211`, pidfd, ringbuf, timerfd, the control socket and the
+subscription worker's eventfd (§10.4). The automation below adds **no new
+mechanism** — each item connects an event already being watched to a behaviour
+the user can observe.
 
 | Automation | Event source |
 |---|---|
@@ -3674,6 +3741,7 @@ connects an event already being watched to a behaviour the user can observe.
 | Scheduled subscription refresh | timerfd (§29.3) |
 | Interfaces appearing or disappearing are taken over or dropped | rtnetlink |
 | Local address changes are injected into the bypass set | rtnetlink |
+| Pausing on a listed Wi-Fi network, resuming when it is left | generic netlink `mlme` events (§29.2) |
 
 ### 29.6.1 Two automations that are deliberately absent
 

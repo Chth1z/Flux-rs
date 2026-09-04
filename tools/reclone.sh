@@ -92,7 +92,9 @@ Three directories are not git repositories and are not handled above:
 
   kernel-src/              per-version kernel sources, fetched from
                            raw.githubusercontent.com/torvalds/linux/<tag>/...
-                           Subdirectories: v5.10 v6.1 v6.6 v6.12
+                           Subdirectories: v5.10 v5.15 v6.1 v6.6 v6.12
+                           (v5.15 holds net/wireless/nl80211.c and the
+                           nl80211.h / genetlink.h UAPI headers, cited by §29)
   gki/                     arm64 gki_defconfig from the four GKI branches at
                            android.googlesource.com/kernel/common
   mihomo-ebpf-historical/  the eBPF component mihomo later removed, taken

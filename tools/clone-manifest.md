@@ -38,7 +38,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `kernel-src/` | `raw.githubusercontent.com/torvalds/linux/<tag>/...` 下的相关内核源文件，按 `v5.10` / `v6.1` / `v6.6` / `v6.12` 分目录。**引用内核源必须带版本**，因为语义会变 |
+| `kernel-src/` | `raw.githubusercontent.com/torvalds/linux/<tag>/...` 下的相关内核源文件，按 `v5.10` / `v5.15` / `v6.1` / `v6.6` / `v6.12` 分目录。**引用内核源必须带版本**，因为语义会变。`v5.15` 只有 `net/wireless/nl80211.c` 与 `include/uapi/linux/{nl80211,genetlink}.h`，供 §29 的 SSID 读取引用 |
 | `gki/` | 四个 GKI 分支的 arm64 `gki_defconfig`（`android12-5.10` / `android13-5.15` / `android14-6.1` / `android15-6.6`） |
 | `mihomo-ebpf-historical/` | mihomo 后来移除的 eBPF 组件，从历史 commit 取出 |
 
@@ -54,7 +54,7 @@
 | `asteriskd`、`bpf2socks` | 加载器加固清单；TC 槽位冲突的"fail closed"对照；legacy map 定义的适用边界 |
 | `Vector`、`NeoZygisk` | 发布工程与社区流程的研究样本；当前只采纳 GOV-7.1 与 §13 列出的最小路径，其余仍是候选 |
 | `Flux-original` | 订阅转换与节点精修的领域知识（URI 列表 → outbound、机场公告条目过滤、按地区分组）。**订阅已进入 0.9.5 范围**（C11，所有者 2026-08-30 确认），规范见 §28，本仓库是它的主要参考源 |
-| `kernel-src`、`gki` | §4 的内核机制清单与 config 核对 |
+| `kernel-src`、`gki` | §4 的内核机制清单与 config 核对；`v5.15/net/wireless/nl80211.c` 证实 `NL80211_CMD_GET_INTERFACE` 对已关联的 STATION 接口带 `NL80211_ATTR_SSID`（§29.2） |
 | `mihomo`、`tun2socks`、`hev-socks5-tunnel` | 反例：确认它们是 TUN/用户态栈方案，**没有 eBPF 数据面**，不必在那里花时间 |
 
 ## 引用规矩

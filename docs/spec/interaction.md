@@ -48,6 +48,7 @@ description=Per-app proxy: the apps you pick go through sing-box, everything els
 | Active | `🥰 [Active] gen N · X apps · <active interfaces>` |
 | Inactive, with a concrete error | `🤯 [Inactive] <stable error token>` |
 | Inactive, converging | `🤔 [Inactive] converging` |
+| Inactive, paused by `[ssid]` on the current Wi-Fi network (§29.5) | `😴 [Inactive] paused on this Wi-Fi network` — never the network's name |
 | Disabled, engine stopped | `😴 [Disabled] toggle this module on to enable Flux` |
 | Disabled, engine still terminating | `😴 [Disabled] stopping` |
 
@@ -220,6 +221,7 @@ Human-readable output MUST include at least:
 - engine PID, readiness of the 4 sockets, and effective file;
 - selected/draining/bypass/self-address counts;
 - one line per candidate interface: name, active/excluded, entry, actual pref, reachability, and stable reason;
+- when `[ssid]` has entries: whether Wi-Fi is connected and whether the dimension is pausing Flux, without the network's name (§29.5);
 - current counters, warnings, hints, and the first concrete error.
 
 `Active` requires the engine generation to be committed, `control.active=1`, and at least one physical capture interface to be active. When the last active interface disappears, the top-level state becomes `Inactive`; if only part of the coverage is lost, it remains `Active` and explains the loss in per-interface status.
