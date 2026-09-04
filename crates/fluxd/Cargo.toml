@@ -52,6 +52,7 @@ serde_json = { workspace = true }
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = { workspace = true }
 ureq = { workspace = true }
+rustls = { workspace = true }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"

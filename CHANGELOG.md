@@ -126,6 +126,15 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The CLI is the only client, so no compatibility shim was kept.
 - The listener addresses and the fixed bypass set are derived from one ABI
   constant instead of being written out in two files.
+- A failed subscription fetch names its cause in `last_error` —
+  `subscription_fetch_failed:dns`, `:tls`, `:http`, `:timeout`, `:connect` and
+  so on — instead of one undifferentiated `:request`. The subscription URL,
+  which carries the provider token, is never echoed.
+- ureq is built with `rustls-no-provider` and the `ring` provider is installed
+  explicitly, so the Mozilla root store (`webpki-roots`) is no longer compiled
+  into a binary that only ever trusts the device's own certificate directories.
+  `deny.toml` now allows ISC and BSD-3-Clause, which the rustls stack requires;
+  `base64` matches ureq's 0.22 so the binary carries one copy.
 
 ### Removed
 

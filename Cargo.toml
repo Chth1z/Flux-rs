@@ -15,8 +15,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 libc = "0.2"
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-base64 = "0.23"
+# `rustls-no-provider` rather than `rustls`: the latter also bundles
+# webpki-roots, a Mozilla root store Flux never consults — it reads the
+# device's own certificate directories and refuses to fall back (§28.3). The
+# crypto provider ureq would otherwise pick implicitly is named explicitly below.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# 0.22 is what ureq depends on; matching it keeps one copy in the binary.
+base64 = "0.22"
 url = "2"
 regex-lite = "0.1"
 

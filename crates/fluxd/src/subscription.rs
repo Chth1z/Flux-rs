@@ -114,7 +114,19 @@ impl Worker {
     }
 }
 
+/// ureq is built with `rustls-no-provider`, so the crypto provider is a choice
+/// made here rather than a feature flag's side effect. Installing it as the
+/// process default is what ureq consults; a second install attempt only
+/// reports that one is already in place, which is the state we want.
+fn ensure_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _already_installed = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 fn fetch(request: FetchRequest) -> Result<Vec<u8>, FetchError> {
+    ensure_crypto_provider();
     let certs = load_android_roots()?;
     let tls = TlsConfig::builder()
         .root_certs(RootCerts::new_with_certs(&certs))
@@ -144,11 +156,35 @@ fn fetch(request: FetchRequest) -> Result<Vec<u8>, FetchError> {
     })
 }
 
+/// Names the cause of a failed request (§23.1: `subscription_fetch_failed:<reason>`
+/// distinguishes DNS, TLS, HTTP status and timeout) without echoing the URL,
+/// which carries the provider token. ureq's own `Display` is safe for every
+/// variant kept here; `BadUri` is the one that would repeat the URL, so it is
+/// described rather than printed.
+fn classify(error: &ureq::Error) -> (&'static str, String) {
+    match error {
+        ureq::Error::StatusCode(code) => ("http", format!("HTTP status {code}")),
+        ureq::Error::HostNotFound => ("dns", "host name did not resolve".to_string()),
+        ureq::Error::Timeout(phase) => ("timeout", format!("timed out during {phase}")),
+        ureq::Error::ConnectionFailed => ("connect", "connection failed".to_string()),
+        ureq::Error::Rustls(inner) => ("tls", format!("TLS handshake failed: {inner}")),
+        ureq::Error::Tls(inner) => ("tls", format!("TLS failed: {inner}")),
+        ureq::Error::Pem(inner) => ("tls", format!("root certificate PEM: {inner:?}")),
+        ureq::Error::Io(inner) => ("io", format!("I/O error: {inner}")),
+        ureq::Error::BadUri(_) => ("url", "the subscription URL is malformed".to_string()),
+        ureq::Error::RequireHttpsOnly(_) => {
+            ("url", "the subscription URL is not https".to_string())
+        }
+        ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => {
+            ("redirect", format!("{error}"))
+        }
+        ureq::Error::BodyExceedsLimit(_) => ("too_large", format!("{error}")),
+        other => ("request", format!("{other}")),
+    }
+}
+
 fn fetch_once(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, (&'static str, String)> {
-    let mut response = agent
-        .get(url)
-        .call()
-        .map_err(|_| ("request", "subscription request failed".to_string()))?;
+    let mut response = agent.get(url).call().map_err(|error| classify(&error))?;
     let bytes = response
         .body_mut()
         .with_config()

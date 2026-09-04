@@ -5,7 +5,7 @@
 # the Magisk parser requires LF line endings (docs/blueprint.md §13.2.0).
 *.sh text eol=lf
 *.prop text eol=lf
-module/* text eol=lf
+module/** text eol=lf
 
 # BPF source and the shared ABI header are consumed by clang on Linux.
 bpf/**/*.c text eol=lf

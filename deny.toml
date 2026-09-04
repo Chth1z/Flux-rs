@@ -11,10 +11,17 @@ unused-ignored-advisory = "deny"
 # Every allowance below must be exercised by an actual dependency
 # (unused-allowed-license = "deny"), so this list IS the license inventory of
 # the tree. Extend it only together with the dependency that needs it.
+#
+# ISC and BSD-3-Clause arrived with the subscription transport (owner-approved
+# ureq + rustls, 2026-08-30): ring is `Apache-2.0 AND ISC`, rustls-webpki and
+# untrusted are ISC, subtle is BSD-3-Clause. None of them is avoidable inside
+# that stack.
 [licenses]
 allow = [
   "Apache-2.0",
+  "BSD-3-Clause",
   "GPL-3.0-only",
+  "ISC",
   "MIT",
   "Unicode-3.0",
 ]

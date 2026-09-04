@@ -34,11 +34,17 @@ BTF blob by hand (`docs/spec/blueprint.md` D10).
 Resolved by Cargo and audited in CI by `cargo deny` against `deny.toml`. Run
 `cargo deny list` for the current set with licenses.
 
-The subscription pipeline has four direct Rust dependencies:
+The subscription pipeline has five direct Rust dependencies:
 
-- `ureq` 3 — blocking HTTP and rustls TLS; upstream
+- `ureq` 3 — blocking HTTP over rustls, built with `rustls-no-provider` so that
+  no bundled root store is compiled in (Flux reads the device's own); upstream
   <https://github.com/algesten/ureq>; MIT OR Apache-2.0.
-- `base64` 0.23 — provider and URI payload decoding; upstream
+- `rustls` 0.23 — the TLS implementation ureq drives, with the `ring` crypto
+  provider named explicitly; upstream <https://github.com/rustls/rustls>;
+  Apache-2.0 OR ISC OR MIT. Its own tree brings `ring` (Apache-2.0 AND ISC),
+  `rustls-webpki` and `untrusted` (ISC) and `subtle` (BSD-3-Clause), which is
+  why `deny.toml` allows ISC and BSD-3-Clause.
+- `base64` 0.22 — provider and URI payload decoding; upstream
   <https://github.com/marshallpierce/rust-base64>; MIT OR Apache-2.0.
 - `url` 2 — standards-based URL and percent decoding; upstream
   <https://github.com/servo/rust-url>; MIT OR Apache-2.0.
