@@ -43,6 +43,7 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod tests {
+    use std::collections::BTreeSet;
     use std::io::Read;
     use std::net::Ipv4Addr;
     use std::os::unix::process::CommandExt;
@@ -185,6 +186,20 @@ mod tests {
         };
 
         assert_eq!(response.state, State::Inactive, "no data plane => Inactive");
+        assert_eq!(
+            response.ssid, None,
+            "an empty [ssid] list must serialize status.ssid as null"
+        );
+        let (status_code, status_json, status_stderr) = env.run(&["status", "--json"]);
+        assert_eq!(status_code, 0, "status JSON: {status_stderr}");
+        let status_value: serde_json::Value =
+            serde_json::from_str(status_json.trim()).expect("status JSON value");
+        assert_eq!(
+            status_value.get("ssid"),
+            Some(&serde_json::Value::Null),
+            "status.ssid must be present and null when the list is empty"
+        );
+        assert_no_netlink_generic(reactor_pid(env));
         assert!(
             response
                 .warnings
@@ -667,6 +682,36 @@ mod tests {
 
     fn reactor_pid(env: &Env) -> u32 {
         try_reactor_pid(env).expect("run/daemon.lock contains the reactor pid")
+    }
+
+    fn assert_no_netlink_generic(pid: u32) {
+        let fd_dir = format!("/proc/{pid}/fd");
+        let socket_inodes: BTreeSet<u64> = std::fs::read_dir(&fd_dir)
+            .unwrap_or_else(|error| panic!("read {fd_dir}: {error}"))
+            .flatten()
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter_map(|target| {
+                let target = target.to_string_lossy();
+                target
+                    .strip_prefix("socket:[")
+                    .and_then(|inode| inode.strip_suffix(']'))
+                    .and_then(|inode| inode.parse().ok())
+            })
+            .collect();
+        let table_path = format!("/proc/{pid}/net/netlink");
+        let table = std::fs::read_to_string(&table_path)
+            .unwrap_or_else(|error| panic!("read {table_path}: {error}"));
+        let owns_generic = table.lines().skip(1).any(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let protocol = fields.get(1).and_then(|value| value.parse::<i32>().ok());
+            let inode = fields.last().and_then(|value| value.parse::<u64>().ok());
+            protocol == Some(libc::NETLINK_GENERIC)
+                && inode.is_some_and(|inode| socket_inodes.contains(&inode))
+        });
+        assert!(
+            !owns_generic,
+            "empty [ssid] must open no NETLINK_GENERIC socket in reactor {pid}"
+        );
     }
 
     fn try_reactor_pid(env: &Env) -> Option<u32> {

@@ -23,6 +23,7 @@ pub mod config;
 pub mod control_wire;
 pub mod engine_config;
 pub mod selector;
+pub mod ssid;
 pub mod subscription;
 pub mod version;
 

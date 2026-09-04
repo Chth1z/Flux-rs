@@ -213,9 +213,9 @@ pub struct FluxConfig {
     pub interfaces_mode: ListMode,
     /// Exact interface names.
     pub interfaces: Vec<String>,
-    /// Direction of the SSID list. Batch D consumes it.
+    /// Direction of the conditional-activation SSID list (§29.1).
     pub ssid_mode: ListMode,
-    /// Exact SSIDs. Batch D consumes them.
+    /// Exact SSIDs compared byte-for-byte by the daemon (§29.1).
     pub ssids: Vec<String>,
     /// Subscription parameters. Batch C consumes them.
     pub subscription: SubscriptionConfig,

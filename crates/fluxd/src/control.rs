@@ -381,6 +381,7 @@ mod tests {
                 effective_config: None,
             },
             policy: PolicyCounts::default(),
+            ssid: None,
             ifaces: vec![],
             counters: Counters::default(),
             sysctl: Default::default(),

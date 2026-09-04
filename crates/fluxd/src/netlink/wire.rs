@@ -1,6 +1,10 @@
 use std::io;
-use std::mem::{size_of, MaybeUninit};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::mem::size_of;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::mem::MaybeUninit;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 pub(crate) const NLMSG_NOOP: u16 = 1;
 pub(crate) const NLMSG_ERROR: u16 = 2;
@@ -106,6 +110,8 @@ pub(crate) struct TcMsg {
 #[derive(Debug, Clone)]
 pub(crate) struct RawMessage {
     pub kind: u16,
+    pub seq: u32,
+    pub pid: u32,
     pub payload: Vec<u8>,
 }
 
@@ -264,6 +270,18 @@ pub(crate) fn attr_u32(attr: Attr<'_>) -> io::Result<u32> {
     ))
 }
 
+pub(crate) fn attr_u16(attr: Attr<'_>) -> io::Result<u16> {
+    if attr.payload.len() != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "netlink u16 attribute has the wrong size",
+        ));
+    }
+    Ok(u16::from_ne_bytes(
+        attr.payload.try_into().expect("size checked"),
+    ))
+}
+
 pub(crate) fn attr_cstr(attr: Attr<'_>) -> io::Result<String> {
     let Some((&0, text)) = attr.payload.split_last() else {
         return Err(io::Error::new(
@@ -282,6 +300,7 @@ pub(crate) fn attr_cstr(attr: Attr<'_>) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "netlink string is not UTF-8"))
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn netlink_address(pid: u32, groups: u32) -> libc::sockaddr_nl {
     // sockaddr_nl contains a libc-private padding field on some targets, so it
     // must be zero-initialized rather than constructed with a literal.
@@ -293,14 +312,19 @@ fn netlink_address(pid: u32, groups: u32) -> libc::sockaddr_nl {
     address
 }
 
-fn open_socket(groups: u32, nonblocking: bool) -> io::Result<(OwnedFd, u32)> {
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_socket(
+    protocol: libc::c_int,
+    groups: u32,
+    nonblocking: bool,
+) -> io::Result<(OwnedFd, u32)> {
     let mut kind = libc::SOCK_RAW | libc::SOCK_CLOEXEC;
     if nonblocking {
         kind |= libc::SOCK_NONBLOCK;
     }
     // SAFETY: valid constants; ownership of a successful descriptor is moved
     // into OwnedFd immediately.
-    let raw = unsafe { libc::socket(libc::AF_NETLINK, kind, libc::NETLINK_ROUTE) };
+    let raw = unsafe { libc::socket(libc::AF_NETLINK, kind, protocol) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -330,39 +354,59 @@ fn open_socket(groups: u32, nonblocking: bool) -> io::Result<(OwnedFd, u32)> {
     Ok((fd, local.nl_pid))
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) struct RequestSocket {
     fd: OwnedFd,
     port_id: u32,
     seq: u32,
+    nonblocking: bool,
+    pending: Vec<RawMessage>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl RequestSocket {
     pub fn open() -> io::Result<Self> {
-        let (fd, port_id) = open_socket(0, false)?;
-        let timeout = libc::timeval {
-            tv_sec: 3,
-            tv_usec: 0,
-        };
-        for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
-            // SAFETY: timeout points to a timeval of the stated size.
-            let rc = unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    option,
-                    (&timeout as *const libc::timeval).cast(),
-                    size_of::<libc::timeval>() as libc::socklen_t,
-                )
+        Self::open_protocol(libc::NETLINK_ROUTE, false)
+    }
+
+    pub fn open_nonblocking(protocol: libc::c_int) -> io::Result<Self> {
+        Self::open_protocol(protocol, true)
+    }
+
+    fn open_protocol(protocol: libc::c_int, nonblocking: bool) -> io::Result<Self> {
+        let (fd, port_id) = open_socket(protocol, 0, nonblocking)?;
+        if !nonblocking {
+            let timeout = libc::timeval {
+                tv_sec: 3,
+                tv_usec: 0,
             };
-            if rc != 0 {
-                return Err(io::Error::last_os_error());
+            for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+                // SAFETY: timeout points to a timeval of the stated size.
+                let rc = unsafe {
+                    libc::setsockopt(
+                        fd.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        option,
+                        (&timeout as *const libc::timeval).cast(),
+                        size_of::<libc::timeval>() as libc::socklen_t,
+                    )
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
         }
         Ok(Self {
             fd,
             port_id,
             seq: 0,
+            nonblocking,
+            pending: Vec::new(),
         })
+    }
+
+    pub fn as_raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
     }
 
     pub fn next_seq(&mut self) -> u32 {
@@ -379,6 +423,26 @@ impl RequestSocket {
                     NLMSG_OVERRUN => return Err(overrun()),
                     NLMSG_NOOP => {}
                     _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn request(&mut self, request: Vec<u8>, seq: u32) -> io::Result<RawMessage> {
+        self.send(&request)?;
+        loop {
+            for message in self.recv(seq)? {
+                match message.kind {
+                    NLMSG_ERROR => parse_ack(&message.payload)?,
+                    NLMSG_OVERRUN => return Err(overrun()),
+                    NLMSG_NOOP => {}
+                    NLMSG_DONE => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "netlink request completed without a response",
+                        ));
+                    }
+                    _ => return Ok(message),
                 }
             }
         }
@@ -425,7 +489,10 @@ impl RequestSocket {
         Ok(())
     }
 
-    fn recv(&self, seq: u32) -> io::Result<Vec<RawMessage>> {
+    fn recv(&mut self, seq: u32) -> io::Result<Vec<RawMessage>> {
+        if self.nonblocking {
+            wait_fd(self.fd.as_raw_fd(), libc::POLLIN)?;
+        }
         let mut bytes = vec![0u8; MAX_DATAGRAM];
         // SAFETY: bytes is writable for its full capacity.
         let read = unsafe {
@@ -440,17 +507,43 @@ impl RequestSocket {
             return Err(io::Error::last_os_error());
         }
         bytes.truncate(read as usize);
-        parse_datagram(&bytes, Some((seq, self.port_id)))
+        let mut matching = Vec::new();
+        for message in parse_datagram(&bytes)? {
+            if message.seq != seq {
+                if self.nonblocking {
+                    self.pending.push(message);
+                }
+                continue;
+            }
+            if message.pid != 0 && message.pid != self.port_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "netlink response came from an unexpected port",
+                ));
+            }
+            matching.push(message);
+        }
+        Ok(matching)
+    }
+
+    pub fn drain_messages(&mut self) -> io::Result<(Vec<RawMessage>, bool)> {
+        debug_assert!(self.nonblocking);
+        let mut pending = std::mem::take(&mut self.pending);
+        let (mut received, resync) = drain_messages(self.fd.as_raw_fd())?;
+        pending.append(&mut received);
+        Ok((pending, resync))
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) struct NonblockingSocket {
     fd: OwnedFd,
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl NonblockingSocket {
     pub fn open(groups: u32) -> io::Result<Self> {
-        let (fd, _) = open_socket(groups, true)?;
+        let (fd, _) = open_socket(libc::NETLINK_ROUTE, groups, true)?;
         Ok(Self { fd })
     }
 
@@ -459,41 +552,72 @@ impl NonblockingSocket {
     }
 
     pub fn drain(&self) -> io::Result<DrainResult> {
-        let mut result = DrainResult::Quiet;
-        loop {
-            let mut bytes = vec![0u8; MAX_DATAGRAM];
-            // SAFETY: bytes is writable for its full capacity; the descriptor
-            // was created non-blocking.
-            let read = unsafe {
-                libc::recv(
-                    self.fd.as_raw_fd(),
-                    bytes.as_mut_ptr().cast(),
-                    bytes.len(),
-                    0,
-                )
-            };
-            if read < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    return Ok(result);
-                }
-                if error.raw_os_error() == Some(libc::ENOBUFS) {
-                    return Ok(DrainResult::Resync);
-                }
-                return Err(error);
-            }
-            bytes.truncate(read as usize);
-            for message in parse_datagram(&bytes, None)? {
-                if message.kind == NLMSG_OVERRUN {
-                    return Ok(DrainResult::Resync);
-                }
-                result = DrainResult::Changed;
-            }
+        let (messages, resync) = drain_messages(self.fd.as_raw_fd())?;
+        if resync {
+            Ok(DrainResult::Resync)
+        } else if messages.is_empty() {
+            Ok(DrainResult::Quiet)
+        } else {
+            Ok(DrainResult::Changed)
         }
     }
 }
 
-fn parse_datagram(bytes: &[u8], expected: Option<(u32, u32)>) -> io::Result<Vec<RawMessage>> {
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn drain_messages(fd: RawFd) -> io::Result<(Vec<RawMessage>, bool)> {
+    let mut messages = Vec::new();
+    loop {
+        let mut bytes = vec![0u8; MAX_DATAGRAM];
+        // SAFETY: bytes is writable for its full capacity; the descriptor
+        // was created non-blocking.
+        let read = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Ok((messages, false));
+            }
+            if error.raw_os_error() == Some(libc::ENOBUFS) {
+                return Ok((messages, true));
+            }
+            return Err(error);
+        }
+        bytes.truncate(read as usize);
+        for message in parse_datagram(&bytes)? {
+            if message.kind == NLMSG_OVERRUN {
+                return Ok((messages, true));
+            }
+            messages.push(message);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn wait_fd(fd: RawFd, events: libc::c_short) -> io::Result<()> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: poll_fd points to one initialized pollfd for the call.
+        let rc = unsafe { libc::poll(&mut poll_fd, 1, 3_000) };
+        if rc > 0 {
+            return Ok(());
+        }
+        if rc == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "netlink response timed out",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn parse_datagram(bytes: &[u8]) -> io::Result<Vec<RawMessage>> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     while offset < bytes.len() {
@@ -511,20 +635,10 @@ fn parse_datagram(bytes: &[u8], expected: Option<(u32, u32)>) -> io::Result<Vec<
                 "invalid netlink message length",
             ));
         }
-        if let Some((seq, port_id)) = expected {
-            if header.seq != seq {
-                offset = offset.saturating_add(align4(len));
-                continue;
-            }
-            if header.pid != 0 && header.pid != port_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "netlink response came from an unexpected port",
-                ));
-            }
-        }
         out.push(RawMessage {
             kind: header.kind,
+            seq: header.seq,
+            pid: header.pid,
             payload: bytes[offset + size_of::<NlMsgHdr>()..offset + len].to_vec(),
         });
         let advance = align4(len);
@@ -592,7 +706,8 @@ mod tests {
     #[test]
     fn ack_errno_is_preserved() {
         assert!(parse_ack(&0i32.to_ne_bytes()).is_ok());
-        let error = parse_ack(&(-libc::EEXIST).to_ne_bytes()).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+        const LINUX_EEXIST: i32 = 17;
+        let error = parse_ack(&(-LINUX_EEXIST).to_ne_bytes()).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(LINUX_EEXIST));
     }
 }

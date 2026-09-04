@@ -32,7 +32,7 @@ mode = "blacklist"
 list = []
 
 [ssid]
-# blacklist：连接到清单里的 Wi-Fi 时不启用。目前填写此表不会生效。
+# 名字须与手机 Wi-Fi 设置里显示的名字逐字相同；没连 Wi-Fi 时此表不起作用。
 mode = "blacklist"
 list = []
 

@@ -668,7 +668,7 @@ pub fn describe_flux_error(e: &ConfigError) -> String {
         ConfigError::DuplicateInterface(name) => {
             format!("interface `{name}` is listed twice")
         }
-        ConfigError::DuplicateSsid(ssid) => format!("SSID `{ssid}` is listed twice"),
+        ConfigError::DuplicateSsid(_) => "an SSID entry is listed twice".to_string(),
         ConfigError::Selector(e) => describe_selector_error(e),
         ConfigError::Cidr(e) => describe_cidr_error(e),
         ConfigError::InvalidListPath(path) => {

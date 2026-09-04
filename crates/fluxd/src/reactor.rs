@@ -29,12 +29,13 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
-use flux_core::config::{FluxConfig, SubscriptionConfig};
+use flux_core::config::{FluxConfig, ListMode, SubscriptionConfig};
 use flux_core::control_wire::{
-    Counters, EngineStatus, Request, Response, RootManagerStatus, State,
+    Counters, EngineStatus, Request, Response, RootManagerStatus, SsidStatus, State,
 };
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::{PackageIndex, SelectorError};
+use flux_core::ssid::ssid_verdict;
 
 use crate::checks;
 use crate::control::{ControlConn, ControlServer};
@@ -71,6 +72,7 @@ const TOK_TC_VERIFY: u64 = 15;
 const TOK_BPF_RING: u64 = 16;
 const TOK_SUBSCRIPTION_RESULT: u64 = 17;
 const TOK_SUBSCRIPTION_TIMER: u64 = 18;
+const TOK_NL80211: u64 = 19;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -103,6 +105,17 @@ struct PolicyCandidate {
     flux: FluxConfig,
     desired: crate::dataplane::DesiredPolicy,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SsidPolicy {
+    mode: ListMode,
+    entries: Vec<String>,
+}
+
+struct SsidTransport {
+    socket: crate::netlink::GenlSocket,
+    family: crate::netlink::Nl80211Family,
 }
 
 #[derive(Debug)]
@@ -297,10 +310,15 @@ struct Reactor {
     policy_changed: bool,
     engine_config_changed: bool,
     topology_changed: bool,
+    wifi_changed: bool,
     dataplane_error_active: bool,
     config_warnings: Vec<String>,
     current_policy: Option<PolicyCandidate>,
     current_engine_user: Option<serde_json::Value>,
+    ssid_transport: Option<SsidTransport>,
+    ssid_setup_failure: Option<SsidPolicy>,
+    ssid_status: Option<SsidStatus>,
+    ssid_paused: bool,
     policy_retry_available: bool,
     /// `None` when the page size is the required 4096; otherwise the actual
     /// size. sing-box and the BPF maps both assume 4 KiB pages (§25).
@@ -427,10 +445,15 @@ impl Reactor {
             policy_changed: false,
             engine_config_changed: false,
             topology_changed: false,
+            wifi_changed: false,
             dataplane_error_active: false,
             config_warnings: Vec::new(),
             current_policy: None,
             current_engine_user: None,
+            ssid_transport: None,
+            ssid_setup_failure: None,
+            ssid_status: None,
+            ssid_paused: false,
             policy_retry_available: true,
             bad_page_size,
             root_manager,
@@ -504,6 +527,7 @@ impl Reactor {
                     TOK_CHECK_PIDFD => self.handle_check_exit(),
                     TOK_CHECK_OUT => self.drain_check_output(),
                     TOK_RTNETLINK => self.handle_rtnetlink(),
+                    TOK_NL80211 => self.handle_nl80211(),
                     TOK_TC_VERIFY => self.handle_tc_verify(),
                     TOK_BPF_RING => self.handle_bpf_faults(),
                     TOK_SUBSCRIPTION_RESULT => self.handle_subscription_result(),
@@ -565,7 +589,11 @@ impl Reactor {
                 "\u{1f634} [Disabled] toggle this module on to enable Flux".to_string()
             };
         }
-        if dataplane.active && self.engine.is_some() && self.activation_role.is_none() {
+        if dataplane.active
+            && self.engine.is_some()
+            && self.activation_role.is_none()
+            && !self.ssid_paused
+        {
             let ifaces: Vec<&str> = dataplane
                 .ifaces
                 .iter()
@@ -578,6 +606,9 @@ impl Reactor {
                 dataplane.policy.selected,
                 ifaces.join(", ")
             );
+        }
+        if self.ssid_paused {
+            return "\u{1f634} [Inactive] paused on this Wi-Fi network".to_string();
         }
         match self
             .policy_error
@@ -1113,6 +1144,183 @@ impl Reactor {
         }
     }
 
+    fn handle_nl80211(&mut self) {
+        let Some(transport) = self.ssid_transport.as_mut() else {
+            return;
+        };
+        let changed = match transport.socket.drain(transport.family.id) {
+            Ok(crate::netlink::DrainResult::Quiet) => false,
+            Ok(crate::netlink::DrainResult::Changed) => true,
+            Ok(crate::netlink::DrainResult::Resync) => {
+                self.logger
+                    .log("nl80211 overrun: scheduling a fresh interface dump");
+                true
+            }
+            Err(error) => {
+                self.logger
+                    .log(&format!("nl80211 event read failed: {error}"));
+                true
+            }
+        };
+        // The §26 Disabled row ignores Wi-Fi changes. The socket is still
+        // drained so a subscribed descriptor can never spin epoll.
+        if changed && !self.layout.disabled() {
+            self.wifi_changed = true;
+            arm_timer(&self.debounce_timer, DEBOUNCE);
+        }
+    }
+
+    /// Reconciles the generic-netlink lifetime and returns whether `[ssid]`
+    /// currently holds activation. Raw SSID bytes stay in this stack frame.
+    fn evaluate_ssid(&mut self, policy: Option<&SsidPolicy>, retry_setup: bool) -> bool {
+        let Some(policy) = policy.filter(|policy| !policy.entries.is_empty()) else {
+            self.close_ssid_transport();
+            self.ssid_setup_failure = None;
+            self.ssid_status = None;
+            self.ssid_paused = false;
+            self.wifi_changed = false;
+            return false;
+        };
+
+        // A remembered setup failure is retried when the policy that failed
+        // changes, or when a policy edit asks for another attempt; otherwise
+        // it stays remembered, so a device without cfg80211 is not probed on
+        // every convergence.
+        let retry_after_failure = (retry_setup && self.ssid_transport.is_none())
+            || self
+                .ssid_setup_failure
+                .as_ref()
+                .is_some_and(|failed| failed != policy);
+        if retry_after_failure {
+            self.ssid_setup_failure = None;
+        }
+
+        if self.ssid_transport.is_none() && self.ssid_setup_failure.as_ref() != Some(policy) {
+            let mut socket = match crate::netlink::GenlSocket::open() {
+                Ok(socket) => socket,
+                Err(error) => {
+                    self.mark_ssid_setup_failed(policy, "cannot open NETLINK_GENERIC", &error);
+                    return false;
+                }
+            };
+            let family = match socket.resolve_nl80211() {
+                Ok(Some(family)) => family,
+                Ok(None) => {
+                    self.logger
+                        .log("nl80211 is unavailable; the [ssid] list is not applied");
+                    self.ssid_setup_failure = Some(policy.clone());
+                    self.mark_ssid_unreadable();
+                    return false;
+                }
+                Err(error) => {
+                    self.mark_ssid_setup_failed(policy, "cannot resolve nl80211", &error);
+                    return false;
+                }
+            };
+            if let Err(error) = socket.join(family.mlme_group) {
+                self.mark_ssid_setup_failed(policy, "cannot join nl80211 mlme", &error);
+                return false;
+            }
+            if let Err(error) = epoll_add(&self.epoll, socket.as_raw_fd(), TOK_NL80211) {
+                self.mark_ssid_setup_failed(policy, "cannot watch nl80211", &error);
+                return false;
+            }
+            self.logger
+                .log("nl80211 SSID event source joined before the initial dump");
+            self.ssid_transport = Some(SsidTransport { socket, family });
+            self.ssid_setup_failure = None;
+        }
+
+        let Some(transport) = self.ssid_transport.as_mut() else {
+            self.mark_ssid_unreadable();
+            return false;
+        };
+        let interfaces = match transport.socket.dump_interfaces(transport.family.id) {
+            Ok(interfaces) => interfaces,
+            Err(error) => {
+                self.logger
+                    .log(&format!("nl80211 interface dump failed: {error}"));
+                self.mark_ssid_unreadable();
+                return false;
+            }
+        };
+        let follow_up = match transport.socket.drain(transport.family.id) {
+            Ok(crate::netlink::DrainResult::Quiet) => false,
+            Ok(crate::netlink::DrainResult::Changed) => true,
+            Ok(crate::netlink::DrainResult::Resync) => {
+                self.logger
+                    .log("nl80211 changed during the dump; scheduling a fresh snapshot");
+                true
+            }
+            Err(error) => {
+                self.logger
+                    .log(&format!("nl80211 post-dump drain failed: {error}"));
+                true
+            }
+        };
+        let connected: Vec<Vec<u8>> = interfaces
+            .into_iter()
+            .filter(|interface| interface.iftype == crate::netlink::NL80211_IFTYPE_STATION)
+            .filter_map(|interface| interface.ssid)
+            .collect();
+        let connected_count = connected.len();
+        let verdict = ssid_verdict(policy.mode, &policy.entries, &connected);
+        self.ssid_status = Some(SsidStatus {
+            connected: Some(!connected.is_empty()),
+            paused: verdict.paused,
+            matched_entry: verdict.matched_entry,
+        });
+        self.ssid_paused = verdict.paused;
+        self.wifi_changed = follow_up;
+        if follow_up {
+            arm_timer(&self.debounce_timer, DEBOUNCE);
+        }
+
+        if verdict.paused {
+            match verdict.matched_entry {
+                Some(entry) => self.logger.log(&format!(
+                    "{connected_count} associated station interface(s); [ssid] blacklist matched entry {entry}; paused"
+                )),
+                None => self.logger.log(&format!(
+                    "{connected_count} associated station interface(s); [ssid] whitelist has no match; paused"
+                )),
+            }
+        } else {
+            self.logger.log(&format!(
+                "{connected_count} associated station interface(s); [ssid] does not pause activation"
+            ));
+        }
+        verdict.paused
+    }
+
+    fn mark_ssid_setup_failed(&mut self, policy: &SsidPolicy, context: &str, error: &io::Error) {
+        self.logger.log(&format!("{context}: {error}"));
+        self.ssid_setup_failure = Some(policy.clone());
+        self.mark_ssid_unreadable();
+    }
+
+    fn mark_ssid_unreadable(&mut self) {
+        self.ssid_status = Some(SsidStatus {
+            connected: None,
+            paused: false,
+            matched_entry: None,
+        });
+        self.ssid_paused = false;
+        self.wifi_changed = false;
+    }
+
+    fn close_ssid_transport(&mut self) {
+        let Some(transport) = self.ssid_transport.take() else {
+            return;
+        };
+        if let Err(error) = epoll_del(&self.epoll, transport.socket.as_raw_fd()) {
+            self.logger
+                .log(&format!("cannot remove nl80211 from epoll: {error}"));
+        }
+        // Dropping the sole owner closes the generic-netlink socket.
+        drop(transport);
+    }
+
     fn handle_tc_verify(&mut self) {
         drain_timer(&self.tc_verify_timer);
         self.logger.log("TC liveness verification timer fired");
@@ -1490,6 +1698,11 @@ impl Reactor {
             return;
         }
         if self.layout.disabled() {
+            self.ssid_paused = false;
+            if let Some(status) = self.ssid_status.as_mut() {
+                status.paused = false;
+                status.matched_entry = None;
+            }
             self.complete_waiting_controls(
                 true,
                 Some((
@@ -1498,7 +1711,6 @@ impl Reactor {
                 )),
             );
             self.rearm_control_timer();
-            disarm_timer(&self.tc_verify_timer);
             disarm_timer(&self.subscription_timer);
             self.subscription_schedule = None;
             self.subscription_retry_on_route = false;
@@ -1506,20 +1718,7 @@ impl Reactor {
             self.pending_subscription = None;
             self.subscription_fetch_queued = false;
             self.subscription_reconfigure_queued = false;
-            if let Err(error) = self.dataplane.cancel_attachment() {
-                self.logger
-                    .log(&format!("cannot cancel TC verification: {error}"));
-            }
-            self.dataplane.converge(false);
-            self.engine_cancel_requested = true;
-            self.cancel_engine_work();
-            // Preserve a full recomputation for the next enable. Config-file
-            // events continue to arrive while disabled, and none may be lost.
-            self.reload_requested = true;
-            self.policy_changed = true;
-            self.engine_config_changed = true;
-            self.topology_changed = false;
-            self.cancel_backoff();
+            self.deactivate_runtime();
             return;
         }
 
@@ -1563,6 +1762,16 @@ impl Reactor {
             || self.policy_changed
             || self.topology_changed;
 
+        let retry_ssid_setup = self.policy_changed;
+        let ssid_only_change = self.wifi_changed
+            && !self.reload_requested
+            && !self.policy_changed
+            && !self.engine_config_changed
+            && !self.topology_changed;
+        let was_active = self.dataplane.status().active
+            && self.engine.is_some()
+            && self.activation_role.is_none()
+            && !self.ssid_paused;
         let mut candidate_policy = if want_policy {
             match self.read_policy_config() {
                 Ok(candidate) => Some(candidate),
@@ -1710,6 +1919,22 @@ impl Reactor {
             }
         }
 
+        let ssid_policy = candidate_policy
+            .as_ref()
+            .map(|policy| &policy.flux)
+            .or_else(|| self.current_policy.as_ref().map(|policy| &policy.flux))
+            .map(|flux| SsidPolicy {
+                mode: flux.ssid_mode,
+                entries: flux.ssids.clone(),
+            });
+        if self.evaluate_ssid(ssid_policy.as_ref(), retry_ssid_setup) {
+            self.deactivate_runtime();
+            return;
+        }
+        if ssid_only_change && was_active && !engine_busy {
+            return;
+        }
+
         if !engine_busy && self.engine.is_none() && candidate_user.is_none() {
             // Cold invalid input performs stale cleanup only and cannot create
             // a topology or an inactive BPF runtime (§8.7).
@@ -1850,6 +2075,25 @@ impl Reactor {
             "generation {generation}: transaction start ({reason})"
         ));
         self.start_generation_check(user, generation);
+    }
+
+    /// The one deactivation tail shared by the module switch and an SSID
+    /// pause (§29.5). It freezes capture, stops all engine work, and preserves
+    /// a complete authority-file recomputation for the next activation.
+    fn deactivate_runtime(&mut self) {
+        disarm_timer(&self.tc_verify_timer);
+        if let Err(error) = self.dataplane.cancel_attachment() {
+            self.logger
+                .log(&format!("cannot cancel TC verification: {error}"));
+        }
+        self.dataplane.converge(false);
+        self.engine_cancel_requested = true;
+        self.cancel_engine_work();
+        self.reload_requested = true;
+        self.policy_changed = true;
+        self.engine_config_changed = true;
+        self.topology_changed = false;
+        self.cancel_backoff();
     }
 
     fn start_generation_check(&mut self, user: serde_json::Value, generation: u64) {
@@ -3465,7 +3709,8 @@ impl Reactor {
         let disabled = self.layout.disabled();
         let state = if disabled && self.engine.is_none() && !self.convergence_busy() {
             State::Disabled
-        } else if self.dataplane.status().active
+        } else if !self.ssid_paused
+            && self.dataplane.status().active
             && self.engine.is_some()
             && self.activation_role.is_none()
         {
@@ -3536,6 +3781,24 @@ impl Reactor {
                 warnings.push(detail.clone());
             }
         }
+        if !disabled {
+            if self
+                .ssid_status
+                .as_ref()
+                .is_some_and(|status| status.connected.is_none())
+            {
+                warnings.push(
+                    "ssid_unreadable: Wi-Fi state cannot be read; the [ssid] list is not applied"
+                        .to_string(),
+                );
+            }
+            if self.ssid_paused {
+                warnings.push(
+                    "ssid_paused: the connected Wi-Fi network is excluded by [ssid]; Flux resumes when it changes"
+                        .to_string(),
+                );
+            }
+        }
         warnings.extend(self.config_warnings.iter().cloned());
 
         let counters = match self.dataplane.counters() {
@@ -3557,21 +3820,25 @@ impl Reactor {
             root_manager: self.root_manager.clone(),
             engine: engine_status,
             policy: self.dataplane.status().policy,
+            ssid: self.ssid_status,
             ifaces: self.dataplane.status().ifaces.clone(),
             counters,
             sysctl: self.dataplane.status().sysctl.clone(),
             warnings,
             hints,
-            last_error: self
-                .policy_error
-                .as_ref()
-                .map(|(token, _)| token.clone())
-                .or_else(|| {
-                    self.subscription_error
-                        .as_ref()
-                        .map(|(token, _)| token.clone())
-                })
-                .or_else(|| self.last_error.clone()),
+            last_error: if self.ssid_paused {
+                None
+            } else {
+                self.policy_error
+                    .as_ref()
+                    .map(|(token, _)| token.clone())
+                    .or_else(|| {
+                        self.subscription_error
+                            .as_ref()
+                            .map(|(token, _)| token.clone())
+                    })
+                    .or_else(|| self.last_error.clone())
+            },
         }
     }
 }
@@ -3755,6 +4022,22 @@ fn epoll_add(epoll: &OwnedFd, fd: RawFd, token: u64) -> io::Result<()> {
     };
     // SAFETY: valid epoll fd, valid target fd, valid event struct.
     let rc = unsafe { libc::epoll_ctl(epoll.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, &mut event) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn epoll_del(epoll: &OwnedFd, fd: RawFd) -> io::Result<()> {
+    // SAFETY: both descriptors are live; EPOLL_CTL_DEL ignores the event pointer.
+    let rc = unsafe {
+        libc::epoll_ctl(
+            epoll.as_raw_fd(),
+            libc::EPOLL_CTL_DEL,
+            fd,
+            std::ptr::null_mut(),
+        )
+    };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }

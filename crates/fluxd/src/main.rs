@@ -39,7 +39,7 @@ mod control;
 mod engine;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod layout;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 mod netlink;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod reactor;
@@ -177,6 +177,20 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             response.policy.interfaces_mode.as_str(),
             response.policy.self_addresses
         );
+        if let Some(ssid) = response.ssid {
+            let wifi = match (ssid.connected, ssid.paused, ssid.matched_entry) {
+                (None, _, _) => "unreadable".to_string(),
+                (Some(false), _, _) => "not connected".to_string(),
+                (Some(true), true, Some(entry)) => {
+                    format!("connected \u{b7} paused by [ssid] blacklist (entry {entry})")
+                }
+                (Some(true), true, None) => {
+                    "connected \u{b7} paused by [ssid] whitelist".to_string()
+                }
+                (Some(true), false, _) => "connected".to_string(),
+            };
+            println!("wifi:       {wifi}");
+        }
         for iface in &response.ifaces {
             println!("interface:  {}", describe_iface(iface));
         }

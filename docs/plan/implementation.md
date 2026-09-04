@@ -23,7 +23,8 @@
 | 0.9.5 批次 A–C | 已提交，Linux 全量测试 184 项与 `clippy -D warnings` 通过（WSL） | `e8f2465`、`b70b940`（A）；`56ec853`（B）；`175ecb2`（C）。尚未在真机回归：设备上跑的仍是 0.9.1 形态的安装 |
 | 0.9.5 批次 D | 已提交，Linux 全量测试 186 项、两套 fake-engine 集成场景、`clippy -D warnings`、模块生命周期测试通过（WSL） | webroot 跳转页、`clash_api` 告警降级、用户文案。任务书归档在 `../history/handoff-batch-d.md`。**尚未真机回归**——设备上跑的仍是 0.9.1 形态的安装 |
 | 0.9.5 批次 E | 已提交，Linux 全量测试 186+6 项、`daemon_e2e` 含新增的 reactor 崩溃恢复场景、`clippy -D warnings` 两个目标、模块生命周期测试通过（WSL） | 监督进程收进二进制（§13.2.2）。任务书归档在 `../history/handoff-batch-e.md`。**尚未真机回归** |
-| 剩余 | §17.0.2 第 6 项（SSID）= 批次 F，任务书 `handoff-batch-f.md`；§17.0.1 第 7 项待所有者决定 | 发布前还需：真机回归 0.9.5 构建、Linux CI 全绿、§20 十四条逐条勾选、提升 workspace 版本 |
+| 0.9.5 批次 F | 已提交，flux-core 95 项、fluxd 75 项、两套 fake-engine 集成场景、`clippy -D warnings` 两个目标通过（WSL） | SSID 维度（§29）。任务书归档在 `../history/handoff-batch-f.md`。WSL 内核没有 cfg80211，nl80211 路径只有字节级单测覆盖，**真机是唯一能验证它的地方** |
+| 剩余 | **§17.0.2 已清空**（§20 第 14 条满足）；§17.0.1 第 7 项待所有者决定 | 发布前还需：按 `device-regression-0.9.5.md` 真机回归、Linux CI 全绿、§20 其余十三条逐条勾选、提升 workspace 版本 |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -50,7 +51,7 @@
 | ~~3~~ | ~~订阅抓取、URI 解析、节点精修、`fluxd subscribe`~~ | ~~均未实现~~ | ~~§28.3–§28.7~~ |
 | ~~4~~ | ~~生成是纯函数的机检测试（把生成物的 `outbounds` 换回模板后必须深度相等）~~ | ~~未实现~~ | ~~§28.2、§15.2~~ |
 | ~~5~~ | ~~`webroot/index.html` 进 allowlist~~ | ~~allowlist 当前 14 项，无 webroot~~ 批次 D：15 项；打包拒绝 `module/webroot/` 里出现第二个文件 | ~~§28.8、§13.1~~ |
-| 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
+| ~~6~~ | ~~`[ssid]` 维度与 nl80211 事件源~~ | ~~未实现~~ 批次 F：generic netlink 传输、纯函数判定、与开关共用的暂停路径、`status.ssid`；SSID 字节不出守护进程 | ~~§29.1–§29.2~~ |
 | ~~7~~ | ~~三个维度统一黑/白名单与 `@file` 引用~~ | ~~`flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键~~ | ~~§11.2~~ |
 | ~~8~~ | ~~bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump**~~ | ~~loader 恒写 `1`，BPF 只判非空，magic 未变~~ | ~~§6.1.1、§6.3~~ |
 | ~~9~~ | ~~运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json`~~ | ~~`layout.rs` 仍用旧名~~ | ~~§28.1~~ |
@@ -67,7 +68,7 @@
 
 第 17 项的判据说明保留在这里，因为它解释了为什么换代逻辑里没有"哪个文件改了"这张表：`[subscription]` 的精修规则按 §28.2 是生成的输入，改了它必须换代，但按文件名路由的话 `flux.toml` 只进策略域；反过来把 `flux.toml` 也接进引擎域，又会让每次改应用清单都白白重启一次引擎。**生成既然是纯函数，比对生成物本身就是精确的**：字节相同就不换代，不同才换。
 
-本表只剩第 6 项：它是一个新事件源（nl80211 generic netlink），单独成批。各批次的任务书完成后归档在 `../history/handoff-batch-*.md`，记录当时为什么这样分批。
+本表已清空（2026-09-05）。各批次的任务书归档在 `../history/handoff-batch-*.md`，记录当时为什么这样分批。清空的是"合同要求而代码没有"这一维；"代码在真机上确实这样做"由 `device-regression-0.9.5.md` 回答。
 
 **§17.0.1 的哲学返工清单与本表有重叠，但两张表的判据不同**：那张问"现状违反了哪条判据"，本表问"合同要求什么而代码还没有"。发布门禁（§20 第 14 条）只盯本表，所以任何合同要求都必须在这里有一行，否则它永远不会被实现。
 

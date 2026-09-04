@@ -174,6 +174,18 @@ pub struct IfaceStatus {
     pub reason: Option<String>,
 }
 
+/// Privacy-preserving status for the conditional `[ssid]` dimension (§24.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsidStatus {
+    /// Whether at least one station interface is associated. `None` means the
+    /// nl80211 state could not be read.
+    pub connected: Option<bool>,
+    /// Whether this dimension is holding Flux inactive.
+    pub paused: bool,
+    /// One-based expanded-list position that caused a blacklist pause.
+    pub matched_entry: Option<usize>,
+}
+
 /// The data-plane counters, summed across CPUs (blueprint §6.1, §24.1).
 ///
 /// One field per `counters` slot except `saw_packet`, which is internal to the
@@ -243,6 +255,9 @@ pub struct Response {
     pub engine: EngineStatus,
     /// Policy population counts.
     pub policy: PolicyCounts,
+    /// Conditional Wi-Fi activation status; null when `[ssid]` is empty.
+    #[serde(default)]
+    pub ssid: Option<SsidStatus>,
     /// Per-interface status.
     pub ifaces: Vec<IfaceStatus>,
     /// Summed data-plane counters.
@@ -339,6 +354,11 @@ mod tests {
                 bypass_v6: 6,
                 self_addresses: 4,
             },
+            ssid: Some(SsidStatus {
+                connected: Some(true),
+                paused: false,
+                matched_entry: None,
+            }),
             ifaces: vec![
                 IfaceStatus {
                     name: "wlan0".to_string(),
