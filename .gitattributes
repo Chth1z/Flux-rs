@@ -1,5 +1,7 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Auto detect text files and perform LF normalization. Check out as LF too:
+# AGENTS.md promises "files are LF", and that promise should be kept by the
+# repository, not by every machine's core.autocrlf.
+* text=auto eol=lf
 
 # Everything deployed to Android must be LF. module.prop in particular:
 # the Magisk parser requires LF line endings (docs/blueprint.md §13.2.0).
