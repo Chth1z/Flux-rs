@@ -308,7 +308,7 @@ pub fn describe_config_error(e: &EngineConfigError) -> String {
         }
         EngineConfigError::InboundsNotArray => "`inbounds` is not an array".to_string(),
         EngineConfigError::ReservedTag(tag) => {
-            format!("tag `{tag}` uses the reserved `flux-` prefix (blueprint §9.6)")
+            format!("tag `{tag}` is the tag of an inbound Flux injects; rename it (blueprint §9.6)")
         }
         EngineConfigError::OutboundsNotArray => {
             "template.json `outbounds` is absent or not an array".to_string()

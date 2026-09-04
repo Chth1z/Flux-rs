@@ -12,7 +12,9 @@
 //!   appends refined nodes. Replacing that field with the template field must
 //!   recover a deeply equal value (§28.2).
 //! * Inbound injection never touches `dns` / `outbounds` / `route` / `log` /
-//!   `experimental`, and the user may not use a `flux-` prefixed tag (§9.6).
+//!   `experimental`, and nothing else in the config may carry one of the two
+//!   injected inbound tags (§9.6). Only those exact tags are reserved: the
+//!   mechanism needs its two inbounds to be unambiguous, and nothing wider.
 //!
 //! Everything here is a pure function of a parsed [`serde_json::Value`], so it
 //! is fully testable on any host. Running `sing-box check` is the daemon's job
@@ -34,8 +36,10 @@ pub const MAX_ENGINE_CONFIG_BYTES: usize = 8 * 1024 * 1024;
 pub const INBOUND_TAG_V4: &str = "flux-in-v4";
 /// Tag of the injected IPv6 tproxy inbound.
 pub const INBOUND_TAG_V6: &str = "flux-in-v6";
-/// Prefix reserved for Flux-owned tags; a user config may not use it.
-pub const RESERVED_TAG_PREFIX: &str = "flux-";
+/// The only tags a user config may not use: the two the injected inbounds
+/// carry. An earlier draft reserved the whole `flux-` prefix, which let a
+/// provider naming a node `flux-hk` invalidate the entire generated config.
+pub const RESERVED_TAGS: [&str; 2] = [INBOUND_TAG_V4, INBOUND_TAG_V6];
 
 /// Parameters that vary per engine generation (blueprint §9.1, §9.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +73,7 @@ pub enum EngineConfigError {
     UserSuppliedInbound,
     /// `inbounds` was present but was not an array.
     InboundsNotArray,
-    /// The user used a `flux-` prefixed tag, which Flux reserves.
+    /// The config carries one of the injected inbound tags ([`RESERVED_TAGS`]).
     ReservedTag(String),
     /// The template's top-level `outbounds` was absent or not an array.
     OutboundsNotArray,
@@ -188,13 +192,14 @@ fn injected_inbounds(params: &EngineParams) -> Value {
     ])
 }
 
-/// Finds the first `"tag"` anywhere in the config whose value starts with the
-/// reserved prefix, so a user cannot shadow the injected inbounds.
+/// Finds the first `"tag"` anywhere in the config equal to one of the injected
+/// inbound tags, so nothing can shadow them. Any other tag is the user's or
+/// the provider's business.
 fn first_reserved_tag(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
             if let Some(Value::String(tag)) = map.get("tag") {
-                if tag.starts_with(RESERVED_TAG_PREFIX) {
+                if RESERVED_TAGS.contains(&tag.as_str()) {
                     return Some(tag.clone());
                 }
             }
@@ -463,12 +468,24 @@ mod tests {
     }
 
     #[test]
-    fn reserved_tag_is_rejected() {
-        let user = json!({ "outbounds": [{ "type": "direct", "tag": "flux-sneaky" }] });
+    fn an_injected_inbound_tag_is_rejected_anywhere_in_the_config() {
+        let user = json!({
+            "outbounds": [{ "type": "direct", "tag": "DIRECT" }],
+            "dns": { "servers": [{ "type": "udp", "tag": INBOUND_TAG_V6, "server": "1.1.1.1" }] }
+        });
         assert_eq!(
             build_effective(&user, &params()),
-            Err(EngineConfigError::ReservedTag("flux-sneaky".to_string()))
+            Err(EngineConfigError::ReservedTag(INBOUND_TAG_V6.to_string()))
         );
+    }
+
+    /// Only the two exact tags are reserved. A provider that names a node
+    /// `flux-hk` must not be able to invalidate the whole generated config.
+    #[test]
+    fn other_flux_prefixed_tags_are_the_users_business() {
+        let user = json!({ "outbounds": [{ "type": "direct", "tag": "flux-sneaky" }] });
+        let effective = build_effective(&user, &params()).expect("prefix alone is not reserved");
+        assert_eq!(effective["outbounds"][0]["tag"], "flux-sneaky");
     }
 
     #[test]

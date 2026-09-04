@@ -156,59 +156,61 @@ impl Layout {
         self.run_dir().join(format!("sing-box.{generation}.json"))
     }
 
-    /// Creates the root, `run/` and `config/` directories with mode 0700.
-    /// Pre-existing directories are left untouched — a wrong mode is reported
-    /// by [`Layout::mode_error`], never silently chmodded (§23.1).
-    pub fn ensure(&self) -> io::Result<()> {
-        for dir in [self.root.clone(), self.run_dir(), self.config_dir()] {
-            match fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-
-    /// Verifies the runtime directories are private to our own uid. Returns a
-    /// stable error token per §23.1 (`runtime_dir_mode:0755 expected 0700`) or
-    /// `None` when everything is in order. We never chmod on the user's
-    /// behalf: a loosened mode may be deliberate and silently tightening it
-    /// would hide that.
-    pub fn mode_error(&self) -> Option<String> {
+    /// Makes the root, `run/` and `config/` exist as directories owned by this
+    /// uid with mode 0700, and returns one line per repair it had to make so
+    /// the caller can log it.
+    ///
+    /// The three directories are Flux's own (§11.1), so a drifted mode or owner
+    /// is restored rather than reported as a fault — the same way the daemon
+    /// rebuilds any other object it owns. What is refused is a symlink or a
+    /// non-directory at one of the paths: that is somebody else's object where
+    /// Flux's private directory has to be, and Flux never replaces or follows
+    /// an object it cannot prove is its own (§23.1, PHIL-5).
+    pub fn ensure(&self) -> Result<Vec<String>, RootError> {
         // SAFETY: geteuid has no preconditions and cannot fail.
         let own_uid = unsafe { libc::geteuid() };
+        let mut repairs = Vec::new();
         for dir in [self.root.clone(), self.run_dir(), self.config_dir()] {
-            let meta = match fs::symlink_metadata(&dir) {
-                Ok(meta) => meta,
-                Err(e) => {
-                    return Some(format!(
-                        "runtime_dir_unreadable:{}:{}",
-                        dir.display(),
-                        e.raw_os_error()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| format!("{:?}", e.kind()))
-                    ))
-                }
-            };
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => continue,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(RootError::Io { path: dir, error }),
+            }
+            let meta = fs::symlink_metadata(&dir).map_err(|error| RootError::Io {
+                path: dir.clone(),
+                error,
+            })?;
             if meta.file_type().is_symlink() || !meta.is_dir() {
-                return Some(format!(
-                    "runtime_dir_type:{} expected directory",
-                    dir.display()
-                ));
+                return Err(RootError::NotADirectory(dir));
             }
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o700 {
-                return Some(format!("runtime_dir_mode:0{mode:o} expected 0700"));
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                    RootError::Io {
+                        path: dir.clone(),
+                        error,
+                    }
+                })?;
+                repairs.push(format!(
+                    "{}: mode 0{mode:o} restored to 0700",
+                    dir.display()
+                ));
             }
             if meta.uid() != own_uid {
-                return Some(format!(
-                    "runtime_dir_owner:{} expected {own_uid}",
+                std::os::unix::fs::chown(&dir, Some(own_uid), None).map_err(|error| {
+                    RootError::Io {
+                        path: dir.clone(),
+                        error,
+                    }
+                })?;
+                repairs.push(format!(
+                    "{}: owner uid {} restored to {own_uid}",
+                    dir.display(),
                     meta.uid()
                 ));
             }
         }
-        None
+        Ok(repairs)
     }
 
     /// Whether the switch says "disabled" (file present).
@@ -349,6 +351,51 @@ fn is_effective_name(name: &OsStr) -> bool {
         && middle.parse::<u64>().is_ok()
 }
 
+/// Why the state root cannot be used at all (§23.1). Both variants are
+/// terminal for this convergence round; neither is repaired.
+#[derive(Debug)]
+pub enum RootError {
+    /// A symlink or a non-directory sits where one of Flux's private
+    /// directories must be. It is not Flux's object, so it is left alone.
+    NotADirectory(PathBuf),
+    /// The directory could not be created, inspected or restored.
+    Io { path: PathBuf, error: io::Error },
+}
+
+impl RootError {
+    /// The stable `last_error` token of §24.2.
+    pub fn token(&self) -> String {
+        match self {
+            RootError::NotADirectory(path) => {
+                format!("runtime_dir_type:{} expected directory", path.display())
+            }
+            RootError::Io { path, error } => format!(
+                "runtime_dir_unusable:{}:{}",
+                path.display(),
+                error
+                    .raw_os_error()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| format!("{:?}", error.kind()))
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for RootError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RootError::NotADirectory(path) => write!(
+                f,
+                "{} is a symlink or not a directory; Flux needs a private directory there and will not replace what it finds",
+                path.display()
+            ),
+            RootError::Io { path, error } => {
+                write!(f, "cannot set up {}: {error}", path.display())
+            }
+        }
+    }
+}
+
 /// Why the single-instance lock could not be taken.
 #[derive(Debug)]
 pub enum LockError {
@@ -458,7 +505,7 @@ mod tests {
             layout.subscription_url_binding(),
             layout.run_dir().join("subscription.url")
         );
-        assert!(layout.mode_error().is_none());
+        assert!(layout.ensure().expect("idempotent").is_empty());
         for dir in [
             layout.root().to_path_buf(),
             layout.run_dir(),
@@ -471,15 +518,43 @@ mod tests {
     }
 
     #[test]
-    fn wrong_mode_is_reported_not_fixed() {
+    fn drifted_mode_is_restored_and_reported() {
         let layout = tmp_layout("mode");
         layout.ensure().expect("create");
         fs::set_permissions(layout.root(), fs::Permissions::from_mode(0o755)).unwrap();
-        let err = layout.mode_error().expect("must report");
-        assert_eq!(err, "runtime_dir_mode:0755 expected 0700");
-        // Not silently repaired.
+        let repairs = layout.ensure().expect("the root is ours to repair");
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert!(
+            repairs[0].ends_with("mode 0755 restored to 0700"),
+            "{repairs:?}"
+        );
         let mode = fs::metadata(layout.root()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755);
+        assert_eq!(mode, 0o700);
+        // A second pass finds nothing to do.
+        assert!(layout.ensure().expect("clean").is_empty());
+        fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_where_a_directory_belongs_is_refused_not_replaced() {
+        let layout = tmp_layout("symlink");
+        fs::create_dir_all(layout.root()).unwrap();
+        let elsewhere = layout.root().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, layout.run_dir()).unwrap();
+        match layout.ensure() {
+            Err(RootError::NotADirectory(path)) => {
+                assert_eq!(path, layout.run_dir());
+                let error = RootError::NotADirectory(path);
+                assert!(error.token().starts_with("runtime_dir_type:"), "{error}");
+            }
+            other => panic!("a symlink must be refused, got {other:?}"),
+        }
+        // Still a symlink: nothing was unlinked or followed.
+        assert!(fs::symlink_metadata(layout.run_dir())
+            .unwrap()
+            .file_type()
+            .is_symlink());
         fs::remove_dir_all(layout.root()).unwrap();
     }
 

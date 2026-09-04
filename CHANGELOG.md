@@ -133,6 +133,15 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The CLI is the only client, so no compatibility shim was kept.
 - The listener addresses and the fixed bypass set are derived from one ABI
   constant instead of being written out in two files.
+- A state root whose mode or owner has drifted is put back to `root:0700` and
+  logged, instead of holding the daemon `Inactive` with `runtime_dir_mode`.
+  The directories are Flux's own, `/data/adb` is root-only anyway, and the boot
+  script was tightening the mode regardless. A symlink or a non-directory at
+  one of the paths is still refused (`runtime_dir_type`), because that object
+  is not Flux's to replace.
+- Only the two injected inbound tags, `flux-in-v4` and `flux-in-v6`, are
+  reserved. Reserving the whole `flux-` prefix let a subscription provider that
+  named a node `flux-hk` invalidate the entire generated configuration.
 - `fluxd daemon` supervises itself (`docs/spec/blueprint.md` §13.2.2). The
   process `service.sh` starts re-executes its own binary as the reactor and
   restarts it after a crash on the same 1/2/4/8/30 s schedule the engine uses;

@@ -2497,7 +2497,7 @@ A timerfd MAY re-check with a bounded backoff while the candidate starts — 10,
 At most 8 MiB, and a complete official configuration satisfying:
 
 - `inbounds` absent or an empty array, since the two tproxy inbounds are injected by fluxd alone;
-- no tag carrying the `flux-` prefix;
+- no tag equal to either injected inbound's tag, `flux-in-v4` or `flux-in-v6`. Only those two are reserved: the mechanism needs its inbounds to be unambiguous and nothing wider. An earlier draft reserved the whole `flux-` prefix, which let a provider naming a node `flux-hk` invalidate the entire generated configuration — external data deciding whether the user's proxy runs (PHIL-1);
 - Flux MUST NOT modify the user's `dns`, `outbounds`, `route`, `log` or `experimental`;
 - the Android consequences of a user's own outbound `routing_mark` or `bind_interface` are the user's to own. Flux warns in `status` and does not build a large, brittle policy validator (PHIL-6).
 

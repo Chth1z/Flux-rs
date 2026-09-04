@@ -213,14 +213,13 @@ impl PendingControl {
 /// Runs the daemon in the foreground. Returns the process exit code.
 pub fn run_daemon() -> u8 {
     let layout = Layout::product();
-    if let Err(e) = layout.ensure() {
-        eprintln!("fluxd: cannot create {}: {e}", layout.root().display());
-        return 1;
-    }
-    if let Some(error) = layout.mode_error() {
-        eprintln!("fluxd: runtime directory check failed: {error}");
-        return 1;
-    }
+    let repairs = match layout.ensure() {
+        Ok(repairs) => repairs,
+        Err(e) => {
+            eprintln!("fluxd: {e}");
+            return 1;
+        }
+    };
 
     // Single instance BEFORE anything else is touched. A rejected second
     // instance exits without unlinking sockets or cleaning files (§10.3).
@@ -242,6 +241,9 @@ pub fn run_daemon() -> u8 {
         flux_core::VERSION,
         layout.root().display()
     ));
+    for repair in repairs {
+        logger.log(&format!("state root repaired: {repair}"));
+    }
 
     match Reactor::new(layout, logger) {
         Ok(mut reactor) => {
@@ -1729,11 +1731,19 @@ impl Reactor {
             self.last_error = Some(format!("unsupported_page_size:{page_size}"));
             return;
         }
-        if let Some(mode_error) = self.layout.mode_error() {
-            self.logger
-                .log(&format!("runtime directory check failed: {mode_error}"));
-            self.last_error = Some(mode_error);
-            return;
+        // The state root is Flux's own: a drifted mode or owner is put back
+        // and logged. Only a foreign object at one of the paths stops here.
+        match self.layout.ensure() {
+            Ok(repairs) => {
+                for repair in repairs {
+                    self.logger.log(&format!("state root repaired: {repair}"));
+                }
+            }
+            Err(error) => {
+                self.logger.log(&format!("state root unusable: {error}"));
+                self.last_error = Some(error.token());
+                return;
+            }
         }
 
         // Installing or verifying our own TC filters emits rtnetlink events.

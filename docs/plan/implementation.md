@@ -24,7 +24,7 @@
 | 0.9.5 批次 D | 已提交，Linux 全量测试 186 项、两套 fake-engine 集成场景、`clippy -D warnings`、模块生命周期测试通过（WSL） | webroot 跳转页、`clash_api` 告警降级、用户文案。任务书归档在 `../history/handoff-batch-d.md`。**尚未真机回归**——设备上跑的仍是 0.9.1 形态的安装 |
 | 0.9.5 批次 E | 已提交，Linux 全量测试 186+6 项、`daemon_e2e` 含新增的 reactor 崩溃恢复场景、`clippy -D warnings` 两个目标、模块生命周期测试通过（WSL） | 监督进程收进二进制（§13.2.2）。任务书归档在 `../history/handoff-batch-e.md`。**尚未真机回归** |
 | 0.9.5 批次 F | 已提交，flux-core 95 项、fluxd 75 项、两套 fake-engine 集成场景、`clippy -D warnings` 两个目标通过（WSL） | SSID 维度（§29）。任务书归档在 `../history/handoff-batch-f.md`。WSL 内核没有 cfg80211，nl80211 路径只有字节级单测覆盖，**真机是唯一能验证它的地方** |
-| 剩余 | **§17.0.2 已清空**（§20 第 14 条满足）；§17.0.1 第 7 项待所有者决定 | 发布前还需：按 `device-regression-0.9.5.md` 真机回归、Linux CI 全绿、§20 其余十三条逐条勾选、提升 workspace 版本 |
+| 剩余 | **§17.0.2 与 §17.0.1 均已清空**（§20 第 14 条满足） | 发布前还需：按 `device-regression-0.9.5.md` 真机回归、Linux CI 全绿、§20 其余十三条逐条勾选、提升 workspace 版本。`cargo xtask verify-package` 已在 WSL 通过（2026-09-05：两次干净交叉构建哈希一致，15 个文件） |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -38,7 +38,7 @@
 | ~~4~~ | ~~listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处~~ | ~~§4~~ | ~~固定 bypass 从 ABI 常量派生，只留一个来源~~ |
 | ~~5~~ | ~~`service.sh` 里的 daemon 重启退避循环~~ | ~~§7~~ | ~~收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案）~~ 所有者 2026-09-05 选定收进二进制；批次 E：`fluxd daemon` 成为监督进程（§13.2.2），`service.sh` 只剩一行 `exec` |
 | 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（§23） |
-| 7 | 0.9.1 留下的一批"必须/不得"式校验 | §1、§2 | 逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进 |
+| ~~7~~ | ~~0.9.1 留下的一批"必须/不得"式校验~~ | ~~§1、§2~~ | ~~逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进~~ 2026-09-05 逐条过完。消掉两处（所有者拍板）：状态根模式不对不再拒绝激活，Flux 自己恢复 `root:0700` 并记日志，`service.sh` 不再 chmod；`flux-` 前缀保留收窄为两个精确的注入 inbound tag。其余保留，理由各异：`flux.toml` 的严格解析、`@file` 约束、容量上限、模板 `inbounds` 禁止、fakeip 撞 bypass 硬拒——都是系统边界上对外部输入的防御（PHIL-2 的另一半）或不可诊断的失败（PHIL-6）；veth/rule/route/TC 的身份比对是所有权证明（PHIL-5）；`rp_filter`、page size、netns 是机制的真实前提。见 review-log 第 26、27 行 |
 
 ### 17.0.2 0.9.5 合同与当前实现的差距
 

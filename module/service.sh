@@ -42,9 +42,10 @@ export FLUX_ROOT_MANAGER_MODE="$MANAGER_MODE"
 RUNTIME_ROOT=${FLUX_RUNTIME_ROOT:-/data/adb/flux-rs}
 LOG="$RUNTIME_ROOT/service.log"
 
-mkdir -p "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
-chown 0:0 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
-chmod 0700 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
+# The state root and its mode belong to fluxd, which restores root:0700 on
+# every start (§23.1). The script only needs the directory to exist so it can
+# write this boot's log lines before the daemon takes over.
+[ -d "$RUNTIME_ROOT" ] || mkdir -m 0700 "$RUNTIME_ROOT"
 
 {
 	echo "--- $(date '+%Y-%m-%d %H:%M:%S') boot"

@@ -386,7 +386,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         // feedback, but the file operation alone is already complete.
         "enable" => {
             if let Err(e) = layout.ensure() {
-                eprintln!("fluxd: cannot create {}: {e}", layout.root().display());
+                eprintln!("fluxd: {e}");
                 return ExitCode::FAILURE;
             }
             match ask(&layout, Request::Enable) {
@@ -409,7 +409,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
 
         "disable" => {
             if let Err(e) = layout.ensure() {
-                eprintln!("fluxd: cannot create {}: {e}", layout.root().display());
+                eprintln!("fluxd: {e}");
                 return ExitCode::FAILURE;
             }
             match ask(&layout, Request::Disable) {
