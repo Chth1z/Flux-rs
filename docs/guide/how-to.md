@@ -50,7 +50,7 @@ fluxd check
 不用开终端：管理器里这个模块的描述就是实时状态。
 
 ```
-Transparent per-app proxying via eBPF and an unmodified official sing-box.
+Per-app proxy: the apps you pick go through sing-box, everything else is left alone.
 🥰 [Active] gen 7 · 3 apps · rmnet_data0
 ```
 

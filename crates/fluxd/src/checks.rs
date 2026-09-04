@@ -86,7 +86,7 @@ fn check_bpf(report: &mut CheckReport) {
 
 /// The bounded-time check: `flux.toml`, `packages.list` resolution,
 /// `template.json` generation and §9 constraints, clash_api hardening
-/// (`docs/spec/interaction.md` §27.3.2), and engine binary presence. No subprocesses.
+/// (`docs/spec/interaction.md` §27.2.4), and engine binary presence. No subprocesses.
 pub fn quick_check(layout: &Layout, spec: &EngineSpec) -> CheckReport {
     quick_check_inner(layout, spec).0
 }
@@ -305,7 +305,6 @@ fn check_template_json(
         );
     }
     report.warnings.extend(sing_box_warnings(&generated));
-    check_clash_api(&generated, report);
     Some(generated)
 }
 
@@ -397,6 +396,42 @@ pub fn sing_box_warnings(user: &serde_json::Value) -> Vec<String> {
             "outbound bind_interface is user-controlled: it may not preserve the selected app's Android network identity"
                 .to_string(),
         );
+    }
+    if let Some(clash) = user
+        .get("experimental")
+        .and_then(|experimental| experimental.get("clash_api"))
+        .and_then(|clash| clash.as_object())
+    {
+        if clash
+            .get("secret")
+            .and_then(|secret| secret.as_str())
+            .is_none_or(str::is_empty)
+        {
+            warnings.push(
+                "clash_api_secret_missing: clash_api secret is empty: any app on this device can reconfigure the proxy. Set experimental.clash_api.secret in config/template.json."
+                    .to_string(),
+            );
+        }
+        if let Some(controller) = clash
+            .get("external_controller")
+            .and_then(|controller| controller.as_str())
+        {
+            let host = controller
+                .rsplit_once(':')
+                .map_or(controller, |(host, _)| host);
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let loopback = host
+                .parse::<std::net::IpAddr>()
+                .map(|address| address.is_loopback())
+                .unwrap_or_else(|_| host.eq_ignore_ascii_case("localhost"));
+            if !loopback {
+                warnings.push(format!(
+                    "clash_api_not_loopback: clash_api listens on {controller}, not loopback: \
+                     the control port is reachable from the network. Use 127.0.0.1:<port> \
+                     unless that is what you want."
+                ));
+            }
+        }
     }
     warnings
 }
@@ -515,48 +550,6 @@ fn overlaps_v6(left: Ipv6Cidr, right: Ipv6Cidr) -> bool {
         bits => u128::MAX << (128 - bits),
     };
     u128::from(left.addr) & mask == u128::from(right.addr) & mask
-}
-
-/// `docs/spec/interaction.md` §27.2.4: with `experimental.clash_api` present, an
-/// empty `secret` or a non-loopback `external_controller` hands the proxy
-/// control plane to every app, or to every Wi-Fi neighbour.
-///
-/// This currently reports an ERROR. §27.2.4 now requires a WARNING instead —
-/// the condition is a diagnosable difference of intent inside sing-box's own
-/// authority, not an undiagnosable failure. Tracked as item 11 of
-/// `docs/plan/implementation.md` §17.0.2.
-fn check_clash_api(user: &serde_json::Value, report: &mut CheckReport) {
-    let Some(clash) = user
-        .get("experimental")
-        .and_then(|e| e.get("clash_api"))
-        .and_then(|c| c.as_object())
-    else {
-        return;
-    };
-    match clash.get("secret").and_then(|s| s.as_str()) {
-        Some(secret) if !secret.is_empty() => {}
-        _ => {
-            report.errors.push(
-                "clash_api_secret_missing: experimental.clash_api.secret is empty or absent; \
-                 any app could reconfigure the proxy (docs/spec/interaction.md §27.3.2)"
-                    .to_string(),
-            );
-        }
-    }
-    if let Some(controller) = clash.get("external_controller").and_then(|c| c.as_str()) {
-        let host = controller.rsplit_once(':').map_or(controller, |(h, _)| h);
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let loopback = host
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(host == "localhost");
-        if !loopback {
-            report.errors.push(format!(
-                "clash_api_not_loopback: external_controller `{controller}` is not bound to \
-                 loopback; the control plane would be exposed to the network (docs/spec/interaction.md §27.3.2)"
-            ));
-        }
-    }
 }
 
 /// The subprocess half of the full check: builds a real effective config with
@@ -768,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn clash_api_hardening_is_an_error_not_a_warning() {
+    fn clash_api_hardening_is_a_warning_not_an_error() {
         let layout = tmp_layout("clash");
         std::fs::write(
             layout.flux_toml(),
@@ -790,39 +783,57 @@ mod tests {
         let engine = layout.root().join("engine");
         std::fs::write(&engine, "#!/bin/sh\nexit 0\n").unwrap();
         let report = quick_check(&layout, &loopback_spec(engine));
+        assert!(report.ok(), "{:?}", report.errors);
         assert!(report
-            .errors
+            .warnings
             .iter()
-            .any(|e| e.starts_with("clash_api_secret_missing")));
+            .any(|warning| warning.starts_with("clash_api_secret_missing")));
         assert!(report
-            .errors
+            .warnings
             .iter()
-            .any(|e| e.starts_with("clash_api_not_loopback")));
+            .any(|warning| warning.starts_with("clash_api_not_loopback")));
         std::fs::remove_dir_all(layout.root()).unwrap();
     }
 
     #[test]
     fn loopback_controller_with_secret_passes() {
-        let layout = tmp_layout("clash-ok");
-        std::fs::write(
-            layout.template_json(),
-            serde_json::json!({
-                "outbounds": [],
+        let user = serde_json::json!({
+            "experimental": { "clash_api": {
+                "external_controller": "127.0.0.1:9090",
+                "secret": "s3cr3t"
+            }}
+        });
+        assert!(sing_box_warnings(&user).is_empty());
+    }
+
+    #[test]
+    fn clash_api_controller_warnings_distinguish_loopback_addresses() {
+        for controller in ["0.0.0.0:9090", "[::]:9090"] {
+            let user = serde_json::json!({
                 "experimental": { "clash_api": {
-                    "external_controller": "127.0.0.1:9090",
+                    "external_controller": controller,
                     "secret": "s3cr3t"
                 }}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let mut report = CheckReport::default();
-        let user =
-            engine_config::parse_jsonc(&std::fs::read_to_string(layout.template_json()).unwrap())
-                .unwrap();
-        check_clash_api(&user, &mut report);
-        assert!(report.ok(), "{:?}", report.errors);
-        std::fs::remove_dir_all(layout.root()).unwrap();
+            });
+            let warnings = sing_box_warnings(&user);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("clash_api_not_loopback")),
+                "{controller}: {warnings:?}"
+            );
+        }
+
+        for controller in ["127.0.0.1:9090", "[::1]:9090", "localhost:9090"] {
+            let user = serde_json::json!({
+                "experimental": { "clash_api": {
+                    "external_controller": controller,
+                    "secret": "s3cr3t"
+                }}
+            });
+            let warnings = sing_box_warnings(&user);
+            assert!(warnings.is_empty(), "{controller}: {warnings:?}");
+        }
     }
 
     #[test]

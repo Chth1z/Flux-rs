@@ -22,12 +22,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
-const ALLOWLIST: [&str; 14] = [
+const ALLOWLIST: [&str; 15] = [
     "module.prop",
     "skip_mount",
     "customize.sh",
     "service.sh",
     "uninstall.sh",
+    "webroot/index.html",
     "bin/fluxd",
     "bin/sing-box",
     "etc/default-flux.toml",
@@ -139,6 +140,7 @@ fn package_once() -> Result<(PathBuf, [u8; 32]), String> {
                 .into(),
         );
     }
+    validate_webroot_shape(&root)?;
 
     // 2. Engine pin.
     let engine = verify_engine(&root)?;
@@ -545,6 +547,48 @@ fn ndk_bin_dir() -> Option<PathBuf> {
 
 // ----------------------------------------------------------------- staging
 
+/// §13.1/§28.8: the manager button gets one redirect shell, never a bundled
+/// Flux WebUI. Reject any second entry before the expensive packaging work.
+fn validate_webroot_shape(root: &Path) -> Result<(), String> {
+    let webroot = root.join("module/webroot");
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&webroot)
+        .map_err(|error| format!("read {}: {error}", webroot.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read {} entry: {error}", webroot.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("inspect {}: {error}", entry.path().display()))?;
+        entries.push((entry.file_name(), kind.is_file()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let valid =
+        entries.len() == 1 && entries[0].0 == std::ffi::OsStr::new("index.html") && entries[0].1;
+    if !valid {
+        let found = if entries.is_empty() {
+            "nothing".to_string()
+        } else {
+            entries
+                .iter()
+                .map(|(name, is_file)| {
+                    format!(
+                        "{} ({})",
+                        name.to_string_lossy(),
+                        if *is_file { "file" } else { "non-file" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(format!(
+            "module/webroot must contain exactly one regular file, index.html; found {found}. \
+             Additional content would be the Flux WebUI deferred as C8; refusing to package"
+        ));
+    }
+    Ok(())
+}
+
 fn collect_entries(
     root: &Path,
     module_prop: &str,
@@ -571,6 +615,11 @@ fn collect_entries(
     push("customize.sh", 0o755, text("module/customize.sh")?);
     push("service.sh", 0o755, text("module/service.sh")?);
     push("uninstall.sh", 0o755, text("module/uninstall.sh")?);
+    push(
+        "webroot/index.html",
+        0o644,
+        text("module/webroot/index.html")?,
+    );
     push("bin/fluxd", 0o755, util::read_bytes(fluxd)?);
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
     push("etc/default-flux.toml", 0o644, text("module/flux.toml")?);
@@ -928,6 +977,11 @@ fn multiarch_include() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webroot_remains_one_redirect_file() {
+        validate_webroot_shape(&util::repo_root()).unwrap();
+    }
 
     #[test]
     fn shipped_template_remains_blueprint_minimal() {

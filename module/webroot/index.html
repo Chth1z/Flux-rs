@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flux-rs</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: Canvas; color: CanvasText; }
+    main { max-width: 42rem; margin: 12vh auto 0; }
+    h1 { font-size: 1.5rem; }
+    #message { font-size: 1.05rem; }
+    #detail { padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; background: color-mix(in srgb, CanvasText 8%, Canvas); border-radius: .5rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Flux-rs</h1>
+    <p id="message" role="status" aria-live="polite">Reading the current configuration…</p>
+    <pre id="detail" hidden></pre>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+
+      const message = document.getElementById("message");
+      const detail = document.getElementById("detail");
+      const fluxd = "/data/adb/modules/flux_rs/bin/fluxd";
+
+      function show(summary, explanation) {
+        message.textContent = summary;
+        detail.textContent = explanation || "";
+        detail.hidden = !explanation;
+      }
+
+      function notRunning() {
+        show(
+          "Flux is not running.",
+          "If you just enabled the module in your root manager, reboot once. Then run " +
+            fluxd + " status for details."
+        );
+      }
+
+      function configUnavailable() {
+        show(
+          "The current engine configuration could not be read.",
+          "Run " + fluxd + " status for details, then reopen this page."
+        );
+      }
+
+      function execute(command, callback) {
+        try {
+          window.ksu.exec(command, JSON.stringify({}), callback);
+        } catch (error) {
+          show(
+            "Your root manager refused to run a command for this page.",
+            String(error) + "\nRun " + fluxd + " status in a terminal instead."
+          );
+        }
+      }
+
+      function shellQuote(value) {
+        return "'" + value.replace(/'/g, "'\"'\"'") + "'";
+      }
+
+      function splitController(value) {
+        const bracketed = value.match(/^\[([^\]]+)\]:(\d+)$/);
+        if (bracketed) return { host: bracketed[1], port: bracketed[2] };
+        const colon = value.lastIndexOf(":");
+        if (colon <= 0) return null;
+        const host = value.slice(0, colon);
+        const port = value.slice(colon + 1);
+        if (host.includes(":") || !/^\d+$/.test(port)) return null;
+        return { host, port };
+      }
+
+      function noController() {
+        show(
+          "No control panel is configured.",
+          "In /data/adb/flux-rs/config/template.json, add experimental.clash_api with " +
+            "external_controller listening on 127.0.0.1, a non-empty secret, and " +
+            "external_ui pointing to a downloaded panel. Run " + fluxd +
+            " check, then reopen this page."
+        );
+      }
+
+      window.fluxStatusCallback = function (errno, stdout, _stderr) {
+        if (Number(errno) !== 0) return notRunning();
+        let status;
+        try {
+          status = JSON.parse(String(stdout));
+        } catch (_) {
+          return notRunning();
+        }
+        if (!status || typeof status !== "object") return notRunning();
+
+        const engine = status.engine;
+        if (!engine || !engine.running || typeof engine.effective_config !== "string" ||
+            engine.effective_config.length === 0) {
+          let explanation = "State: " + (status.state || "Inactive") + ".";
+          if (status.last_error) explanation += "\nLast error: " + status.last_error;
+          explanation += "\nRun " + fluxd + " status to see why Flux is not active.";
+          return show("Flux is not ready to open a control panel.", explanation);
+        }
+        execute("cat " + shellQuote(engine.effective_config), "fluxConfigCallback");
+      };
+
+      window.fluxConfigCallback = function (errno, stdout, _stderr) {
+        if (Number(errno) !== 0) return configUnavailable();
+        let config;
+        try {
+          config = JSON.parse(String(stdout));
+        } catch (_) {
+          return configUnavailable();
+        }
+
+        const clash = config && config.experimental && config.experimental.clash_api;
+        const controller = clash && typeof clash.external_controller === "string"
+          ? clash.external_controller.trim() : "";
+        if (!controller) return noController();
+
+        const target = splitController(controller);
+        if (!target) {
+          return show(
+            "The control-panel address is invalid.",
+            "Configured address: " + controller + "\nRun " + fluxd +
+              " check, correct external_controller, then reopen this page."
+          );
+        }
+
+        const secret = typeof clash.secret === "string" ? clash.secret : "";
+        if (typeof clash.external_ui !== "string" || clash.external_ui.length === 0) {
+          return show(
+            "No panel is served at /ui/.",
+            "Controller: " + controller + "\nSecret: " + (secret || "(empty)") +
+              "\nPoint your own control panel at this controller."
+          );
+        }
+
+        const host = target.host === "0.0.0.0" || target.host === "::"
+          ? "127.0.0.1" : target.host;
+        const authority = host.includes(":") ? "[" + host + "]" : host;
+        const hostname = encodeURIComponent(host);
+        const port = encodeURIComponent(target.port);
+        const encodedSecret = encodeURIComponent(secret);
+        const parameters = "hostname=" + hostname + "&port=" + port +
+          "&secret=" + encodedSecret;
+        window.location.replace(
+          "http://" + authority + ":" + target.port + "/ui/?" + parameters +
+            "#/setup?" + parameters
+        );
+      };
+
+      if (typeof ksu === "undefined" || typeof ksu.exec !== "function") {
+        show(
+          "Open this page from the module list in your root manager.",
+          "Magisk has no built-in entry for this page; use a launcher such as KsuWebUI."
+        );
+      } else {
+        execute("/data/adb/modules/flux_rs/bin/fluxd status --json", "fluxStatusCallback");
+      }
+    })();
+  </script>
+</body>
+</html>

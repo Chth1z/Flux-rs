@@ -15,7 +15,7 @@ pub const MODULE_NAME: &str = "Flux-rs";
 pub const MODULE_AUTHOR: &str = "Flux-rs contributors";
 /// One-line description that does not overstate fail-open (blueprint §13.1).
 pub const MODULE_DESCRIPTION: &str =
-    "Transparent per-app proxying via eBPF and an unmodified official sing-box.";
+    "Per-app proxy: the apps you pick go through sing-box, everything else is left alone.";
 
 /// Derives a monotonic `versionCode` from a SemVer triple.
 ///
@@ -174,7 +174,7 @@ mod tests {
              version=v0.9.0\n\
              versionCode=9000\n\
              author=Flux-rs contributors\n\
-             description=Transparent per-app proxying via eBPF and an unmodified official sing-box.\n"
+             description=Per-app proxy: the apps you pick go through sing-box, everything else is left alone.\n"
         );
         // LF only, exactly one trailing newline, id matches the Magisk pattern.
         assert!(!prop.contains('\r'));
@@ -210,7 +210,7 @@ mod tests {
             ]
         );
         assert!(out.contains(
-            "description=Transparent per-app proxying via eBPF and an unmodified official sing-box.\\n[Active] gen 7"
+            "description=Per-app proxy: the apps you pick go through sing-box, everything else is left alone.\\n[Active] gen 7"
         ));
         assert!(!out.contains('\r'));
         assert!(out.ends_with('\n') && !out.ends_with("\n\n"));

@@ -21,7 +21,8 @@
 | Phase 8 | 模块生命周期与 release pipeline 已实现、设备闭环已提交 | `3c36194`、`75eeabd`；发布仍受 §20 与 §15.1 门禁约束 |
 | 0.9.1 增量实施 | 文档合同已定稿；§8.5 的 status 缺口已补齐 | `ifaces[].pref` 与三态 `reachable` 已加入 wire 与人类输出；`reachable` 在存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 §15.1 分层 |
 | 0.9.5 批次 A–C | 已提交，Linux 全量测试 184 项与 `clippy -D warnings` 通过（WSL） | `e8f2465`、`b70b940`（A）；`56ec853`（B）；`175ecb2`（C）。尚未在真机回归：设备上跑的仍是 0.9.1 形态的安装 |
-| 0.9.5 批次 D | 待做 | §17.0.2 剩余各行；任务书 `handoff-batch-d.md`。完成后需真机回归、Linux CI，再提升 workspace 版本 |
+| 0.9.5 批次 D | 已提交，Linux 全量测试 186 项、两套 fake-engine 集成场景、`clippy -D warnings`、模块生命周期测试通过（WSL） | webroot 跳转页、`clash_api` 告警降级、用户文案。任务书归档在 `../history/handoff-batch-d.md`。**尚未真机回归**——设备上跑的仍是 0.9.1 形态的安装 |
+| 剩余 | §17.0.2 第 6 项（SSID）单独成批；§17.0.1 第 5、7 项待所有者决定 | 发布前还需：真机回归 0.9.5 构建、Linux CI 全绿、§20 十四条逐条勾选、提升 workspace 版本 |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -47,25 +48,25 @@
 | ~~2~~ | ~~包内 bootstrap 名为 `etc/default-template.json`~~ | ~~`package.rs` 仍装成 `etc/default-sing-box.json`~~ | ~~§28.1~~ |
 | ~~3~~ | ~~订阅抓取、URI 解析、节点精修、`fluxd subscribe`~~ | ~~均未实现~~ | ~~§28.3–§28.7~~ |
 | ~~4~~ | ~~生成是纯函数的机检测试（把生成物的 `outbounds` 换回模板后必须深度相等）~~ | ~~未实现~~ | ~~§28.2、§15.2~~ |
-| 5 | `webroot/index.html` 进 allowlist | allowlist 当前 14 项，无 webroot | §28.8、§13.1 |
+| ~~5~~ | ~~`webroot/index.html` 进 allowlist~~ | ~~allowlist 当前 14 项，无 webroot~~ 批次 D：15 项；打包拒绝 `module/webroot/` 里出现第二个文件 | ~~§28.8、§13.1~~ |
 | 6 | `[ssid]` 维度与 nl80211 事件源 | 未实现 | §29.1–§29.2 |
 | ~~7~~ | ~~三个维度统一黑/白名单与 `@file` 引用~~ | ~~`flux.toml` 仍是 `apps` + `bypass_cidrs` 两个平铺键~~ | ~~§11.2~~ |
 | ~~8~~ | ~~bypass value 分 `FLUX_BYPASS_RESERVED` / `FLUX_BYPASS_POLICY`；`cidr_mode` 进 `flux_control` 的 `pad0[2]`；**`FLUX_ABI_MAGIC` 随之 bump**~~ | ~~loader 恒写 `1`，BPF 只判非空，magic 未变~~ | ~~§6.1.1、§6.3~~ |
 | ~~9~~ | ~~运行时产物改名 `effective-sing-box.<gen>.json` → `sing-box.<gen>.json`~~ | ~~`layout.rs` 仍用旧名~~ | ~~§28.1~~ |
 | ~~10~~ | ~~wire 字段 `first_applicable` → `reachable`；排除原因 `not_first_applicable` → `identity_drift`~~ | ~~`control_wire.rs` 仍是旧名~~ | ~~§24、§27.3.3~~ |
-| 11 | `clash_api` 的 secret / 监听地址不安全时**告警而非硬拒** | `checks.rs` 仍是 error | §23、§27.2.4 |
+| ~~11~~ | ~~`clash_api` 的 secret / 监听地址不安全时**告警而非硬拒**~~ | ~~`checks.rs` 仍是 error~~ 批次 D：并入 `sing_box_warnings`，`check` 与 `status` 同时可见 | ~~§23、§27.2.4~~ |
 | ~~12~~ | ~~listener 地址与固定 bypass 从同一处派生，不在 `abi.rs` 与 `cidr.rs` 两处硬编码~~ | ~~两处各写一遍~~ | ~~§17.0.1 第 4 项~~ |
 | ~~13~~ | ~~物理 `clsact` 缺失时**排除并等 netd**，不自建~~ | ~~需核对 `dataplane` 当前行为~~ 2026-09-04 核对：`platform.rs` 的 admission 对无 `clsact` 的物理接口置 `netd_clsact_missing`，`create_clsact` 只对 `flxrs1` 调用；rtnetlink 事件组含 `RTNLGRP_TC`，任何 TC 事件经去抖后重跑全部接口的 admission | ~~§8.5~~ |
 | ~~14~~ | ~~订阅刷新的一次性 timerfd、失败后按 rtnetlink 默认路由恢复重试~~ | ~~未实现~~ | ~~§29.3、§29.4~~ |
 | ~~15~~ | ~~`config/` 的 inotify 覆盖 `template.json` 与 `@file` 列表，变更即重新生成并换代~~ | ~~未实现~~ | ~~§29.6~~ |
-| 16 | 面向用户的文案按 §27 过一遍（`module.prop`、guide） | 未做 | §27.1.3 |
+| ~~16~~ | ~~面向用户的文案按 §27 过一遍（`module.prop`、guide）~~ | ~~未做~~ 批次 D：`module.prop` 首行、安装器输出、`flux.toml` 注释、guide 示例；README 归所有者（GOV-1.2），未动 | ~~§27.1.3~~ |
 | ~~17~~ | ~~换代的判据是**生成物变了**，不是"哪个文件被改了"~~ | ~~`config_event_domains` 按文件名路由，`flux.toml` 只进策略域~~ | ~~§28.6 第 3 条、§28.2~~ |
 
 第 8 项是本表里唯一改过 ABI 的：结构大小与全部 offset 不变，但契约变了，按 GOV-4.2 已 bump magic 到 `0xF10C0904`，`flux_abi.h` 与 `abi.rs` 两侧同步。
 
 第 17 项的判据说明保留在这里，因为它解释了为什么换代逻辑里没有"哪个文件改了"这张表：`[subscription]` 的精修规则按 §28.2 是生成的输入，改了它必须换代，但按文件名路由的话 `flux.toml` 只进策略域；反过来把 `flux.toml` 也接进引擎域，又会让每次改应用清单都白白重启一次引擎。**生成既然是纯函数，比对生成物本身就是精确的**：字节相同就不换代，不同才换。
 
-剩下的第 5、6、11、16 项分两批：5、11、16 是收尾修补，进批次 D（`handoff-batch-d.md`）；第 6 项是一个新事件源（nl80211 generic netlink），单独成批。
+本表只剩第 6 项：它是一个新事件源（nl80211 generic netlink），单独成批。各批次的任务书完成后归档在 `../history/handoff-batch-*.md`，记录当时为什么这样分批。
 
 **§17.0.1 的哲学返工清单与本表有重叠，但两张表的判据不同**：那张问"现状违反了哪条判据"，本表问"合同要求什么而代码还没有"。发布门禁（§20 第 14 条）只盯本表，所以任何合同要求都必须在这里有一行，否则它永远不会被实现。
 

@@ -52,8 +52,9 @@ install_module() {
 	dest=$1
 	runtime=$2
 	shift 2
-	mkdir -p "$dest/bin" "$dest/etc" "$dest/licenses"
+	mkdir -p "$dest/bin" "$dest/etc" "$dest/licenses" "$dest/webroot"
 	for payload in module.prop customize.sh service.sh uninstall.sh \
+		webroot/index.html \
 		bin/fluxd bin/sing-box etc/default-flux.toml \
 		etc/default-template.json engine.lock LICENSE \
 		THIRD_PARTY_NOTICES.md licenses/sing-box-LICENSE \
@@ -103,6 +104,10 @@ printf '%s\n' "$body" | grep -q '/data/adb/modules' && fail 'uninstall scans mod
 
 [ ! -e "$ROOT/module/post-fs-data.sh" ] || fail 'post-fs-data.sh is forbidden'
 [ ! -e "$ROOT/module/boot-completed.sh" ] || fail 'boot-completed.sh is forbidden'
-[ ! -d "$ROOT/module/webroot" ] || fail 'WebUI/webroot is forbidden'
+WEBROOT="$ROOT/module/webroot"
+[ -d "$WEBROOT" ] || fail 'webroot redirect directory is missing'
+[ -f "$WEBROOT/index.html" ] || fail 'webroot/index.html redirect is missing'
+WEBROOT_ENTRY_COUNT=$(find "$WEBROOT" -mindepth 1 -maxdepth 1 -print | wc -l)
+[ "$WEBROOT_ENTRY_COUNT" -eq 1 ] || fail 'webroot must contain only index.html'
 
 echo 'module lifecycle test: OK'

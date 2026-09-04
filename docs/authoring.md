@@ -219,6 +219,7 @@ docs/
     phase0.md                          §16 Phase 0 十问 + 实测 + 外推分层
     rejected-and-deferred.md           §19、§21、§22 被拒方案 + 延期项 + C 状态登记
     migration.md                       §18 旧仓库过渡（已执行，禁止重演）
+    handoff-batch-*.md                 各实现批次交给实现者的任务书，完成后从 plan/ 移入，原样保留
   plan/                              [计划] 会被做完
     implementation.md                  §17 实施阶段 + 当前进度 + 返工清单
 tools/phase0/

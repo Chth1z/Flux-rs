@@ -27,6 +27,7 @@ for payload in \
 	customize.sh \
 	service.sh \
 	uninstall.sh \
+	webroot/index.html \
 	bin/fluxd \
 	bin/sing-box \
 	etc/default-flux.toml \
@@ -109,11 +110,9 @@ fi
 
 ui_print "- Runtime files initialized."
 if [ "$FRESH_INSTALL" = 1 ]; then
-	ui_print "- Flux-rs is installed DISABLED, on purpose."
-	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and template.json"
-	ui_print "- 2. Run 'fluxd check'"
-	ui_print "- 3. Enable this module in your manager, then REBOOT once."
-	ui_print "-    Later toggles take effect immediately; only the first"
-	ui_print "-    one needs a reboot, because a disabled module never got"
-	ui_print "-    to start the daemon that watches the switch."
+	ui_print "- Flux-rs is installed, but disabled; nothing is proxied yet."
+	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and /data/adb/flux-rs/config/template.json."
+	ui_print "- 2. Run /data/adb/modules/flux_rs/bin/fluxd check."
+	ui_print "- 3. Enable this module in your root manager."
+	ui_print "- Reboot once after first enabling it; later toggles take effect immediately."
 fi
