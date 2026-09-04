@@ -40,7 +40,8 @@ Every possible failure point specifies **how it is detected, what action is take
 | Engine fails to start | pidfd becomes readable immediately | Retry with backoff (1/2/4/8/30 s) | `"engine_exited:code=1"` |
 | The 4 sockets do not appear before the deadline | Timed-out SOCK_DIAG rechecks with backoff | Stop the candidate; `Inactive` | `"engine_not_ready:2/4 sockets"` |
 | Socket inode does not belong to the candidate pid | Cross-check `/proc/<pid>/fd` | Stop the candidate; `Inactive` | `"engine_socket_owner_mismatch"` |
-| `clsact` has a shared block | Dump contains `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK` | **Exclude that interface**; continue with the others | That interface is `excluded(clsact_shared_block)` |
+| `clsact` has a shared block | Dump contains `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK`, or non-empty `TCA_OPTIONS` | **Exclude that interface**; continue with the others | That interface is `excluded(clsact_shared_block)` |
+| `clsact` dump carries an unknown or duplicated attribute | The allowlist parse of §8.5 fails | **Exclude that interface**; fail closed rather than adopt a qdisc Flux cannot fully read | That interface is `excluded(clsact_foreign)` |
 | No usable pref (1–3 are all occupied on `v4-*`) | Dump + §8.5.3 | Exclude that interface | `excluded(tc_no_usable_pref)` |
 | The acquired pref is shadowed by an earlier filter | §8.5.4 liveness verification: tx increases but `SAW_PACKET` does not | Exclude that interface and identify the shadowing filter | `excluded(tc_chain_shadowed)` |
 | No traffic during the liveness verification window | tx does not increase either | Retry with backoff; if there is still no traffic at the limit, permit activation and annotate it | `warn(tc_verify_no_traffic)` |
@@ -99,7 +100,7 @@ Every possible failure point specifies **how it is detected, what action is take
 {
   "ok": true,
   "version": "0.9.0",                // Sole source is the workspace manifest; bump with each release
-  "abi_magic": "0xF10C0903",
+  "abi_magic": "0xF10C0904",          // Whatever bpf/include/flux_abi.h defines; an example, not a pin
   "state": "Disabled" | "Inactive" | "Active",
   "root_manager": "KernelSU",         // Detected manager; null when unknown
   "generation": 7,

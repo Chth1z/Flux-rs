@@ -7,8 +7,9 @@
   disagree, this document is wrong.
 - Audience: implementers, human or model. It assumes no knowledge of the
   previous repository and requires no earlier document.
-- ABI source of truth: `bpf/include/flux_abi.h`
-  (`FLUX_ABI_MAGIC = 0xF10C0903`); data-plane skeleton: `bpf/flux.bpf.c`.
+- ABI source of truth: `bpf/include/flux_abi.h`, which defines `FLUX_ABI_MAGIC`
+  and carries its change log — the value is not restated here, so this document
+  cannot lag behind it; data-plane skeleton: `bpf/flux.bpf.c`.
 - Section numbers are global and never reused. `§N → file` mapping and the
   identifier rules are in `../index.md`; current progress is in
   `../plan/implementation.md`, never here.
@@ -3518,14 +3519,29 @@ C8 defers *a Flux-built WebUI*. A redirect shell is not that, and its cost is
 close to zero, so it ships while C8 stays deferred. Two improvements over the
 reference:
 
-- the redirect URL carries the secret generated at install time, so the user
-  does not have to type it;
-- when `check` finds no `clash_api` configured, the page says so instead of
-  redirecting into a connection failure.
+- the redirect URL carries the controller address and secret the user
+  configured, so neither has to be typed;
+- when no `clash_api` is configured, the page says so instead of redirecting
+  into a connection failure.
 
-`webroot/index.html` joins the packaging allowlist (§13.1). Flux still enables
-no control port by default (§27.2.3), so on a default install this page explains
-rather than redirects.
+**Where the page gets that information.** Not from a file Flux writes: §27.1.2
+allows Flux exactly two writes in the module directory, and §27.2.3 ships no
+controller, so there is no install-time secret to bake in. The page asks at the
+moment it is opened. Every manager that opens a `webroot` — KernelSU, APatch,
+and the standalone WebUI launchers used with Magisk, which itself has no module
+WebUI — exposes the same JavaScript bridge, `ksu.exec(command, options,
+callback)`, which runs a command in a root shell and returns `errno`, `stdout`
+and `stderr` (Verified: `kernelsu.org/guide/module-webui.html`; APatch's FAQ
+states its implementation is identical). The page runs `fluxd status --json`,
+reads `engine.effective_config`, reads that generation's `experimental.clash_api`
+through the same bridge, and then either navigates to the controller or explains
+which precondition is missing: the bridge, a running daemon, a running engine, or
+a configured controller. `fluxd` gains no new command and writes nothing for it.
+
+`webroot/index.html` joins the packaging allowlist (§13.1). It is one file with
+no assets, and it stays one file: anything beyond the redirect is the WebUI C8
+defers. Flux still enables no control port by default (§27.2.3), so on a
+default install this page explains rather than redirects.
 
 ---
 

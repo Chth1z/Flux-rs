@@ -38,10 +38,10 @@ There is no `action.sh`—the switch is the manager's own switch, so there is no
 In exchange, `fluxd` writes the current state to `description=` in `module.prop`, turning the manager's module list into a status panel:
 
 ```text
-description=Transparent per-app proxying via eBPF and an unmodified official sing-box.\n🥰 [Active] gen 7 · 3 apps · rmnet_data0
+description=Per-app proxy: the apps you pick go through sing-box, everything else is left alone.\n🥰 [Active] gen 7 · 3 apps · rmnet_data0
 ```
 
-`\n` is the literal two-character escape, which the manager renders as a line break; the first line is always the original description. Rules:
+`\n` is the literal two-character escape, which the manager renders as a line break; the first line is always the original description. That first line is written for the person reading a module list, not for a reviewer: it says what the module does for them and MUST NOT carry a positioning statement ("unmodified", "official", "eBPF") or overstate the failure semantics of §2.2. Rules:
 
 | State | Display |
 |---|---|
@@ -164,9 +164,10 @@ writes is what the engine runs.
 ### 27.2.4 Optional `clash_api`
 
 Flux packages no WebUI and manages no zashboard. `webroot/index.html` is a
-twelve-line redirect to whatever controller the user configured, carrying the
-secret so it need not be typed (§28.8); when no `clash_api` is configured the
-page says so rather than redirecting into a connection failure.
+single redirect page: opened from the manager's module list, it reads the
+controller address and secret the user configured and navigates there, so
+neither has to be typed (§28.8); when no `clash_api` is configured the page
+says so rather than redirecting into a connection failure.
 
 If a user configures `experimental.clash_api`:
 

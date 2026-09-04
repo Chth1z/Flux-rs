@@ -434,3 +434,12 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **暴露的一个真实缺口**：`fluxd check` 通过不代表 engine 能启动。`sing-box check` 接受了 `detour` 指向裸 direct outbound 的 DNS server，`start` 阶段却拒绝（`detour to an empty direct outbound makes no sense`）。Flux 的处置是正确的——候选失败、保持 `Inactive`、报出精确原因、按 backoff 重试——但文档不能把 `check` 说成"通过就一定能跑"，`check` 是**配置合法性**门，不是启动保证。
 
 **第二个缺口**：fresh install 落地为"管理器里已禁用"，而被禁用的模块不会执行 `service.sh`，所以没有 daemon 在监听开关。**首次启用因此仍需重启一次**；此后的开关才即时生效。`customize.sh` 必须说清这一点。
+
+### 0.6.5 0.9.5 实现期更正（2026-08-31 起）
+
+合同折叠完成后，实现批次对照合同时发现的更正。编号接 §0.6.1。
+
+| # | 原说法 | 实际 | 处置 |
+|---|---|---|---|
+| 23 | §28.3 把 `snell` 列入订阅 URI 的可解析协议集 | Snell 是 Surge 私有协议，`clone/sing-box-official-1.13.19/` 全树零引用；按 §1.1 的"官方未修改二进制"，一个 snell 节点永远连不上，解析它只会造出一个必然过不了 `sing-box check` 的候选。批次 C 的实现者（codex）发现并拒绝自行改合同，是对的 | 2026-08-31 从 §28.3 与解析器移除。不支持的 scheme **让整份解析失败并报行号与 scheme**，不静默跳过——静默丢掉的节点是用户付了钱却看不见的缺失；操作上零成本，因为 §28.6 无论如何保留当前代 |
+| 24 | §28.8 说 webroot 跳转 URL"带上安装时生成的 secret"，在 `check` 发现未配置 `clash_api` 时显示说明 | 0.9.5 的 §27.2.3 默认模板不含 `clash_api`，安装时**不存在任何 secret**；§27.1.2 又只允许 Flux 在模块目录写 `disable` 与 `description=` 两处，静态页面无处可读。这句是 R092 时期"模板可带默认密码"设想的残留，折叠时被原样带过来了 | 2026-09-04 就地改 §28.8：页面在被打开时通过管理器的 WebUI 桥接（KernelSU、APatch 与 Magisk 侧的独立启动器都暴露同一个 `ksu.exec`）运行 `fluxd status --json` 并读取当前代的 `experimental.clash_api`，据此跳转或说明缺了哪个前提。`fluxd` 不加命令、不为它写文件 |
