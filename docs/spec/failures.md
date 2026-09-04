@@ -14,7 +14,7 @@ Every possible failure point specifies **how it is detected, what action is take
 
 | Failure point | Detection | Action | User-visible result |
 |---|---|---|---|
-| Second instance | `flock(LOCK_EX\|LOCK_NB)` fails | Immediately `exit(1)`; **touch no object and do not unlink the socket** | Second invocation reports "already running" |
+| Second instance | `flock(LOCK_EX\|LOCK_NB)` fails | Immediately `exit(3)` — the code the supervisor treats as "do not restart" (§13.2.2); **touch no object and do not unlink the socket** | Second invocation reports "already running" and names the holder's pid |
 | page size ≠ 4096 | `sysconf(_SC_PAGESIZE)` | Remain `Inactive`; **do not start the engine or create any object** | `status.last_error = "unsupported_page_size:16384"` |
 | netns is not the initial netns | Compare the inodes of `/proc/self/ns/net` and `/proc/1/ns/net` | `Inactive` | `"netns_mismatch"` |
 | Runtime directory permissions are wrong | `fstatat` checks mode/uid | `Inactive`; **do not chmod automatically** (the user may have changed it deliberately) | `"runtime_dir_mode:0755 expected 0700"` |
@@ -81,8 +81,9 @@ Every possible failure point specifies **how it is detected, what action is take
 | Disable the module in the manager | The manager creates `/data/adb/modules/flux_rs/disable`; inotify wakes the daemon, which then behaves as in the next row | Same as the next row; no reboot required |
 | `fluxd disable` | Create the same `disable`, publish `active=0`, and stop the engine; the daemon continues running and waiting for commands | Same as above; "disabled" does not mean network objects have been removed during the same boot |
 | `SIGTERM` / `SIGINT` | Same as `stop` | Same as above |
-| `fluxd` receives `SIGKILL` | The kernel terminates the engine because of `PDEATHSIG=SIGKILL` → listener disappears → **new flows are Direct because listener lookup misses**; admitted TCP packets are dropped at ingress after redirect | TC filters + veth + rule + route all remain. **This is the critical fail-open path**: the remaining capture program cannot form a black hole because it first looks up the listener on every invocation |
-| `service.sh` restarts fluxd | §8.7 step 2 deletes every precisely owned residual object before rebuilding | None |
+| The reactor receives `SIGKILL` | The kernel terminates the engine because of `PDEATHSIG=SIGKILL` → listener disappears → **new flows are Direct because listener lookup misses**; admitted TCP packets are dropped at ingress after redirect | TC filters + veth + rule + route all remain. **This is the critical fail-open path**: the remaining capture program cannot form a black hole because it first looks up the listener on every invocation |
+| The supervisor restarts the reactor (§13.2.2), after the 1/2/4/8/30 s backoff | §8.7 step 2 deletes every precisely owned residual object before rebuilding | None |
+| The supervisor itself is killed | Nothing changes for traffic: the reactor keeps running and keeps the lock, only unsupervised. A later `fluxd daemon` is rejected as a second instance | None |
 | Device reboots | All non-persistent kernel objects disappear naturally | None |
 | Module is uninstalled | `uninstall.sh` synchronously requests `fluxd stop`, then deletes only `/data/adb/flux-rs` | Kernel objects remain until reboot; **MUST NOT flush any system object** |
 

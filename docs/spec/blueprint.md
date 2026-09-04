@@ -2169,8 +2169,8 @@ listeners close with the process. The consequences follow from that asymmetry:
 - packets on a flow that already holds a TCP decision are still redirected, and
   then dropped when the ingress lookup misses — which is §2.2.2 behaving as
   specified rather than a residual defect;
-- once `service.sh` restarts fluxd, §8.7's delete-and-rebuild returns everything
-  to a known state.
+- once the supervisor restarts the reactor (§13.2.2), §8.7's delete-and-rebuild
+  returns everything to a known state.
 
 A manual `disable` or `stop` follows the same order: publish `active=0` first,
 then stop the engine. Objects remain until the daemon restarts or the device
@@ -2621,7 +2621,7 @@ impl EngineChild {
 
 ## 10.3 Single instance and the control protocol
 
-- The daemon holds `flock(LOCK_EX|LOCK_NB)` on `/data/adb/flux-rs/run/daemon.lock`. A second instance exits immediately: it MUST NOT unlink the control socket, MUST NOT start a second engine, and MUST NOT touch the first instance's objects. **Only the lock owner may inspect or delete a stale control socket** — the alternative is a losing instance destroying a working one's socket on the way out.
+- The daemon holds `flock(LOCK_EX|LOCK_NB)` on `/data/adb/flux-rs/run/daemon.lock`. A second instance exits immediately **with code 3**, which its supervisor recognises as "do not restart" (§13.2.2): it MUST NOT unlink the control socket, MUST NOT start a second engine, and MUST NOT touch the first instance's objects. **Only the lock owner may inspect or delete a stale control socket** — the alternative is a losing instance destroying a working one's socket on the way out.
 - The control socket is `/data/adb/flux-rs/run/control.sock`: `AF_UNIX` with `SOCK_SEQPACKET`, mode `0600`, and every request additionally checks `SO_PEERCRED.uid == 0`.
 - Encoding is **one single-line JSON document per SEQPACKET datagram**. SEQPACKET preserves message boundaries by construction, so no length prefix is needed. A datagram is at most 64 KiB. The types live in `flux-core/src/control_wire.rs`, so serialisation is unit-testable on any host.
 - **No request_id deduplication cache is needed.** The old v9 protocol maintained a 128-entry `(peer, request_id)` table plus a 30-second duplicate wait for mutating commands. All six commands here are idempotent by construction — `enable` writes the file and reconverges, `reload` recomputes the desired state, `stop` converges to stopped — so replaying one produces the same result as executing it once, and the entire mechanism was deleted. **A new command MUST preserve this property**; if it cannot be made idempotent, deduplication has to come back with it.
@@ -2690,7 +2690,7 @@ Why the window is safe: adding before subtracting means that during it the polic
 
 | Command | Behaviour |
 |---|---|
-| `fluxd daemon` | invoked by `service.sh`; enters the reactor |
+| `fluxd daemon` | invoked by `service.sh`; supervises the reactor, restarting it after a crash (§13.2.2) |
 | `fluxd status` | prints the response of §24.1, human-readable or `--json` |
 | `fluxd check` | read-only validation of both configurations, package resolution and the engine `check`; changes no state |
 | `fluxd enable` | deletes the `disable` file and requests activation. **A front end to the switch file** (C9), never a second source of truth |
@@ -3051,16 +3051,60 @@ The formats are specified in §27.1.3, and the split lives in
 ```sh
 # service.sh (late_start; all logic lives in fluxd)
 MODDIR=${0%/*}
-n=0
-while :; do
-  "$MODDIR/bin/fluxd" daemon
-  rc=$?
-  [ "$rc" = 0 ] && break
-  n=$(( n + 1 )); [ "$n" -gt 4 ] && n=4
-  case "$n" in 1) s=1;; 2) s=2;; 3) s=4;; *) s=8;; esac
-  sleep "$s"
-done
+exec "$MODDIR/bin/fluxd" daemon
 ```
+
+The script starts one process and is gone. It does not loop, does not sleep and
+does not read an exit code: every one of those depends on the state of the
+running system, which is PHIL-7's test for what belongs in the binary.
+
+### 13.2.2 The daemon supervises itself
+
+`fluxd daemon` is two processes. The one `service.sh` starts is the
+**supervisor**; it re-executes its own binary — `/proc/self/exe`, so a module
+replaced on disk cannot change which image restarts — as the **reactor**, with
+`FLUX_SUPERVISOR=<pid>` in the environment as the only marker. The reactor is
+the daemon this document describes everywhere else: it takes `run/daemon.lock`,
+opens the control socket, owns every kernel object and runs the state machine of
+§26. The supervisor owns nothing and knows two things — exit codes and signals.
+
+| Reactor outcome | Supervisor action |
+|---|---|
+| exit `0` — a requested stop (`fluxd stop`, `SIGTERM`, `SIGINT`) | exit `0`. The boot service ends, as it did before |
+| exit `3` — another instance already holds `run/daemon.lock` (§10.3) | exit `3`. Restarting would contend with the instance that is working |
+| any other exit code, or death by signal | wait out the backoff, then re-execute. Same schedule as the engine's: 1/2/4/8/30 s, reset once the reactor has lived 60 s (§25) |
+
+Signals to the supervisor are forwarded: `SIGTERM` and `SIGINT` start a stop
+(`SIGKILL` follows if the reactor has not exited within 10 s, the same deadline
+discipline §13.3 applies to the engine), `SIGHUP` is a reload. After a forwarded
+stop the supervisor exits with the reactor's status and does not restart.
+
+Constraints, because the supervisor's only virtue is that it cannot fail:
+
+- It MUST NOT open the lock, the socket, netlink, BPF or any file under the state
+  root; its whole interface to the reactor is `waitpid` and `kill`.
+- It MUST NOT poll. It blocks in `sigwaitinfo` on `SIGCHLD`, `SIGTERM`,
+  `SIGINT` and `SIGHUP`; the backoff is one `sigtimedwait`, so a stop arriving
+  during backoff is honoured immediately rather than after the sleep.
+- The reactor starts with default signal dispositions and an empty signal mask;
+  the supervisor's blocked set MUST NOT leak through `execve`.
+- It writes one line per event to stderr, which `service.sh` has pointed at
+  `service.log`. It has no other output.
+
+**The reactor does not die with the supervisor.** No `PR_SET_PDEATHSIG` is set on
+it: a supervisor killed by hand leaves a working proxy in place, merely
+unsupervised, and a later `fluxd daemon` is rejected by the lock exactly as any
+second instance is. This is the opposite of the engine's rule in §13.3, for the
+opposite reason — the engine owns nothing and an orphan of it only contends for
+ports; the reactor owns everything and *is* the instance.
+
+Why not the shell loop this section used to show. Its behaviour depended on the
+exit code and on time, so PHIL-7 already placed it in the binary; and it had a
+defect the move fixes: it restarted on **every** non-zero exit, including "another
+instance is already running", so a second `service.sh` invocation looped
+forever at eight-second intervals against the instance that was working.
+
+In `ps`, both processes read `fluxd daemon`; the parent is the supervisor.
 
 - **`customize.sh`** checks arm64 and payload integrity, creates directories and
   sets modes and owners; copies a default configuration **only when the file is
@@ -3129,7 +3173,7 @@ Against the two earlier blueprints, the L2 steady state for a captured TCP flow 
 ## 14.2 Userspace budget
 
 - `fluxd` is single-threaded with a steady-state target RSS of 8 MiB. **This is a target, not a measurement**, and must not be reported as one.
-- At idle there is no periodic timer: an epoll wait, plus a supervisor shell blocked in `wait`.
+- At idle there is no periodic timer: an epoll wait, plus the supervisor process blocked in `sigwaitinfo` (§13.2.2).
 - Only an interface, package, configuration, child or fault change wakes the control plane.
 - Production carries no per-packet logging or telemetry. The one ringbuf wakes only on a deduplicated fault, and `counters` is read only when `status` asks.
 - sing-box's memory and CPU are dominated by the user's own configuration and MUST be reported separately. **`fluxd`'s small RSS MUST NOT be used to present the engine's cost as smaller than it is.**
@@ -3267,7 +3311,7 @@ to meet it rather than to argue it is minor.
 | SELinux still moving permissive to enforcing | a BPF load may succeed then fail, or the reverse | No special handling. A failure means `Inactive`, and the next rtnetlink or inotify event retries |
 | The engine binary's `PT_LOAD` check | not performed at runtime; xtask verified it at packaging time | At runtime only the page size is checked |
 | Clock not synchronised | affects log timestamps only | **No decision uses wall-clock time.** The generation is a monotonic counter, not a timestamp |
-| Repeated restarts, a crash loop | backoff of 1/2/4/8/30 s, reset after the child is stable for 60 s | **There is no "failed N times, locked out permanently".** Recovery continues at a low rate for as long as the switch is on, and `status` exposes `backoff_seconds` so a human can tell the difference between waiting and stuck |
+| Repeated restarts, a crash loop — of the engine under the reactor, or of the reactor under its supervisor (§13.2.2) | backoff of 1/2/4/8/30 s, reset after the child is stable for 60 s; one schedule for both | **There is no "failed N times, locked out permanently".** Recovery continues at a low rate for as long as the switch is on, and `status` exposes `backoff_seconds` so a human can tell the difference between waiting and stuck |
 
 **The correct posture at cold start is to do what can be done and wait for events for the rest.** Only the page size and netns checks are terminal, because retrying them cannot change the answer. Every other failure is merely the outcome of the current convergence round, and the next rtnetlink, inotify or timerfd event converges again. This is what makes the daemon level-triggered rather than a startup sequence with error handling bolted on.
 

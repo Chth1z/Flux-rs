@@ -189,7 +189,7 @@ make Flux the arbiter of a decision inside sing-box's own authority (§9.6).
 
 | Command | Behavior |
 |---|---|
-| `fluxd daemon` | Foreground reactor; `start` and `run` are aliases |
+| `fluxd daemon` | Foreground supervisor that runs and, after a crash, restarts the reactor (§13.2.2); `start` and `run` are aliases |
 | `fluxd status [--json]` | Human-readable or raw JSON status |
 | `fluxd check` | Read-only validation of configuration, package resolution, and engine configuration |
 | `fluxd enable` | Delete the module-directory `disable` and request convergence |
