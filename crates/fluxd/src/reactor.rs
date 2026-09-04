@@ -40,16 +40,11 @@ use crate::checks;
 use crate::control::{ControlConn, ControlServer};
 use crate::engine::{self, EngineChild, EngineError, EngineSpec};
 use crate::layout::{InstanceLock, Layout, LockError};
+use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
 /// updates produce event bursts; one convergence per burst is enough.
 const DEBOUNCE: Duration = Duration::from_millis(1_500);
-
-/// Crash-restart delays (§10.1). The last entry repeats.
-const BACKOFF_STEPS: [u64; 5] = [1, 2, 4, 8, 30];
-
-/// Engine uptime after which the crash counter resets.
-const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
 
 /// The daemon log is rotated once to `.1` at startup past this size.
 const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
@@ -220,7 +215,7 @@ pub fn run_daemon() -> u8 {
         Ok(lock) => lock,
         Err(e @ LockError::Held(_)) => {
             eprintln!("fluxd: {e}");
-            return 1;
+            return LOCK_HELD_EXIT_CODE;
         }
         Err(e) => {
             eprintln!("fluxd: {e}");

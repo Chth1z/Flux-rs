@@ -14,13 +14,15 @@
 //! 4. `fluxd reload`: hot switch — generation grows, pid changes.
 //! 5. `SIGKILL` of the supervised engine freezes capture, exposes the
 //!    1/2-second crash backoff and recovers through fresh generations.
-//! 6. Policy-only hot updates preserve the generation and engine pid; an
+//! 6. `SIGKILL` of the reactor leaves the supervisor alive; after its backoff,
+//!    a new reactor and engine answer `status`.
+//! 7. Policy-only hot updates preserve the generation and engine pid; an
 //!    invalid policy remains reported across a successful engine update.
-//! 7. Overlapping reload clients wait until the queued transaction converges.
-//! 8. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
+//! 8. Overlapping reload clients wait until the queued transaction converges.
+//! 9. `fluxd bugreport`: a zip appears; no logcat entry by default; raw
 //!    configs never included (exit criterion 5).
-//! 9. `fluxd stop`: daemon exits cleanly, control socket removed, no
-//!    effective file left behind; `status` then fails with a clear message.
+//! 10. `fluxd stop`: daemon exits cleanly, control socket removed, no
+//!     effective file left behind; `status` then fails with a clear message.
 //!
 //! On kernels without `udp_diag` (some sandboxes) the engine cannot verify
 //! its sockets; the run degrades to the daemon-only subset and says so.
@@ -43,6 +45,7 @@ fn main() {
 mod tests {
     use std::io::Read;
     use std::net::Ipv4Addr;
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -131,7 +134,9 @@ mod tests {
         )
         .expect("template.json");
 
-        let mut daemon = env.command(&["daemon"]).spawn().expect("daemon spawns");
+        let mut daemon_command = env.command(&["daemon"]);
+        daemon_command.process_group(0);
+        let mut daemon = daemon_command.spawn().expect("daemon spawns");
         wait_for(&root.join("run/control.sock"), Duration::from_secs(10));
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -141,6 +146,7 @@ mod tests {
             if full {
                 scenario_reload_hot_switch(&env);
                 scenario_engine_crash_backoff(&env);
+                scenario_reactor_crash_recovery(&env, &mut daemon);
                 scenario_policy_domain_hot_reload(&env);
                 scenario_queued_reload_waits_for_convergence(&env);
             }
@@ -150,7 +156,8 @@ mod tests {
 
         if outcome.is_err() {
             // Leave no daemon behind on failure; then re-raise.
-            let _ = daemon.kill();
+            // SAFETY: the daemon was made leader of this exact process group.
+            let _ = unsafe { libc::kill(-(daemon.id() as i32), libc::SIGKILL) };
             let _ = daemon.wait();
             dump_daemon_log(&root);
             std::process::exit(101);
@@ -217,18 +224,23 @@ mod tests {
         assert!(stdout.contains("warning:"), "{stdout}");
     }
 
-    fn scenario_second_instance_rejected(env: &Env, daemon_pid: u32) {
+    fn scenario_second_instance_rejected(env: &Env, supervisor_pid: u32) {
+        let reactor_pid = reactor_pid(env);
+        assert_ne!(
+            reactor_pid, supervisor_pid,
+            "run/daemon.lock must identify the reactor, not its supervisor"
+        );
         let (code, _, stderr) = env.run(&["daemon"]);
-        assert_eq!(code, 1, "second instance must exit 1");
+        assert_eq!(code, 3, "a held lock is the no-restart exit code");
         assert!(
             stderr.contains("another fluxd instance is already running"),
             "readable reason required, got: {stderr}"
         );
         assert!(
-            stderr.contains(&format!("pid {daemon_pid}")),
+            stderr.contains(&format!("pid {reactor_pid}")),
             "the holder pid must be named, got: {stderr}"
         );
-        println!("PASS second instance rejected by flock (pid {daemon_pid} named)");
+        println!("PASS second instance rejected by flock (reactor pid {reactor_pid} named)");
     }
 
     fn scenario_disable_enable(env: &Env, full: bool) {
@@ -339,6 +351,69 @@ mod tests {
         println!(
             "PASS engine SIGKILL recovery exposed 1/2s backoff through generation {}",
             previous.generation
+        );
+    }
+
+    fn scenario_reactor_crash_recovery(env: &Env, daemon: &mut Child) {
+        let supervisor_pid = daemon.id();
+        let before = env.status();
+        let old_engine_pid = before.engine.pid.expect("promoted engine pid");
+        let old_reactor_pid = reactor_pid(env);
+        assert_ne!(old_reactor_pid, supervisor_pid);
+
+        // SAFETY: daemon.lock names the exact child that holds this test's
+        // single-instance flock. Its supervisor remains the Child we own.
+        let killed = unsafe { libc::kill(old_reactor_pid as i32, libc::SIGKILL) };
+        assert_eq!(killed, 0, "kill reactor");
+        assert!(
+            daemon.try_wait().expect("poll supervisor").is_none(),
+            "the supervisor must survive its reactor's crash"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last_observation;
+        let (recovered, new_reactor_pid) = loop {
+            let (code, stdout, stderr) = env.run(&["status", "--json"]);
+            if code == 0 {
+                match serde_json::from_str::<Response>(stdout.trim()) {
+                    Ok(response) => {
+                        if let Some(new_reactor_pid) = try_reactor_pid(env) {
+                            if new_reactor_pid != old_reactor_pid
+                                && response.engine.running
+                                && response.engine.pid.is_some_and(|pid| pid != old_engine_pid)
+                            {
+                                break (response, new_reactor_pid);
+                            }
+                        }
+                        last_observation =
+                            format!("status replied but had not recovered: {response:?}");
+                    }
+                    Err(error) => {
+                        last_observation = format!("invalid status JSON: {error}; stdout={stdout}");
+                    }
+                }
+            } else {
+                last_observation = format!("status exit {code}: {stderr}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reactor did not recover within 5 seconds: {last_observation}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        assert!(
+            daemon
+                .try_wait()
+                .expect("poll recovered supervisor")
+                .is_none(),
+            "the original supervisor must still own the recovered reactor"
+        );
+        assert_ne!(new_reactor_pid, supervisor_pid);
+        assert_ne!(recovered.engine.pid, Some(old_engine_pid));
+        println!(
+            "PASS reactor SIGKILL recovery (reactor {old_reactor_pid} -> {new_reactor_pid}, engine {old_engine_pid} -> {:?})",
+            recovered.engine.pid
         );
     }
 
@@ -588,6 +663,18 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn reactor_pid(env: &Env) -> u32 {
+        try_reactor_pid(env).expect("run/daemon.lock contains the reactor pid")
+    }
+
+    fn try_reactor_pid(env: &Env) -> Option<u32> {
+        std::fs::read_to_string(env.root.join("run/daemon.lock"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     fn wait_status(

@@ -22,7 +22,8 @@
 | 0.9.1 增量实施 | 文档合同已定稿；§8.5 的 status 缺口已补齐 | `ifaces[].pref` 与三态 `reachable` 已加入 wire 与人类输出；`reachable` 在存活验证前不发布结论；`print_status` 补齐逐接口行与 counters；CI 的 Windows job 按 §15.1 分层 |
 | 0.9.5 批次 A–C | 已提交，Linux 全量测试 184 项与 `clippy -D warnings` 通过（WSL） | `e8f2465`、`b70b940`（A）；`56ec853`（B）；`175ecb2`（C）。尚未在真机回归：设备上跑的仍是 0.9.1 形态的安装 |
 | 0.9.5 批次 D | 已提交，Linux 全量测试 186 项、两套 fake-engine 集成场景、`clippy -D warnings`、模块生命周期测试通过（WSL） | webroot 跳转页、`clash_api` 告警降级、用户文案。任务书归档在 `../history/handoff-batch-d.md`。**尚未真机回归**——设备上跑的仍是 0.9.1 形态的安装 |
-| 剩余 | §17.0.2 第 6 项（SSID）单独成批；§17.0.1 第 5、7 项待所有者决定 | 发布前还需：真机回归 0.9.5 构建、Linux CI 全绿、§20 十四条逐条勾选、提升 workspace 版本 |
+| 0.9.5 批次 E | 已提交，Linux 全量测试 186+6 项、`daemon_e2e` 含新增的 reactor 崩溃恢复场景、`clippy -D warnings` 两个目标、模块生命周期测试通过（WSL） | 监督进程收进二进制（§13.2.2）。任务书归档在 `../history/handoff-batch-e.md`。**尚未真机回归** |
+| 剩余 | §17.0.2 第 6 项（SSID）= 批次 F，任务书 `handoff-batch-f.md`；§17.0.1 第 7 项待所有者决定 | 发布前还需：真机回归 0.9.5 构建、Linux CI 全绿、§20 十四条逐条勾选、提升 workspace 版本 |
 
 ### 17.0.1 设计哲学判决出的返工清单
 
@@ -34,7 +35,7 @@
 | ~~2~~ | ~~模板声明 listener 地址与端口~~ | ~~§1~~ | ~~反转回注入：预填需要六道门禁，注入需要一道（§9.1）~~ 批次 B（`56ec853`）：`engine_config.rs` 只注入两个 tproxy inbound，模板带 `inbounds` 即拒绝 |
 | ~~3~~ | ~~`first_applicable` 字段名与语义相反，靠四处文档解释~~ | ~~§1、§4~~ | ~~改名 `reachable`，删掉解释段落（§24）~~ |
 | ~~4~~ | ~~listener 地址硬编码在 `abi.rs:145` 与 `cidr.rs` 两处~~ | ~~§4~~ | ~~固定 bypass 从 ABI 常量派生，只留一个来源~~ |
-| 5 | `service.sh` 里的 daemon 重启退避循环 | §7 | 收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案） |
+| ~~5~~ | ~~`service.sh` 里的 daemon 重启退避循环~~ | ~~§7~~ | ~~收进二进制，或写明为什么监督必须在外面（NeoZygisk 用独立 monitor 进程是可参考的答案）~~ 所有者 2026-09-05 选定收进二进制；批次 E：`fluxd daemon` 成为监督进程（§13.2.2），`service.sh` 只剩一行 `exec` |
 | 6 | `clash_api` secret/监听地址为硬拒绝 | §6 | 降为告警（§23） |
 | 7 | 0.9.1 留下的一批"必须/不得"式校验 | §1、§2 | 逐条问"被守护的东西该不该暴露"、"能不能让它写不出来"，能消的消掉而不是改进 |
 

@@ -126,6 +126,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The CLI is the only client, so no compatibility shim was kept.
 - The listener addresses and the fixed bypass set are derived from one ABI
   constant instead of being written out in two files.
+- `fluxd daemon` supervises itself (`docs/spec/blueprint.md` §13.2.2). The
+  process `service.sh` starts re-executes its own binary as the reactor and
+  restarts it after a crash on the same 1/2/4/8/30 s schedule the engine uses;
+  the shell loop that did this before is gone, and with it a defect — it
+  restarted on every non-zero exit, so a second `service.sh` retried forever
+  against the instance that was working. A second instance now exits with code
+  3 (it was 1), which the supervisor recognises as "do not restart". Killing
+  the supervisor leaves the proxy running, only unsupervised.
 - A failed subscription fetch names its cause in `last_error` —
   `subscription_fetch_failed:dns`, `:tls`, `:http`, `:timeout`, `:connect` and
   so on — instead of one undifferentiated `:request`. The subscription URL,

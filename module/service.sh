@@ -54,24 +54,4 @@ chmod 0700 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
 chown 0:0 "$LOG"
 chmod 0600 "$LOG"
 
-# Keep the manager's service process small: fluxd owns all convergence and
-# engine backoff. This loop only handles an unexpected daemon-level failure;
-# a clean `fluxd stop` exits zero and deliberately ends the boot service.
-n=0
-while :; do
-	"$MODDIR/bin/fluxd" daemon >>"$LOG" 2>&1
-	rc=$?
-	[ "$rc" = 0 ] && break
-	n=$((n + 1))
-	[ "$n" -gt 4 ] && n=4
-	case "$n" in
-	1) s=1 ;;
-	2) s=2 ;;
-	3) s=4 ;;
-	*) s=8 ;;
-	esac
-	echo "fluxd exited rc=$rc; restart in ${s}s" >>"$LOG"
-	sleep "$s"
-done
-
-exit 0
+exec "$MODDIR/bin/fluxd" daemon >>"$LOG" 2>&1

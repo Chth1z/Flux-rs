@@ -3,11 +3,14 @@
 //! Module dependency direction (blueprint §5), which must not be violated:
 //!
 //! ```text
-//! main -> reactor -> {layout, control, packages, netlink, bpf, dataplane, engine}
+//! main -> {supervisor, reactor}
+//! reactor -> {supervisor's shared policy constants, layout, control, packages,
+//!             netlink, bpf, dataplane, engine}
 //! ```
 //!
-//! Nothing below `reactor` depends back on it. All runtime state lives in the
-//! reactor's single `Reactor` struct; there are no mutable globals.
+//! Nothing below `reactor` depends back on it. All traffic and control state
+//! lives in the reactor's single `Reactor` struct; the supervisor keeps only
+//! its child pid and crash count, and there are no mutable globals.
 //!
 //! Two encapsulation boundaries inherited from the old repository's
 //! over-design review (blueprint §5, final paragraph):
@@ -42,6 +45,8 @@ mod netlink;
 mod reactor;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod subscription;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod supervisor;
 
 use std::process::ExitCode;
 
@@ -266,7 +271,13 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         // Blueprint §10.6 calls it `daemon`; `start` (implementation plan
         // §17.5) and `run` (service.sh, phase 1) are aliases of the same
         // foreground mode — service.sh owns backgrounding.
-        "daemon" | "start" | "run" => ExitCode::from(reactor::run_daemon()),
+        "daemon" | "start" | "run" => {
+            if std::env::var_os("FLUX_SUPERVISOR").is_some() {
+                ExitCode::from(reactor::run_daemon())
+            } else {
+                ExitCode::from(supervisor::run())
+            }
+        }
 
         "status" => {
             let json = rest.iter().any(|a| a == "--json");

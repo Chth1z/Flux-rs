@@ -41,6 +41,11 @@ run_service apatch 'apatch|10800|n/a' \
 run_service magisk 'magisk|28.1|n/a' \
 	MAGISK_VER=28.1
 
+# Runtime supervision belongs to the Rust binary (PHIL-7), never this script.
+service_body=$(sed '/^[[:space:]]*#/d' "$ROOT/module/service.sh")
+printf '%s\n' "$service_body" | grep -Eq '(^|[[:space:]])(while|sleep)([[:space:]]|$)' && \
+	fail 'service.sh contains a shell supervision loop'
+
 # There is no action.sh: the manager's own module toggle is the switch, and
 # fluxd reacts to it through inotify (C9).
 [ ! -e "$ROOT/module/action.sh" ] || fail 'action.sh is forbidden; the switch is the manager toggle'

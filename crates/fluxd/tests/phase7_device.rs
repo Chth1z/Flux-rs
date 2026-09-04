@@ -34,6 +34,7 @@ mod tests {
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -336,7 +337,9 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(20));
                     }
                     _ => {
-                        let _ = child.kill();
+                        // SAFETY: spawn_daemon makes this child the leader of
+                        // the exact process group containing its reactor.
+                        let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                         let _ = child.wait();
                         break;
                     }
@@ -378,6 +381,7 @@ mod tests {
         let mut command = Command::new(fluxd);
         command
             .arg("daemon")
+            .process_group(0)
             .env("FLUX_RUNTIME_ROOT", root)
             .env("FLUX_MODULE_DIR", root)
             .env("FLUX_ENGINE_BIN", engine)
