@@ -370,6 +370,8 @@ impl MapSet {
         self.delete_one(abi::MAP_FAULT_LATCH, as_bytes(key))
     }
 
+    /// Read by the Phase 6 device test, which includes this module; the
+    /// daemon's own unit tests never call it, hence the allowance.
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn uid_stats_sum(&self, uid: u32) -> io::Result<UidStats> {
@@ -409,7 +411,10 @@ impl MapSet {
         }
     }
 
-    #[allow(dead_code)] // Read through Runtime by the Phase 4 device test.
+    /// Backs `Runtime::maps` for the Phase 4 device test; unused by this
+    /// crate's own unit tests.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn identities(&self) -> Vec<MapIdentity> {
         self.maps.iter().map(|map| map.identity.clone()).collect()
     }

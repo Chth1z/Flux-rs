@@ -28,7 +28,6 @@ const RTM_GETRULE: u16 = 34;
 const RTM_NEWQDISC: u16 = 36;
 const RTM_GETQDISC: u16 = 38;
 const RTM_NEWTFILTER: u16 = 44;
-#[allow(dead_code)] // The Phase 5 attachment consumer is not present yet.
 const RTM_DELTFILTER: u16 = 45;
 const RTM_GETTFILTER: u16 = 46;
 
@@ -70,7 +69,6 @@ const TCA_OPTIONS: u16 = 2;
 const TCA_CHAIN: u16 = 11;
 const TCA_INGRESS_BLOCK: u16 = 13;
 const TCA_EGRESS_BLOCK: u16 = 14;
-#[allow(dead_code)] // The Phase 5 attachment consumer is not present yet.
 const TCA_BPF_FD: u16 = 6;
 const TCA_BPF_NAME: u16 = 7;
 const TCA_BPF_FLAGS: u16 = 8;
@@ -82,11 +80,9 @@ const TCA_BPF_FLAG_ACT_DIRECT: u32 = 1;
 pub const IFF_UP: u32 = 1;
 pub const IFF_LOOPBACK: u32 = 1 << 3;
 pub const TC_H_CLSACT: u32 = 0xffff_fff1;
-#[allow(dead_code)] // Used when Phase 5 attaches flx_in to the owned peer.
 pub const TC_H_INGRESS: u32 = 0xffff_fff2;
 pub const TC_H_EGRESS: u32 = 0xffff_fff3;
 pub const TC_CLSACT_HANDLE: u32 = 0xffff_0000;
-#[allow(dead_code)] // Used by the typed Phase 5 filter attachment call.
 pub const ETH_P_ALL: u16 = 0x0003;
 
 const RT_TABLE_UNSPEC: u8 = 0;
@@ -204,7 +200,6 @@ pub struct Filter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Phase 5 supplies program/map identity after BPF load.
 pub struct FilterIdentity {
     pub ifindex: u32,
     pub parent: u32,
@@ -218,7 +213,6 @@ pub struct FilterIdentity {
     pub flags_gen: u32,
 }
 
-#[allow(dead_code)] // Phase 5 supplies program/map identity after BPF load.
 impl FilterIdentity {
     pub fn matches(&self, filter: &Filter) -> bool {
         !filter.unknown_attrs
@@ -240,7 +234,6 @@ impl FilterIdentity {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Phase 5 supplies a verified program fd.
 pub struct TcAttach<'a> {
     pub ifindex: u32,
     pub parent: u32,
@@ -363,6 +356,9 @@ impl RouteNetlink {
             .collect()
     }
 
+    // The two helpers below give the Phase 5 and 6 device tests, which include
+    // this module, an address and a neighbour on their test interface. The
+    // daemon never assigns addresses, so its own unit tests leave them unused.
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn add_ipv4_address(
@@ -552,7 +548,6 @@ impl RouteNetlink {
         })
     }
 
-    #[allow(dead_code)] // Phase 3 owns the encoder; Phase 5 supplies program fds.
     pub fn attach_filter(&mut self, attach: TcAttach<'_>) -> io::Result<()> {
         let body = TcMsg {
             family: libc::AF_UNSPEC as u8,
@@ -573,7 +568,6 @@ impl RouteNetlink {
         })
     }
 
-    #[allow(dead_code)] // Phase 3 owns the encoder; Phase 5 supplies identities.
     pub fn detach_filter(
         &mut self,
         ifindex: u32,
@@ -647,7 +641,6 @@ impl RouteNetlink {
     }
 }
 
-#[allow(dead_code)] // Used by the dormant typed filter mutation methods above.
 fn tc_info(priority: u16, protocol: u16) -> u32 {
     (u32::from(priority) << 16) | u32::from(protocol.to_be())
 }

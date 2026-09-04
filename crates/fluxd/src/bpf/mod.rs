@@ -216,12 +216,18 @@ impl Runtime {
         Self::load(object_bytes, FLUX_ABI_MAGIC)
     }
 
-    #[allow(dead_code)] // Read by the separately compiled Phase 4 device test.
+    /// The full map inventory. Only the Phase 4 device test reads it, to prove
+    /// loader parity and cleanup; the daemon addresses maps by name, and this
+    /// crate's own unit tests never call it — hence the allowance.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn maps(&self) -> Vec<MapIdentity> {
         self.maps.identities()
     }
 
-    #[allow(dead_code)] // Read by the separately compiled Phase 4 device test.
+    /// The full program inventory, for the same test and the same reason.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn programs(&self) -> Vec<ProgramIdentity> {
         self.programs
             .iter()
@@ -230,7 +236,6 @@ impl Runtime {
     }
 
     /// Opens the Phase 5 consumer over the already-created fault ring.
-    #[allow(dead_code)] // Phase 5 registers this FD in the reactor epoll set.
     pub fn fault_ring(&self) -> Result<RingBuffer, LoadError> {
         let fd = self
             .maps
@@ -240,7 +245,6 @@ impl Runtime {
             .map_err(|error| LoadError::syscall("ringbuf_mmap", None, error))
     }
 
-    #[allow(dead_code)] // Phase 5 passes these FDs to typed TC attachment.
     pub fn program_fd(&self, name: &str) -> Option<i32> {
         self.programs
             .iter()
@@ -334,7 +338,6 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn uid_stats_sum(&self, uid: u32) -> Result<UidStats, LoadError> {
         self.maps
             .uid_stats_sum(uid)
@@ -431,9 +434,11 @@ fn sorted_names(names: &[&str]) -> Vec<String> {
 }
 
 /// Confirms that a just-dropped Phase 4 runtime left no unpinned kernel
-/// objects behind. This is an acceptance-test seam, not a cleanup mechanism.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-#[allow(dead_code)] // Called by the separately compiled Phase 4 device test.
+/// objects behind. This is an acceptance-test seam, not a cleanup mechanism,
+/// so it exists only in test builds; the Phase 4 device test includes this
+/// module and is its only caller.
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+#[allow(dead_code)]
 pub fn verify_unloaded(map_ids: &[u32], program_ids: &[u32]) -> Result<(), LoadError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {

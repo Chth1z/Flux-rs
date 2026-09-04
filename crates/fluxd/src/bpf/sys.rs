@@ -12,8 +12,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 pub const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 pub const BPF_OBJ_NAME_LEN: usize = 16;
 pub const BPF_F_NO_PREALLOC: u32 = 1;
-#[allow(dead_code)] // Phase 5 checksum-adjusting TC calls use this UAPI flag.
-pub const BPF_F_MARK_MANGLED_0: u64 = 1 << 6;
 
 const BPF_MAP_CREATE: u32 = 0;
 const BPF_MAP_LOOKUP_ELEM: u32 = 1;
@@ -24,10 +22,7 @@ const BPF_PROG_LOAD: u32 = 5;
 const BPF_PROG_GET_FD_BY_ID: u32 = 13;
 const BPF_MAP_GET_FD_BY_ID: u32 = 14;
 const BPF_OBJ_GET_INFO_BY_FD: u32 = 15;
-#[allow(dead_code)] // The checked query seam is consumed when Phase 5 attaches.
-const BPF_PROG_QUERY: u32 = 16;
 const BPF_BTF_LOAD: u32 = 18;
-#[allow(dead_code)] // Control snapshots are frozen in Phase 5.
 const BPF_MAP_FREEZE: u32 = 22;
 
 const VERIFIER_LOG_BYTES: usize = 256 * 1024;
@@ -165,7 +160,6 @@ pub fn create_map(spec: MapCreate<'_>) -> io::Result<OwnedFd> {
     bpf_fd(BPF_MAP_CREATE, &mut attr)
 }
 
-#[allow(dead_code)] // Phase 5 publishes control_root and policy entries.
 pub fn update_map(map_fd: RawFd, key: &[u8], value: &[u8], flags: u64) -> io::Result<()> {
     let mut attr = [0u8; 32];
     put_u32(&mut attr, 0, fd_u32(map_fd)?);
@@ -224,7 +218,6 @@ pub fn next_map_key(map_fd: RawFd, previous: Option<&[u8]>, next: &mut [u8]) -> 
     }
 }
 
-#[allow(dead_code)] // Phase 5 freezes each immutable control leaf.
 pub fn freeze_map(map_fd: RawFd) -> io::Result<()> {
     let mut attr = [0u8; 4];
     put_u32(&mut attr, 0, fd_u32(map_fd)?);
@@ -373,48 +366,12 @@ pub fn program_fd_by_id_verified(id: u32) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-#[allow(dead_code)] // Device cleanup tests and Phase 5 ownership use this.
 pub fn map_fd_by_id_verified(id: u32) -> io::Result<OwnedFd> {
     let fd = fd_by_id(BPF_MAP_GET_FD_BY_ID, id)?;
     if map_info(fd.as_raw_fd())?.id != id {
         return Err(io::Error::from_raw_os_error(libc::ESTALE));
     }
     Ok(fd)
-}
-
-/// Checklist §12.7(7), ready for Phase 5's attachment inventory.
-#[allow(dead_code)] // Phase 4 loads but does not attach/query programs.
-pub fn query_program_ids(
-    target_fd: RawFd,
-    attach_type: u32,
-    capacity: usize,
-) -> io::Result<Vec<u32>> {
-    if capacity == 0 || capacity > u32::MAX as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "BPF_PROG_QUERY capacity is invalid",
-        ));
-    }
-    let mut ids = vec![0u32; capacity];
-    let mut attr = [0u8; 32];
-    put_u32(&mut attr, 0, fd_u32(target_fd)?);
-    put_u32(&mut attr, 4, attach_type);
-    put_u64(&mut attr, 16, ptr_u64(ids.as_mut_ptr()));
-    put_u32(&mut attr, 24, capacity as u32);
-    let result = bpf_zero(BPF_PROG_QUERY, &mut attr);
-    let reported = get_u32(&attr, 24) as usize;
-    match result {
-        Err(error) if error.raw_os_error() == Some(libc::ENOSPC) || reported > capacity => {
-            return Err(io::Error::from_raw_os_error(libc::E2BIG));
-        }
-        Err(error) => return Err(error),
-        Ok(()) if reported > capacity => {
-            return Err(io::Error::from_raw_os_error(libc::E2BIG));
-        }
-        Ok(()) => {}
-    }
-    ids.truncate(reported);
-    Ok(ids)
 }
 
 fn fd_by_id(command: u32, id: u32) -> io::Result<OwnedFd> {
@@ -535,14 +492,6 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn get_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(
-        bytes[offset..offset + 4]
-            .try_into()
-            .expect("fixed attr range"),
-    )
 }
 
 #[cfg(test)]

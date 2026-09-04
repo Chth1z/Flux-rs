@@ -169,6 +169,8 @@ struct FilterSlot<'a> {
     program_name: &'a str,
 }
 
+/// Input to `attach_filter_for_test`; constructed only by the device tests
+/// that include this module, never by this crate's own unit tests.
 #[cfg(test)]
 #[allow(dead_code)]
 pub struct TestFilterSpec<'a> {
@@ -311,18 +313,21 @@ impl Manager {
             in_drop_snapshot: read(Counter::InDropSnapshot)?,
         })
     }
+}
 
+/// Seams for the Phase 3–7 device tests, which compile this module into their
+/// own binaries by path. The daemon's own unit tests never call them, so this
+/// block — and only this block — allows dead code.
+#[cfg(test)]
+#[allow(dead_code)]
+impl Manager {
     /// Device integration tests need to leave the owner's phone exactly as it
     /// was. This is not a production stop path: normal stop intentionally
     /// retains owned kernel objects until the next cold start (§8.8).
-    #[cfg(test)]
-    #[allow(dead_code)] // Used by the separately compiled phase3_device target.
     pub fn cleanup_for_test(&mut self) -> Result<(), String> {
         self.cleanup_owned().map_err(|error| error.to_string())
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn publish_test_active(&mut self, uid: u32) -> Result<(), DataplaneError> {
         let mut control = self.last_control.ok_or_else(|| {
             DataplaneError::new("control_missing", "inactive test control was not published")
@@ -341,8 +346,6 @@ impl Manager {
         Ok(())
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn publish_test_inactive(&mut self) -> Result<(), DataplaneError> {
         let mut control = self.last_control.ok_or_else(|| {
             DataplaneError::new("control_missing", "test control was not published")
@@ -362,8 +365,6 @@ impl Manager {
         Ok(())
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn attach_filter_for_test(
         &mut self,
         spec: TestFilterSpec<'_>,
@@ -380,8 +381,6 @@ impl Manager {
         Ok(())
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn detach_filter_for_test(
         &mut self,
         ifname: &str,
@@ -391,8 +390,6 @@ impl Manager {
         self.detach_recorded(ifname, parent, handle)
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn counter_for_test(&self, counter: Counter) -> Result<u64, DataplaneError> {
         self.runtime
             .as_ref()
@@ -403,8 +400,6 @@ impl Manager {
             .map_err(DataplaneError::bpf)
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn uid_stats_for_test(&self, uid: u32) -> Result<UidStats, DataplaneError> {
         self.runtime
             .as_ref()
@@ -414,7 +409,9 @@ impl Manager {
             .uid_stats_sum(uid)
             .map_err(DataplaneError::bpf)
     }
+}
 
+impl Manager {
     /// Phase 3-only compatibility seam used by its device lifecycle test.
     pub fn converge(&mut self, enabled: bool) {
         self.converge_inner(enabled, None);

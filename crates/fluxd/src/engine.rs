@@ -843,12 +843,18 @@ pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readine
     }
 }
 
+// The four items below are the blocking harness the `engine_lifecycle`
+// integration test drives, compiled into that test by path. The reactor uses
+// the event-driven halves (`probe_ready`, the pidfd, the timers) instead, and
+// this crate's own unit tests never call them, hence `allow(dead_code)` on
+// exactly these four.
+
 /// §9.5: waits for the four exact sockets with a 10/20/40… ms backoff capped
 /// at 250 ms and a hard total deadline. Every found inode is cross-checked
 /// against `/proc/<pid>/fd`. This is not steady-state polling — it exists only
 /// between spawn and ready/failed, then stops forever.
 #[cfg(test)]
-#[allow(dead_code)] // Used by the path-included Linux integration harness.
+#[allow(dead_code)]
 pub fn wait_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), EngineError> {
     let deadline = Instant::now() + READY_DEADLINE;
     let mut backoff = Duration::from_millis(10);
@@ -924,7 +930,7 @@ pub fn terminate(child: &EngineChild, grace: Duration) -> io::Result<String> {
 
 /// The outcome of one §9.4 transaction.
 #[cfg(test)]
-#[allow(dead_code)] // Used by the path-included Linux integration harness.
+#[allow(dead_code)]
 pub struct GenerationOutcome {
     /// The running engine after the transaction: the promoted candidate, the
     /// recovered old generation, or `None`.
@@ -943,7 +949,7 @@ pub struct GenerationOutcome {
 /// Publish points (steps 2, 4-latch, 5) are no-ops until the data plane exists
 /// (Phase 4+); their positions in the sequence are already final.
 #[cfg(test)]
-#[allow(dead_code)] // Used by the path-included Linux integration harness.
+#[allow(dead_code)]
 pub fn run_generation_switch(
     layout: &Layout,
     spec: &EngineSpec,
@@ -1178,7 +1184,7 @@ pub fn run_generation_switch(
 /// data plane exists), then terminate, then delete the generation file — it is
 /// a generated artifact and cold start regenerates it.
 #[cfg(test)]
-#[allow(dead_code)] // Used by the path-included Linux integration harness.
+#[allow(dead_code)]
 pub fn stop_engine(child: &EngineChild) -> io::Result<String> {
     let effective = child.effective.clone();
     let exit = terminate(child, TERMINATE_GRACE)?;

@@ -132,8 +132,8 @@ impl Layout {
         self.config_dir().join("template.json")
     }
 
-    /// Raw subscription response cache. Batch C is the first writer.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Raw subscription response cache (§28.5): the one file under `run/`
+    /// whose bytes came from the network.
     pub fn subscription_raw(&self) -> PathBuf {
         self.run_dir().join("subscription.raw")
     }
