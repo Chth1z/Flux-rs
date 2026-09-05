@@ -6,12 +6,11 @@ eBPF and an **unmodified** official
 VPN, alter packets' IP addresses or ports, or take over traffic from apps you
 did not select.
 
-> **Status:** the 0.9.0 implementation is in pre-release validation. The 0.9.1
-> design is an incremental correction layer over the frozen 0.9.0 blueprint;
-> it does not by itself bump the workspace version or authorize a release. A
-> signed release tag is created only after every applicable gate in 0.9.0 §20
-> and the 0.9.1 delta passes. Do not treat an arbitrary Actions artifact or
-> third-party repack as a release.
+> **Status:** pre-release. The normative design is the 0.9.5 blueprint
+> (`docs/spec/blueprint.md`); the implementation has caught up with it, and
+> the workspace version stays at 0.9.0 until the device regression and every
+> gate in §20 pass. A signed release tag is the only release channel — do not
+> treat an Actions artifact or a third-party repack as one.
 
 ## What it does
 
