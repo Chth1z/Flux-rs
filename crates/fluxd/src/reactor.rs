@@ -3562,8 +3562,12 @@ impl Reactor {
         };
 
         engine_config::generate_from_template(&template, &nodes).map_err(|error| {
+            let token = match error {
+                engine_config::EngineConfigError::UnfilledGroups(_) => "engine_config_unfilled",
+                _ => "engine_config_invalid",
+            };
             (
-                "engine_config_invalid".to_string(),
+                token.to_string(),
                 Some(engine::describe_config_error(&error)),
             )
         })

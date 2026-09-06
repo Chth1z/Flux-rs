@@ -286,8 +286,7 @@ mod tests {
 
     #[test]
     fn lookup_failures_are_dns() {
-        let error = io::Error::new(
-            ErrorKind::Other,
+        let error = io::Error::other(
             "failed to lookup address information: No address associated with hostname",
         );
         let (token, detail) = classify_io(&error);

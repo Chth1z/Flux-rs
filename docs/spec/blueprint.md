@@ -3430,21 +3430,33 @@ template.json  +  subscription.raw  +  flux.toml refinement rules
 
 Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
-1. **Fill.** Every **vacant** `selector` or `urltest` in the template is filled
-   with the regional group its tag matches; tags `PROXY`, `GLOBAL` and `AUTO`
-   are filled with every node. A group is vacant when its member list is empty
-   or holds nothing but `DIRECT`.
+1. **Fill.** Every `selector` or `urltest` in the template whose `outbounds` is
+   an empty array is filled with the regional group its tag matches. Tags
+   `PROXY`, `GLOBAL` and `AUTO` are filled with every node.
 2. **Append.** The refined nodes are appended to `outbounds`.
 
-**A fill that produces no member leaves the group exactly as written.** The
-engine treats an empty group as fatal at startup — `initialize outbound[N]:
-missing tags`, measured against the pinned 1.13.19 — so replacing `["DIRECT"]`
-with `[]` would take the whole configuration down. That is also why `DIRECT`
-counts as vacancy at all: §27.2.3's shipped template is the reference
-implementation's, whose regional groups are empty because `updater.sh` always
-fills them before the engine starts. Flux hands an unsubscribed template
-straight to sing-box, so those groups ship holding `DIRECT` and lose it as
-soon as the subscription has a node for them.
+Two consequences follow from one measured fact: **the engine rejects an empty
+group outright** — `initialize outbound[N]: missing tags` at both `check` and
+`run`, measured against the pinned 1.13.19, whether or not anything references
+the group.
+
+- **A group with no matching node becomes `DIRECT`.** An Asia-only plan leaves
+  the template's `US` empty, and shipping that to the engine would take the
+  whole configuration down over one unused group. `DIRECT` keeps it selectable
+  and visibly not a proxy.
+- **With no nodes at all the candidate is refused**, naming the empty groups:
+  `engine_config_unfilled`. A template is not a configuration. The reference
+  implementation can leave its regional groups empty because `updater.sh` fills
+  them before the engine ever sees the file; Flux reaches the same place by
+  refusing to hand sing-box a file it will reject, and saying which groups are
+  waiting and that `[subscription] url` or the user's own nodes fill them.
+  Cold start therefore stays `Inactive` and Direct, with the reason stated,
+  rather than entering a crash-restart loop (§23.1).
+
+**Nodes that no group selects are a warning, not an error** (`nodes_unreferenced`).
+The configuration is valid and the user may mean it, but every selected app
+still egresses direct, so `status` and `check` say so instead of reporting a
+clean Active (§17.1).
 
 Everything else MUST pass through byte for byte.
 

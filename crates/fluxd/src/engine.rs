@@ -319,6 +319,19 @@ pub fn describe_config_error(e: &EngineConfigError) -> String {
         EngineConfigError::NodeTagMissing => {
             "a refined subscription node has no non-empty tag".to_string()
         }
+        EngineConfigError::UnfilledGroups(tags) => {
+            let (subject, verb, them) = if tags.len() == 1 {
+                ("group", "has", "it")
+            } else {
+                ("groups", "have", "them")
+            };
+            format!(
+                "template.json is still a template: {subject} {} {verb} no members and there is \
+                 no node to fill {them} with. Set `url` under [subscription] in flux.toml, or \
+                 write the nodes into {them} yourself.",
+                tags.join(", ")
+            )
+        }
     }
 }
 

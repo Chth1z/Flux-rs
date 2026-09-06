@@ -100,13 +100,21 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bionic so `getaddrinfo` reaches netd; a fully static binary cannot resolve
   names on Android. Lookup failures are reported as
   `subscription_fetch_failed:dns`, not `:io`.
-- The bootstrap template is now the original Flux module's shape — `PROXY` as a
-  menu over `HK`/`TW`/`JP`/`SG`/`US`, plus an `AUTO` urltest — and generation
-  treats a group holding nothing but `DIRECT` as vacant, so those groups take
-  the subscription's nodes. Previously `PROXY` pointed straight at `DIRECT` and
-  only empty groups were filled, so a fetched subscription produced an Active
-  generation that sent every captured flow direct. A fill that produces no
-  member now leaves the group alone: the engine rejects an empty group outright.
+- The bootstrap template is the original Flux module's, unchanged apart from the
+  four differences Flux forces: `PROXY` is a menu over the empty regional groups
+  `HK`/`TW`/`JP`/`SG`/`US` that the subscription fills. Previously `PROXY`
+  pointed straight at `DIRECT` and only empty groups were filled, so a fetched
+  subscription produced an Active generation that sent every captured flow
+  direct.
+- A template with no node to fill its groups is no longer handed to sing-box.
+  Generation refuses it as `engine_config_unfilled`, naming the groups and the
+  two ways to fill them, and the daemon stays Inactive and Direct instead of
+  starting an engine that rejects an empty group and crash-restarts. A group the
+  subscription has no node for becomes `DIRECT` rather than staying empty, so
+  one unused region cannot take the configuration down.
+- `check` and `status` warn (`nodes_unreferenced`) when the configuration
+  carries nodes that no group selects, because selected apps still egress direct
+  in that state.
 - `fluxd bugreport` writes under the state root unless `-o` is given. The
   previous default was the process working directory, which is `/` in a root
   shell and is read-only.

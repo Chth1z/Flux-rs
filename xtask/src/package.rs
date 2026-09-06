@@ -766,24 +766,40 @@ fn validate_default_template_shape(template: &str) -> Result<(), String> {
     if !has_direct {
         return Err("module/template.json must contain an official direct outbound".into());
     }
-    // An empty selector cannot be resolved, so a fresh install would fail
-    // `fluxd check` before the user ever edited anything.
+    // The empty groups are the point: they are what a subscription fills
+    // (§28.2). What must hold is that every member a group names exists, or the
+    // engine refuses the filled configuration too.
+    let tags: Vec<&str> = outbounds
+        .iter()
+        .filter_map(|outbound| outbound.get("tag").and_then(|value| value.as_str()))
+        .collect();
     for outbound in outbounds {
         let kind = outbound.get("type").and_then(|value| value.as_str());
-        if matches!(kind, Some("selector") | Some("urltest"))
-            && outbound
-                .get("outbounds")
-                .and_then(|value| value.as_array())
-                .is_none_or(|list| list.is_empty())
-        {
-            return Err(format!(
-                "module/template.json {} '{}' has no members; a bootstrap default must resolve",
-                kind.unwrap_or("group"),
-                outbound
-                    .get("tag")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("<untagged>")
-            ));
+        if !matches!(kind, Some("selector") | Some("urltest")) {
+            continue;
+        }
+        let members = outbound
+            .get("outbounds")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                format!(
+                    "module/template.json group '{}' has no outbounds array",
+                    outbound
+                        .get("tag")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<untagged>")
+                )
+            })?;
+        for member in members.iter().filter_map(|value| value.as_str()) {
+            if !tags.contains(&member) {
+                return Err(format!(
+                    "module/template.json group '{}' names '{member}', which no outbound declares",
+                    outbound
+                        .get("tag")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<untagged>")
+                ));
+            }
         }
     }
 
@@ -936,8 +952,32 @@ pub fn template_check() -> Result<(), String> {
     validate_default_template_shape(&template)?;
     let user = flux_core::engine_config::parse_jsonc(&template)
         .map_err(|e| format!("module/template.json is invalid JSONC: {e}"))?;
-    let generated = flux_core::engine_config::generate_from_template(&user, &[])
-        .map_err(|e| format!("generate default template: {e:?}"))?;
+
+    // With nothing to fill its groups the template is not a configuration, and
+    // generation MUST refuse rather than let the engine reject it (§28.2).
+    match flux_core::engine_config::generate_from_template(&user, &[]) {
+        Err(flux_core::engine_config::EngineConfigError::UnfilledGroups(tags)) => {
+            println!("template-check: unsubscribed generation refused, waiting on {tags:?}");
+        }
+        Err(e) => return Err(format!("generate default template: {e:?}")),
+        Ok(_) => {
+            return Err(
+                "module/template.json generated a configuration with no nodes at all; \
+                 a bootstrap default's groups must be the subscription's to fill (§28.2)"
+                    .into(),
+            )
+        }
+    }
+
+    let generated = flux_core::engine_config::generate_from_template(&user, &synthetic_nodes()?)
+        .map_err(|e| format!("generate filled template: {e:?}"))?;
+    let unreferenced = flux_core::engine_config::unreferenced_node_tags(&generated);
+    if !unreferenced.is_empty() {
+        return Err(format!(
+            "module/template.json leaves filled nodes unselected: {unreferenced:?}; \
+             a group tagged for each shipped region must exist"
+        ));
+    }
     let params = flux_core::engine_config::EngineParams {
         generation: 1,
         port_v4: flux_core::abi::LISTEN_PORT_MIN,
@@ -956,12 +996,34 @@ pub fn template_check() -> Result<(), String> {
     let _ = std::fs::remove_file(&config);
     if !output.status.success() {
         return Err(format!(
-            "official sing-box {version} rejected module/template.json: {}",
+            "official sing-box {version} rejected the filled module/template.json: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    println!("template-check: OK — official sing-box {version} accepted the shipped template");
+    println!(
+        "template-check: OK — official sing-box {version} accepted the shipped template once \
+         filled, and refused to be handed it unfilled"
+    );
     Ok(())
+}
+
+/// One node per region the shipped template groups by, so the check covers the
+/// fill for every group the default declares.
+fn synthetic_nodes() -> Result<Vec<flux_core::engine_config::RefinedNode>, String> {
+    ["HK", "TW", "JP", "SG", "US"]
+        .iter()
+        .map(|region| {
+            let outbound = flux_core::engine_config::parse_jsonc(&format!(
+                "{{\"type\": \"trojan\", \"tag\": \"probe-{region}\", \
+                 \"server\": \"192.0.2.1\", \"server_port\": 443, \"password\": \"probe\"}}"
+            ))
+            .map_err(|e| format!("build the {region} probe node: {e}"))?;
+            Ok(flux_core::engine_config::RefinedNode {
+                outbound,
+                groups: vec![(*region).to_string()],
+            })
+        })
+        .collect()
 }
 
 fn multiarch_include() -> Option<PathBuf> {

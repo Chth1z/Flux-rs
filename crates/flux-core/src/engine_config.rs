@@ -81,17 +81,25 @@ pub enum EngineConfigError {
     NodeNotAnObject,
     /// A refined node had no non-empty string tag.
     NodeTagMissing,
+    /// Groups were still empty after the fill and there was no node to put in
+    /// them. The template is not a runnable configuration yet, and the engine
+    /// rejects an empty group outright, so the candidate never reaches it.
+    UnfilledGroups(Vec<String>),
 }
 
 /// Generates the engine-owned configuration from a user-owned template.
 ///
-/// Exactly two mutations are permitted (§28.2): fill a vacant selector/urltest
+/// Exactly two mutations are permitted (§28.2): fill an empty selector/urltest
 /// group from the refined node tags, then append the refined outbound objects.
-/// A group is vacant when its member list is empty or holds nothing but the
-/// bootstrap placeholder `DIRECT`. `PROXY`, `GLOBAL` and `AUTO` receive every
-/// node; other groups receive nodes carrying that exact group name, so a group
-/// Flux cannot fill produces no members and is left exactly as written. Every
-/// other value is cloned unchanged.
+/// `PROXY`, `GLOBAL` and `AUTO` receive every node; other groups receive nodes
+/// carrying that exact group name. Every other value is cloned unchanged.
+///
+/// An empty group is fatal to the engine, so a group the subscription cannot
+/// fill becomes `DIRECT` — selectable, and visibly not a proxy. With no nodes
+/// at all there is nothing to build from and the whole candidate is refused as
+/// [`EngineConfigError::UnfilledGroups`]: a template is not a runnable
+/// configuration, and handing one to sing-box would only produce a crash loop
+/// (§28.2).
 pub fn generate_from_template(
     template: &Value,
     nodes: &[RefinedNode],
@@ -119,6 +127,7 @@ pub fn generate_from_template(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut generated = template.clone();
+    let mut unfilled = Vec::new();
     let outbounds = generated
         .get_mut("outbounds")
         .and_then(Value::as_array_mut)
@@ -134,35 +143,79 @@ pub fn generate_from_template(
         let Some(members) = object.get("outbounds").and_then(Value::as_array) else {
             continue;
         };
+        if !members.is_empty() {
+            continue;
+        }
         let Some(group_tag) = object.get("tag").and_then(Value::as_str) else {
             continue;
         };
-        if !is_vacant(members) {
+        if nodes.is_empty() {
+            unfilled.push(group_tag.to_string());
             continue;
         }
         let all_nodes = matches!(group_tag, "PROXY" | "GLOBAL" | "AUTO");
-        let filled: Vec<Value> = nodes
+        let mut filled: Vec<Value> = nodes
             .iter()
             .zip(node_tags.iter())
             .filter(|(node, _)| all_nodes || node.groups.iter().any(|group| group == group_tag))
             .map(|(_, node_tag)| Value::String(node_tag.clone()))
             .collect();
-        // Emptying a group that the subscription cannot fill would make the
-        // engine refuse the whole config: an empty selector is fatal at
-        // startup, not merely unresolvable.
         if filled.is_empty() {
-            continue;
+            filled.push(Value::String(DIRECT_TAG.to_string()));
         }
         object.insert("outbounds".to_string(), Value::Array(filled));
+    }
+    if !unfilled.is_empty() {
+        return Err(EngineConfigError::UnfilledGroups(unfilled));
     }
     outbounds.extend(nodes.iter().map(|node| node.outbound.clone()));
     Ok(generated)
 }
 
-/// A group waiting to be filled: written empty, or holding only the bootstrap
-/// placeholder the shipped template uses so an unsubscribed install resolves.
-fn is_vacant(members: &[Value]) -> bool {
-    members.is_empty() || matches!(members, [Value::String(member)] if member == "DIRECT")
+/// The official direct outbound every supported template carries; what a group
+/// with no matching node falls back to.
+const DIRECT_TAG: &str = "DIRECT";
+
+/// Node tags a generated configuration carries that no group selects.
+///
+/// The engine would run such a configuration happily and proxy nothing through
+/// those nodes, so `check` and `status` say so rather than reporting a clean
+/// Active (§17.1).
+pub fn unreferenced_node_tags(generated: &Value) -> Vec<String> {
+    let Some(outbounds) = generated.get("outbounds").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut node_tags = Vec::new();
+    let mut selected = Vec::new();
+    for outbound in outbounds {
+        let Some(object) = outbound.as_object() else {
+            continue;
+        };
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if matches!(kind, "selector" | "urltest") {
+            selected.extend(
+                object
+                    .get("outbounds")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string),
+            );
+            continue;
+        }
+        if matches!(kind, "direct" | "block" | "dns" | "") {
+            continue;
+        }
+        if let Some(tag) = object.get("tag").and_then(Value::as_str) {
+            node_tags.push(tag.to_string());
+        }
+    }
+    node_tags.retain(|tag| !selected.iter().any(|member| member == tag));
+    node_tags
 }
 
 /// Injects Flux-owned inbounds into one generated engine configuration.
@@ -384,18 +437,17 @@ mod tests {
         );
     }
 
-    /// The shipped shape: regional groups carrying the `DIRECT` placeholder,
-    /// with `PROXY` as the menu over them. Only the groups the subscription
-    /// can actually fill lose their placeholder.
+    /// The shipped shape: `PROXY` as a written menu over empty regional
+    /// groups. A region the provider has no node for becomes `DIRECT`, because
+    /// the engine rejects an empty group outright.
     #[test]
-    fn direct_placeholder_is_filled_only_where_nodes_match() {
+    fn a_region_without_nodes_becomes_direct() {
         let template = json!({
             "outbounds": [
                 { "type": "direct", "tag": "DIRECT" },
-                { "type": "urltest", "tag": "AUTO", "outbounds": ["DIRECT"] },
-                { "type": "selector", "tag": "PROXY", "outbounds": ["AUTO", "JP", "US"] },
-                { "type": "selector", "tag": "JP", "outbounds": ["DIRECT"] },
-                { "type": "selector", "tag": "US", "outbounds": ["DIRECT"] }
+                { "type": "selector", "tag": "PROXY", "outbounds": ["JP", "US"] },
+                { "type": "selector", "tag": "JP", "outbounds": [] },
+                { "type": "selector", "tag": "US", "outbounds": [] }
             ]
         });
         let nodes = vec![RefinedNode {
@@ -404,52 +456,77 @@ mod tests {
         }];
 
         let generated = generate_from_template(&template, &nodes).expect("generation");
-        // AUTO takes every node; JP matches; PROXY is a written menu and US has
-        // no node, so both keep exactly what the user wrote.
-        assert_eq!(generated["outbounds"][1]["outbounds"], json!(["Tokyo"]));
-        assert_eq!(generated["outbounds"][2], template["outbounds"][2]);
-        assert_eq!(generated["outbounds"][3]["outbounds"], json!(["Tokyo"]));
-        assert_eq!(generated["outbounds"][4], template["outbounds"][4]);
-        assert_eq!(generated["outbounds"].as_array().unwrap().len(), 6);
+        assert_eq!(generated["outbounds"][1], template["outbounds"][1]);
+        assert_eq!(generated["outbounds"][2]["outbounds"], json!(["Tokyo"]));
+        assert_eq!(generated["outbounds"][3]["outbounds"], json!(["DIRECT"]));
+        assert_eq!(generated["outbounds"].as_array().unwrap().len(), 5);
 
         let mut restored = generated;
         restored["outbounds"] = template["outbounds"].clone();
         assert_eq!(restored, template);
     }
 
+    /// A template is not a configuration: with no node to fill its groups the
+    /// whole candidate is refused, naming them, instead of being handed to an
+    /// engine that rejects an empty group and would then crash-restart.
     #[test]
-    fn direct_placeholder_stays_when_there_are_no_nodes() {
+    fn no_nodes_refuses_the_candidate_and_names_the_groups() {
         let template = json!({
             "outbounds": [
-                { "type": "urltest", "tag": "AUTO", "outbounds": ["DIRECT"] },
-                { "type": "selector", "tag": "PROXY", "outbounds": ["AUTO"] }
+                { "type": "selector", "tag": "PROXY", "outbounds": ["HK"] },
+                { "type": "selector", "tag": "HK", "outbounds": [] }
+            ]
+        });
+        assert_eq!(
+            generate_from_template(&template, &[]),
+            Err(EngineConfigError::UnfilledGroups(vec!["HK".to_string()]))
+        );
+    }
+
+    /// A finished configuration the user wrote themselves has no empty group,
+    /// so it runs with no subscription at all.
+    #[test]
+    fn a_complete_user_config_needs_no_nodes() {
+        let template = json!({
+            "outbounds": [
+                { "type": "direct", "tag": "DIRECT" },
+                { "type": "trojan", "tag": "mine", "server": "example" },
+                { "type": "selector", "tag": "PROXY", "outbounds": ["mine"] }
             ]
         });
         assert_eq!(generate_from_template(&template, &[]).unwrap(), template);
     }
 
-    /// An empty group the subscription cannot fill must stay empty rather than
-    /// be rewritten: the engine treats an empty group as fatal either way, and
-    /// rewriting it would hide which group the user left unfinished.
     #[test]
-    fn unfillable_empty_group_is_left_alone() {
-        let template = json!({
+    fn nodes_no_group_selects_are_reported() {
+        let generated = json!({
             "outbounds": [
-                { "type": "selector", "tag": "EUROPE", "outbounds": [] }
+                { "type": "direct", "tag": "DIRECT" },
+                { "type": "selector", "tag": "PROXY", "outbounds": ["DIRECT"] },
+                { "type": "trojan", "tag": "Paris", "server": "example" },
+                { "type": "trojan", "tag": "Tokyo", "server": "example" }
             ]
         });
-        let nodes = vec![RefinedNode {
-            outbound: json!({ "type": "trojan", "tag": "Tokyo", "server": "example" }),
-            groups: vec!["JP".to_string()],
-        }];
-        let generated = generate_from_template(&template, &nodes).expect("generation");
-        assert_eq!(generated["outbounds"][0], template["outbounds"][0]);
+        assert_eq!(unreferenced_node_tags(&generated), ["Paris", "Tokyo"]);
+
+        let selected = json!({
+            "outbounds": [
+                { "type": "selector", "tag": "PROXY", "outbounds": ["Paris"] },
+                { "type": "trojan", "tag": "Paris", "server": "example" }
+            ]
+        });
+        assert!(unreferenced_node_tags(&selected).is_empty());
     }
 
+    /// A group with members and no node to add keeps exactly what it had:
+    /// generation is only ever fill plus append.
     #[test]
-    fn empty_node_generation_is_the_template_itself() {
+    fn nothing_to_add_leaves_the_template_untouched() {
         let template = json!({
-            "outbounds": [{ "type": "selector", "tag": "PROXY", "outbounds": [] }],
+            "outbounds": [
+                { "type": "direct", "tag": "DIRECT" },
+                { "type": "selector", "tag": "PROXY", "outbounds": ["DIRECT"] }
+            ],
             "route": { "final": "PROXY" }
         });
         assert_eq!(generate_from_template(&template, &[]).unwrap(), template);
@@ -605,19 +682,29 @@ mod tests {
             "the template must not ship a clash_api listener"
         );
 
-        // Every group must resolve, or a fresh install fails `fluxd check`
-        // before the user has edited anything.
-        for outbound in config["outbounds"].as_array().expect("outbounds array") {
-            let kind = outbound["type"].as_str().unwrap_or_default();
-            if matches!(kind, "selector" | "urltest") {
-                let members = outbound["outbounds"].as_array();
-                assert!(
-                    members.is_some_and(|list| !list.is_empty()),
-                    "group {} ships with no members",
-                    outbound["tag"]
-                );
-            }
-        }
+        // The regional groups ship empty: they are the subscription's to fill,
+        // and until it has a node the candidate is refused rather than run.
+        let empty: Vec<&str> = config["outbounds"]
+            .as_array()
+            .expect("outbounds array")
+            .iter()
+            .filter(|outbound| {
+                matches!(
+                    outbound["type"].as_str().unwrap_or_default(),
+                    "selector" | "urltest"
+                ) && outbound["outbounds"]
+                    .as_array()
+                    .is_some_and(|list| list.is_empty())
+            })
+            .map(|outbound| outbound["tag"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(empty, ["HK", "TW", "JP", "SG", "US"]);
+        assert_eq!(
+            generate_from_template(&config, &[]),
+            Err(EngineConfigError::UnfilledGroups(
+                empty.iter().map(|tag| (*tag).to_string()).collect()
+            ))
+        );
 
         // The IPv6 fakeip range must stay out of fc00::/7: Flux bypasses ULA as
         // private space, so a fakeip inside it would be sent direct and every

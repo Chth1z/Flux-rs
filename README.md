@@ -129,11 +129,15 @@ subscription update needs no manual merge.
 The shipped bootstrap template is the original Flux module's, so both projects
 present the same shape: DNS splitting with fakeip, `clash_mode` rules, remote
 rule-sets, and `PROXY` as a menu over the regional groups `HK`/`TW`/`JP`/`SG`/
-`US`, plus one `AUTO` urltest for providers whose names match no region. It
-contains no servers, no subscription and no credentials — those groups start out
-holding `DIRECT` and take the subscription's nodes as soon as it has any — and
-it declares no inbound of its own, because Flux injects two tproxy inbounds, and
-no `clash_api`, because a default must not open a control port.
+`US`. It contains no servers, no subscription and no credentials — those five
+groups are empty, waiting for the subscription to fill them — and it declares no
+inbound of its own, because Flux injects two tproxy inbounds, and no
+`clash_api`, because a default must not open a control port.
+
+Until something fills those groups the template is not a runnable configuration,
+and Flux says so instead of starting the engine on it: `check` and the module
+description report which groups are waiting. A region your provider has no node
+for becomes `DIRECT`, so one unused group never takes the configuration down.
 
 **Flux never writes to anything under `config/`.** Reinstalling does not
 overwrite it, and everything under `run/` can be deleted at any time and will be

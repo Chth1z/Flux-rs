@@ -275,8 +275,12 @@ fn check_template_json(
     let generated = match engine_config::generate_from_template(&user, &nodes) {
         Ok(generated) => generated,
         Err(error) => {
+            let token = match error {
+                engine_config::EngineConfigError::UnfilledGroups(_) => "engine_config_unfilled",
+                _ => "engine_config_invalid",
+            };
             report.errors.push(format!(
-                "engine_config_invalid: {}",
+                "{token}: {}",
                 engine::describe_config_error(&error)
             ));
             return None;
@@ -384,7 +388,16 @@ pub fn sing_box_warnings(user: &serde_json::Value) -> Vec<String> {
             found_bind |= object.contains_key("bind_interface");
         });
     }
+    let unreferenced = engine_config::unreferenced_node_tags(user);
     let mut warnings = Vec::new();
+    if !unreferenced.is_empty() {
+        warnings.push(format!(
+            "nodes_unreferenced: {} node(s) are in the configuration but no group selects them, \
+             starting with `{}`; selected apps still egress direct until a group lists them",
+            unreferenced.len(),
+            unreferenced[0]
+        ));
+    }
     if found_mark {
         warnings.push(
             "outbound routing_mark is user-controlled: Android may interpret it as a netId/fwmark and reject the route"

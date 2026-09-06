@@ -1,9 +1,9 @@
 // Flux-rs bootstrap configuration (blueprint §9.6, §27.2.3).
 //
-// This is the original Flux module's conf/template.json, so both projects
-// present users the same shape: five regional groups that the subscription
-// fills, with PROXY as the menu over them. Four deliberate differences, each
-// forced:
+// This is the original Flux module's conf/template.json, unchanged except for
+// four forced differences, so both projects present users the same shape: five
+// regional groups that the subscription fills, with PROXY as the menu over
+// them.
 //
 //   * no "inbounds": Flux injects exactly two tproxy inbounds of its own into
 //     an immutable per-generation copy, and a template inbound would compete
@@ -19,15 +19,13 @@
 //     connection would fail silently. `fluxd check` rejects that overlap
 //     outright (blueprint D21, §9.0.1).
 //
-// AUTO and the five regional groups each ship holding only DIRECT. Flux
-// replaces that placeholder with the subscription's nodes, using the same
-// region keys the original does (blueprint §28.2), so a subscription update
-// needs no manual merge. The original ships those groups empty instead, which
-// it can afford because its updater always fills them before the engine
-// starts; here an unsubscribed install hands the template straight to
-// sing-box, and an empty group is fatal at startup. A group the subscription
-// cannot fill — say US when the provider has no US node — keeps DIRECT and
-// stays selectable.
+// The five regional groups ship empty, exactly as the original's do. Flux
+// fills each from the subscription by the same region keys (blueprint §28.2),
+// so a subscription update needs no manual merge. A group the provider has no
+// node for — say US on an Asia-only plan — becomes DIRECT, and is therefore
+// still selectable. Until there is at least one node, this file is a template
+// rather than a configuration: Flux refuses to start the engine and says so,
+// instead of handing sing-box a config it rejects outright.
 //
 // This file is yours. Replace it with any complete supported sing-box
 // configuration, then run `fluxd check`. Flux never rewrites it.
@@ -88,17 +86,9 @@
       "tag": "DIRECT"
     },
     {
-      "type": "urltest",
-      "tag": "AUTO",
-      "outbounds": [
-        "DIRECT"
-      ]
-    },
-    {
       "type": "selector",
       "tag": "PROXY",
       "outbounds": [
-        "AUTO",
         "HK",
         "TW",
         "JP",
@@ -117,37 +107,27 @@
     {
       "type": "selector",
       "tag": "HK",
-      "outbounds": [
-        "DIRECT"
-      ]
+      "outbounds": []
     },
     {
       "type": "selector",
       "tag": "TW",
-      "outbounds": [
-        "DIRECT"
-      ]
+      "outbounds": []
     },
     {
       "type": "selector",
       "tag": "JP",
-      "outbounds": [
-        "DIRECT"
-      ]
+      "outbounds": []
     },
     {
       "type": "selector",
       "tag": "SG",
-      "outbounds": [
-        "DIRECT"
-      ]
+      "outbounds": []
     },
     {
       "type": "selector",
       "tag": "US",
-      "outbounds": [
-        "DIRECT"
-      ]
+      "outbounds": []
     }
   ],
   "route": {
