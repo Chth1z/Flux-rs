@@ -3430,16 +3430,21 @@ template.json  +  subscription.raw  +  flux.toml refinement rules
 
 Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
-1. **Fill.** Every `selector` or `urltest` in the template whose `outbounds` is
-   an empty array is filled with the regional group its tag matches. Tags
-   `PROXY`, `GLOBAL` and `AUTO` are filled with every node. The shipped
-   bootstrap writes `PROXY` as `["DIRECT"]` so an unsubscribed install still
-   passes `sing-box check` (§27.2.3); that single-member `DIRECT` list is the
-   same vacancy as an empty array **for those two tags only** (`PROXY` and
-   `AUTO`). A group the user named something else and pointed at `DIRECT` is
-   left alone. If there are no refined nodes yet, the placeholder is not
-   replaced — emptying `PROXY` would make the engine unable to start.
+1. **Fill.** Every **vacant** `selector` or `urltest` in the template is filled
+   with the regional group its tag matches; tags `PROXY`, `GLOBAL` and `AUTO`
+   are filled with every node. A group is vacant when its member list is empty
+   or holds nothing but `DIRECT`.
 2. **Append.** The refined nodes are appended to `outbounds`.
+
+**A fill that produces no member leaves the group exactly as written.** The
+engine treats an empty group as fatal at startup — `initialize outbound[N]:
+missing tags`, measured against the pinned 1.13.19 — so replacing `["DIRECT"]`
+with `[]` would take the whole configuration down. That is also why `DIRECT`
+counts as vacancy at all: §27.2.3's shipped template is the reference
+implementation's, whose regional groups are empty because `updater.sh` always
+fills them before the engine starts. Flux hands an unsubscribed template
+straight to sing-box, so those groups ship holding `DIRECT` and lose it as
+soon as the subscription has a node for them.
 
 Everything else MUST pass through byte for byte.
 

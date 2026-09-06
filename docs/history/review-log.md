@@ -446,7 +446,7 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 | 25 | §13.2 的 `service.sh` 用一个 shell 循环监督 `fluxd daemon`：非零退出就按 1/2/4/8 s 退避重启；§14.2 把它写成"a supervisor shell blocked in `wait`" | 这个循环的行为取决于退出码和时间，按 PHIL-7 的判据本就属于二进制（§17.0.1 第 5 项）。而且它有缺陷：对**任何**非零退出都重启，包括"另一个实例已在运行"——第二次执行 `service.sh` 会以 8 秒间隔永远重试，对着正在工作的实例撞 | 所有者 2026-09-05 在三个选项里选定"收进二进制"。§13.2.2：`fluxd daemon` 成为监督进程，重新执行 `/proc/self/exe` 作为 reactor；reactor 持锁、开 socket、拥有全部内核对象；监督进程只认退出码与信号——`0` 退出、`3`（锁已被持有）退出不重启、其余按引擎同一张 1/2/4/8/30 s 表重启并在稳定 60 s 后重置。不给 reactor 设 PDEATHSIG：监督进程被杀只是失去监督，代理继续工作。§23.1 第二实例的退出码从 1 改为 3，`service.sh` 变成一行 `exec` |
 | 26 | §23.1：状态根、`run/`、`config/` 的模式不是 0700 时 daemon 拒绝激活（`runtime_dir_mode`），"不自动 chmod，用户可能是故意改的" | 这三个目录是 Flux 自己创建、自己拥有的对象（§11.1），不是用户的文件；`/data/adb` 本身就是 root 专属，这个模式几乎不保护任何东西；而 `service.sh` 每次开机本来就 `chmod 0700` 一遍——开机静默改正、运行中却拒绝，两头矛盾，且 shell 在做本该由二进制做的事（PHIL-7） | 所有者 2026-09-05 在三个选项里选定"Flux 拥有自己的状态根"。`Layout::ensure()` 在每次启动与收敛时恢复 `root:0700` 并记一行日志；`service.sh` 只保证目录存在；唯一仍拒绝的是路径上是符号链接或非目录（`runtime_dir_type`）——那是外来对象，Flux 不替换不跟随（PHIL-5）。§23.1 两行改写 |
 | 27 | §9.6：模板里任何 `flux-` 前缀的 tag 都被拒绝 | 机制真正需要的只是两个注入 inbound 的 tag 不被撞。前缀保留把外部数据也卷进来：订阅提供方把一个节点命名为 `flux-hk`，整份生成配置就失效——外部数据决定用户的代理能不能跑（PHIL-1） | 所有者 2026-09-05 选定收窄为精确匹配：只有 `flux-in-v4` / `flux-in-v6` 两个 tag 被拒绝，其余归用户与提供方。§9.6 改写，`RESERVED_TAG_PREFIX` 变为 `RESERVED_TAGS` |
-| 28 | §28.2：只填 `outbounds` 为空数组的 selector/urltest；出厂 `PROXY=["DIRECT"]` 是为了让未订阅的 `check` 能过 | 原版 Flux 的 `PROXY` 指向空的地区组（HK/TW/…），填充发生在那些空组上，所以从来不会「Active 却全直连」。0.9.5 简化成两个组之后，占位 `DIRECT` 让填充规则看不见空位。2026-09-06 真机：29 个节点已追加、`route.final` 仍是 PROXY、状态已是 Active，流量全部 DIRECT，没有警告 | 2026-09-06：§28.2 把 `PROXY`/`AUTO` 的单成员 `DIRECT` 与空数组视为同一空位；没有精修节点时不替换，以免引擎无法启动。其它组指向 `DIRECT` 仍是用户的选择 |
+| 28 | §28.2：只填 `outbounds` 为空数组的 selector/urltest；出厂 `PROXY=["DIRECT"]` 是为了让未订阅的 `check` 能过 | 原版 Flux 的 `PROXY` 指向空的地区组（HK/TW/JP/SG/US），填充发生在那些空组上，所以从来不会「Active 却全直连」。0.9.5 把模板简化成 `PROXY`/`GLOBAL` 两个组之后，占位 `DIRECT` 让填充规则看不见空位。2026-09-06 真机：29 个节点已追加、`route.final` 仍是 PROXY、状态已是 Active，流量全部 DIRECT，没有警告 | 2026-09-06 所有者定「模板按旧版来」。出厂模板换回原版形状（五个地区组 + `PROXY` 作为它们的菜单），另加一个 `AUTO` urltest 兜住命名不含地区的机场。旧版的地区组是空的，它能这样是因为 `updater.sh` 保证引擎先看到填好的配置；Flux 未订阅时把模板原样交给引擎，而**空组对引擎是致命的**——实测 1.13.19 的 `check` 与 `run` 都报 `initialize outbound[N]: missing tags`。所以各组出厂带 `DIRECT` 占位，§28.2 把「只有 `DIRECT`」视为空位，且**填不出成员就原样保留**（否则会把配置整份打死） |
 
 ### 0.6.6 0.9.5 真机回归（2026-09-06，SM-S9180 / 5.15.211 / KernelSU 3.3.0 lkm）
 
@@ -478,10 +478,12 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 
 **缺口 1 — 静态链接下订阅抓取永远解析不出域名。** `.cargo/config.toml` 给 `aarch64-linux-android` 加了 `+crt-static`；`llvm-readelf` 看产物是 `EXEC`、无 `INTERP`、无 `NEEDED`。Android 的 `getaddrinfo` 靠动态链接器注入 `libnetd_client` 才能问 netd；静态二进制没有这条注入，也没有 `/etc/resolv.conf`。root 下 `ping` 同一主机能解析，`fluxd` 报 `subscription_fetch_failed:io` / `failed to lookup address information: No address associated with hostname`（`failures.md` 承诺的类别是 `:dns`）。**处置（2026-09-06，所有者授权自行抉择）：去掉 `+crt-static`，动态链接 Bionic。** 自己实现 `dnsproxyd` 会把未文档化的 netd 协议变成产品依赖；写成发布边界等于 0.9.5 的订阅在唯一目标 OS 上不可用。§13.4 写明这一点。
 
-**缺口 2 — 出厂模板的 `PROXY=["DIRECT"]` 挡住填组。** 见 §0.6.5 第 28 条。原版 Flux 没遇到，是因为它的 `PROXY` 指向空的地区组，不是 `DIRECT`。**处置：填充规则承认该占位符。**
+**缺口 2 — 出厂模板的 `PROXY=["DIRECT"]` 挡住填组。** 见 §0.6.5 第 28 条。原版 Flux 没遇到，是因为它的 `PROXY` 指向空的地区组，不是 `DIRECT`。**处置：模板换回旧版形状，填充规则承认 `DIRECT` 占位。**
 
 **缺口 3 — `fluxd bugreport` 默认写 `.`。** root shell 的 cwd 是只读的 `/`，无 `-o` 时 `Read-only file system`。**处置：默认写到状态根。**
 
 **附带观察（未升格为合同更正）。** reactor 经 `/proc/self/exe` 再执行后 `ps` 显示 `exe daemon`，不是第二个 `fluxd daemon`。`kill -9` reactor 之后立刻切默认路由到 `wlan0`，同一进程内收敛卡在 `tc_filter:ESTALE`（`recorded filter is no longer exact-owned`），`disable`/`enable` 清不掉，重启后消失——像进程内记录与内核对象对不上，不是设备上的永久残留。
 
 **2026-09-06 补测（`eed47c6`，同一台设备）。** 动态链接后的 zip（sha256 `84adaede…ddb39dc`，`NEEDED`: `libdl.so`、`libc.so`）重装并重启：冷缓存 `fluxd subscribe` 在设备上抓取成功（`subscription cache committed atomically`，18665 字节），`last error: none`。出厂 `PROXY=["DIRECT"]` 的模板生成 32 个 outbound、`PROXY` 29 成员。内容不变的第二次 `subscribe` 不换代。`ps` 现为两个 `fluxd daemon`。无 `-o` 的 `bugreport` 写到 `/data/adb/flux-rs/`。
+
+**2026-09-07 旧版形状复测（模板换回原版 + `AUTO`，同一台设备）。** 清掉订阅缓存、装回出厂模板后重启：开机自行抓取订阅并 Active（generation 1，38 个 outbound）。填充结果：`AUTO` 29 个节点，`HK` 7、`JP` 8、`SG` 8、`US` 6，**`TW` 保留 `DIRECT`**——这个机场没有台湾节点，填不出成员就原样保留；`PROXY`（`AUTO, HK, TW, JP, SG, US`）与 `GLOBAL` 是写好的菜单，未被改动。真流量：`tcp 35 captured / assigned 35`、`udp 41 / 41`，引擎日志新增 `outbound/hysteria2[香港01丨直连]`，即 `route.final` → `PROXY` → 首成员 `AUTO` 走到了真节点，不再是静默直连。

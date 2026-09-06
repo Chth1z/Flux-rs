@@ -142,7 +142,7 @@ Rules:
 
 ### 27.2.3 Bootstrap engine configuration
 
-The packaged path is `etc/default-template.json`; the repository source is `module/template.json`; the installed device path is `config/template.json`. It comes from the original Flux `conf/template.json`, so both projects present the same shape to users: DNS splitting and fakeip, `clash_mode` rules, remote rule-sets, and `PROXY`/`GLOBAL` selectors.
+The packaged path is `etc/default-template.json`; the repository source is `module/template.json`; the installed device path is `config/template.json`. It is the original Flux `conf/template.json`, so both projects present the same shape to users: DNS splitting and fakeip, `clash_mode` rules, remote rule-sets, `PROXY` as a menu over the five regional groups `HK`/`TW`/`JP`/`SG`/`US`, and `GLOBAL`. Flux adds one `AUTO` urltest, so a provider whose node names match none of the five regions still resolves to real nodes rather than silently to `DIRECT`.
 
 Four properties MUST hold for the defaults (`cargo xtask template-check` checks each one and then runs one real `check` with the official sing-box):
 
@@ -150,18 +150,18 @@ Four properties MUST hold for the defaults (`cargo xtask template-check` checks 
 |---|---|
 | No `inbounds` | Flux injects two tproxy inbounds at runtime; a template inbound would compete for their listeners |
 | No `experimental.clash_api` | The default opens no control port; §27.2.4 defines the rules when users open one themselves |
-| Every selector/urltest has at least one member | An empty selector cannot resolve, causing `check` to fail before the user has edited anything |
+| Every selector/urltest has at least one member | An empty group is fatal to the engine (`initialize outbound[N]: missing tags`), so a fresh unsubscribed install would never start. The original can ship empty groups because its updater fills them first; Flux ships `DIRECT` in each and replaces it per §28.2 |
 | fakeip ranges avoid the fixed bypasses | Flux unconditionally bypasses the entire ULA `fc00::/7`; a fakeip inside it is sent Direct, silently breaking all IPv6 fakeip. Determine containment from parsed prefixes and `flux_core::cidr::fixed_bypass`, not string prefixes—both `fd00::/8` and `FD00::/8` MUST be rejected |
 
-The template ships with no server, no subscription and no credential: `PROXY`
-initially points only at `DIRECT`, so `check` can pass before any node exists.
-When a subscription produces refined nodes, that placeholder is replaced
-(§28.2); `GLOBAL` stays pointed at `PROXY`.
+The template ships with no server, no subscription and no credential: `AUTO`
+and the five regional groups each hold only `DIRECT`, so `check` passes and the
+engine starts before any node exists. When a subscription produces refined
+nodes, each of those placeholders is replaced with the nodes belonging to it
+(§28.2); `PROXY` and `GLOBAL` are written menus and stay as they are.
 
 **The user edits this template; they do not replace it with a finished config.**
 Flux generates `run/sing-box.<generation>.json` from the template plus the
-subscription (§28), filling empty selector groups (and the `PROXY`/`AUTO`
-`DIRECT` placeholder) and appending refined nodes.
+subscription (§28), filling vacant selector groups and appending refined nodes.
 Everything else in the template passes through byte for byte, so what the user
 writes is what the engine runs.
 

@@ -121,15 +121,17 @@ The two authority files are:
 
 **You edit the template; Flux generates what the engine runs.** From the
 template plus the subscription it produces `run/sing-box.<generation>.json`,
-filling empty selector groups (and the bootstrap `PROXY`/`AUTO` placeholder
-`DIRECT`) and appending the refined nodes. Everything else
+filling the selector groups that are still vacant and appending the refined
+nodes. Everything else
 passes through byte for byte, so what you wrote is what runs — and a
 subscription update needs no manual merge.
 
-The shipped bootstrap template follows the original Flux module's, so both
-projects present the same shape: DNS splitting with fakeip, `clash_mode` rules,
-remote rule-sets and `PROXY` / `GLOBAL` selectors. It contains no servers, no
-subscription and no credentials — `PROXY` starts out pointing at `DIRECT` — and
+The shipped bootstrap template is the original Flux module's, so both projects
+present the same shape: DNS splitting with fakeip, `clash_mode` rules, remote
+rule-sets, and `PROXY` as a menu over the regional groups `HK`/`TW`/`JP`/`SG`/
+`US`, plus one `AUTO` urltest for providers whose names match no region. It
+contains no servers, no subscription and no credentials — those groups start out
+holding `DIRECT` and take the subscription's nodes as soon as it has any — and
 it declares no inbound of its own, because Flux injects two tproxy inbounds, and
 no `clash_api`, because a default must not open a control port.
 

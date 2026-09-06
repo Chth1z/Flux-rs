@@ -100,11 +100,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bionic so `getaddrinfo` reaches netd; a fully static binary cannot resolve
   names on Android. Lookup failures are reported as
   `subscription_fetch_failed:dns`, not `:io`.
-- Generation now treats a `PROXY` or `AUTO` group whose only member is `DIRECT`
-  as vacant, the same as an empty array. The shipped template keeps that
-  placeholder so an unsubscribed install still passes `check`; without this,
-  a fetched subscription produced an Active generation that sent every captured
-  flow to DIRECT.
+- The bootstrap template is now the original Flux module's shape — `PROXY` as a
+  menu over `HK`/`TW`/`JP`/`SG`/`US`, plus an `AUTO` urltest — and generation
+  treats a group holding nothing but `DIRECT` as vacant, so those groups take
+  the subscription's nodes. Previously `PROXY` pointed straight at `DIRECT` and
+  only empty groups were filled, so a fetched subscription produced an Active
+  generation that sent every captured flow direct. A fill that produces no
+  member now leaves the group alone: the engine rejects an empty group outright.
 - `fluxd bugreport` writes under the state root unless `-o` is given. The
   previous default was the process working directory, which is `/` in a root
   shell and is read-only.

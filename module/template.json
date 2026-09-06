@@ -1,22 +1,33 @@
 // Flux-rs bootstrap configuration (blueprint §9.6, §27.2.3).
 //
-// Adapted from the original Flux module's conf/template.json so both projects
-// present users the same shape. Three deliberate differences, each forced:
+// This is the original Flux module's conf/template.json, so both projects
+// present users the same shape: five regional groups that the subscription
+// fills, with PROXY as the menu over them. Four deliberate differences, each
+// forced:
 //
 //   * no "inbounds": Flux injects exactly two tproxy inbounds of its own into
 //     an immutable per-generation copy, and a template inbound would compete
 //     with them for the listener (blueprint §9.1);
 //   * no "experimental.clash_api": a shipped default must not open a control
 //     port, and the original ships one with no secret (§27.2.3, C10);
-//   * PROXY starts as a one-member group pointing at DIRECT, because an empty
-//     selector cannot be resolved and a fresh install must pass `fluxd check`
-//     before the user has edited anything. Generation treats that placeholder
-//     as vacant once a subscription produces nodes (blueprint §28.2);
+//   * no "log.output": the daemon captures the engine's stdout and stderr into
+//     fluxd.log, so a second log file would split the same output in two
+//     (§13.3);
 //   * the IPv6 fakeip range is 2001:db8:f::/48, not the original's fc00::/18.
 //     Flux bypasses all of fc00::/7 because ULA is private space that must go
 //     direct, so a fakeip inside it would be sent direct and every IPv6 fakeip
 //     connection would fail silently. `fluxd check` rejects that overlap
 //     outright (blueprint D21, §9.0.1).
+//
+// AUTO and the five regional groups each ship holding only DIRECT. Flux
+// replaces that placeholder with the subscription's nodes, using the same
+// region keys the original does (blueprint §28.2), so a subscription update
+// needs no manual merge. The original ships those groups empty instead, which
+// it can afford because its updater always fills them before the engine
+// starts; here an unsubscribed install hands the template straight to
+// sing-box, and an empty group is fatal at startup. A group the subscription
+// cannot fill — say US when the provider has no US node — keeps DIRECT and
+// stays selectable.
 //
 // This file is yours. Replace it with any complete supported sing-box
 // configuration, then run `fluxd check`. Flux never rewrites it.
@@ -77,10 +88,22 @@
       "tag": "DIRECT"
     },
     {
+      "type": "urltest",
+      "tag": "AUTO",
+      "outbounds": [
+        "DIRECT"
+      ]
+    },
+    {
       "type": "selector",
       "tag": "PROXY",
       "outbounds": [
-        "DIRECT"
+        "AUTO",
+        "HK",
+        "TW",
+        "JP",
+        "SG",
+        "US"
       ],
       "interrupt_exist_connections": true
     },
@@ -89,6 +112,41 @@
       "tag": "GLOBAL",
       "outbounds": [
         "PROXY"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "HK",
+      "outbounds": [
+        "DIRECT"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "TW",
+      "outbounds": [
+        "DIRECT"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "JP",
+      "outbounds": [
+        "DIRECT"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "SG",
+      "outbounds": [
+        "DIRECT"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "US",
+      "outbounds": [
+        "DIRECT"
       ]
     }
   ],
