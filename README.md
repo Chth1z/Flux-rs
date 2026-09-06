@@ -131,8 +131,10 @@ present the same shape: DNS splitting with fakeip, `clash_mode` rules, remote
 rule-sets, and `PROXY` as a menu over the regional groups `HK`/`TW`/`JP`/`SG`/
 `US`. It contains no servers, no subscription and no credentials — those five
 groups are empty, waiting for the subscription to fill them — and it declares no
-inbound of its own, because Flux injects two tproxy inbounds, and no
-`clash_api`, because a default must not open a control port.
+inbound of its own, because Flux injects two tproxy inbounds. The original's
+control panel is in the file too, commented out with its secret blank: a default
+must not open a port that every app on the device can reach, but you should not
+have to discover the panel exists either.
 
 Until something fills those groups the template is not a runnable configuration,
 and Flux says so instead of starting the engine on it: `check` and the module

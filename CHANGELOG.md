@@ -100,6 +100,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bionic so `getaddrinfo` reaches netd; a fully static binary cannot resolve
   names on Android. Lookup failures are reported as
   `subscription_fetch_failed:dns`, not `:io`.
+- The original's `clash_api` control panel now ships in the template, commented
+  out with its secret blank and both costs of enabling it stated in place. It
+  stays off because on Android every app holding INTERNET can reach
+  `127.0.0.1`, so a secretless port hands any of them the proxy's controls —
+  but the panel is no longer something the user has to know exists, and the
+  module's button points at the block instead of listing keys to invent.
 - The bootstrap template is the original Flux module's, unchanged apart from the
   four differences Flux forces: `PROXY` is a menu over the empty regional groups
   `HK`/`TW`/`JP`/`SG`/`US` that the subscription fills. Previously `PROXY`

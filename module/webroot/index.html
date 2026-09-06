@@ -77,10 +77,11 @@
       function noController() {
         show(
           "No control panel is configured.",
-          "In /data/adb/flux-rs/config/template.json, add experimental.clash_api with " +
-            "external_controller listening on 127.0.0.1, a non-empty secret, and " +
-            "external_ui pointing to a downloaded panel. Run " + fluxd +
-            " check, then reopen this page."
+          "The panel is written out for you, commented, at the end of " +
+            "/data/adb/flux-rs/config/template.json: uncomment the clash_api block " +
+            "and fill in its secret. It ships off because every app on this device " +
+            "can reach 127.0.0.1, so an empty secret would let any of them drive " +
+            "the proxy. Then run " + fluxd + " check and reopen this page."
         );
       }
 

@@ -8,8 +8,10 @@
 //   * no "inbounds": Flux injects exactly two tproxy inbounds of its own into
 //     an immutable per-generation copy, and a template inbound would compete
 //     with them for the listener (blueprint §9.1);
-//   * no "experimental.clash_api": a shipped default must not open a control
-//     port, and the original ships one with no secret (§27.2.3, C10);
+//   * "experimental.clash_api" ships commented out rather than active: the
+//     original's has no secret, and on Android every app can reach loopback
+//     (§27.2.3, C10). The block itself is at the end of this file, with what
+//     enabling it costs written next to it;
 //   * no "log.output": the daemon captures the engine's stdout and stderr into
 //     fluxd.log, so a second log file would split the same output in two
 //     (§13.3);
@@ -195,5 +197,33 @@
       "store_fakeip": true,
       "store_rdrc": true
     }
+
+    // The original's control panel, kept here so nothing is hidden from you,
+    // and inert until you uncomment it. It is the one thing Flux does not ship
+    // enabled, for two reasons worth knowing before you turn it on:
+    //
+    //   * on Android 127.0.0.1 is not a trust boundary. Every app holding
+    //     INTERNET can reach this port, so an empty "secret" lets any of them
+    //     read your traffic stats and switch your outbound. Put a secret in
+    //     before you enable it; `fluxd check` warns if it is empty.
+    //   * "external_ui_download_url" makes the engine fetch a zip at run time
+    //     and unpack it with no digest to verify it against, through the proxy
+    //     itself. It lands next to this file's directory, in
+    //     /data/adb/flux-rs/zashboard, because that is the engine's working
+    //     directory. Downloading it yourself and pointing "external_ui" at it
+    //     is the same panel without the unverified download.
+    //
+    // Fill in the secret, run `fluxd check`, then open this module's button in
+    // your root manager: the page reads what you wrote here and navigates to
+    // the panel.
+    //
+    // ,"clash_api": {
+    //   "external_controller": "127.0.0.1:9090",
+    //   "secret": "",
+    //   "external_ui": "./zashboard",
+    //   "external_ui_download_url": "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip",
+    //   "external_ui_download_detour": "PROXY",
+    //   "default_mode": "Rule"
+    // }
   }
 }

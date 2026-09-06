@@ -3221,7 +3221,7 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
 1. Canonical `userId:package` parsing, `appId` range rejection, shared-UID enumeration, hard ceilings.
 2. IPv4 and IPv6 CIDR canonicalisation, fixed bypass injection with its `RESERVED` tag, LPM key encoding, ceilings.
 3. The template MUST NOT declare an inbound; the generated config injects exactly two tproxy inbounds and contains **none** of the removed or forbidden keys (§9.1).
-4. The shipped `etc/default-template.json` has the shape §27.2.3 requires — no inbound, no `clash_api`, non-empty selector groups, a fakeip range clear of the fixed bypass — and **carries the `sniff` and `hijack-dns` route rules**; a missing `:53` handler produces a warning rather than an error. **The real `sing-box check` against that file is `cargo xtask template-check`, not this test**: a flux-core test cannot run the engine binary, and conflating the two overstates what the host suite proves.
+4. The shipped `etc/default-template.json` has the shape §27.2.3 requires — no inbound, no `clash_api` once parsed (the original's block ships commented out), a fakeip range clear of the fixed bypass — and **carries the `sniff` and `hijack-dns` route rules**; a missing `:53` handler produces a warning rather than an error. **The real `sing-box check` against that file is `cargo xtask template-check`, not this test**: a flux-core test cannot run the engine binary, and conflating the two overstates what the host suite proves.
 5. `size_of` and every field offset agree between `flux_abi.h` and the Rust mirror. **The cross-language comparison is `cargo xtask abi-check`, which has clang compute the C side**; this test guards the mirror.
 6. The hand-written BTF blob's byte layout matches the struct definition, cross-checked against clang's `.BTF` by `cargo xtask btf-check`.
 7. Control protocol request and response round-trip.
@@ -3608,7 +3608,8 @@ reference:
 - the redirect URL carries the controller address and secret the user
   configured, so neither has to be typed;
 - when no `clash_api` is configured, the page says so instead of redirecting
-  into a connection failure.
+  into a connection failure, and points at the commented block in the template
+  that turns it on (§27.2.4) rather than describing keys to invent.
 
 **Where the page gets that information.** Not from a file Flux writes: §27.1.2
 allows Flux exactly two writes in the module directory, and §27.2.3 ships no

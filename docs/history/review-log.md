@@ -494,6 +494,8 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 
 顺带（非本次改动引入）：冷启动候选被拒时 `status` 的 `policy` 行显示 `0 selected`，因为 §8.7 规定这种情况只做残留清理、不建 BPF 运行时——策略确实没进内核。任何冷启动配置错误都是这个表现。
 
+**2026-09-07 dashboard 注释块实测（同一台设备）。** 出厂状态：`fluxd check: ok`，不再有 `clash_api_secret_missing`——注释块对解析器完全惰性。取消注释并填入一个测试 secret 后：`check: ok`、`reload` 换代、引擎带 `clash_api` 起来；`/version` 带正确 secret 返回 `{"meta":true,"premium":true,"version":"sing-box 1.13.19"}`，不带或带错 secret 均 401；`/ui/` 返回 200，zashboard 按 `external_ui_download_detour: PROXY` 经代理下载到 `/data/adb/flux-rs/zashboard`（引擎 cwd 就是状态根）。换回出厂模板并 `reload` 后端口关闭（curl 得 `000`），说明前置逗号写法取消注释即为合法 JSON，且开与关都可逆。
+
 **2026-09-07 放宽 appId 范围后实测（第 30 条，同一台设备）。** 所有者的 18 项清单（含 `com.android.shell`，uid 2000）应用成功：`policy: apps whitelist (18 selected)`，`last error: none`，并带一条点名警告 `0:com.android.shell is uid 2000, a platform uid rather than an app: …`。端到端判别：`curl http://icanhazip.com` 以 root（uid 0，永不可选）执行返回本地出口 `123.151.200.37`，以 shell（uid 2000，已选中）执行返回节点出口 `8.216.47.244`，同时 `admit_tcp`/`in_assign_tcp` 从 149 同步涨到 150。清单里两个本机未安装的包（`com.openai.chatgpt`、`proton.android.pass`）仍按 §11.3 第 3 条整份拒绝，报错各自点名——修复前它只报「app id 2000 is out of range」，既不点名也不说原因，用户改完配置只会看到「浏览器还是不走代理」。同一条 `cn`/`cnip` 规则让 `ifconfig.me` 在两侧都返回本地出口，那是模板的设计行为而不是失效。
 
 **2026-09-06 旧版形状首测（模板换回原版 + `AUTO` + `DIRECT` 占位，已被上一段取代）。** 清掉订阅缓存、装回出厂模板后重启：开机自行抓取订阅并 Active（generation 1，38 个 outbound）。填充结果：`AUTO` 29 个节点，`HK` 7、`JP` 8、`SG` 8、`US` 6，**`TW` 保留 `DIRECT`**——这个机场没有台湾节点，填不出成员就原样保留；`PROXY`（`AUTO, HK, TW, JP, SG, US`）与 `GLOBAL` 是写好的菜单，未被改动。真流量：`tcp 35 captured / assigned 35`、`udp 41 / 41`，引擎日志新增 `outbound/hysteria2[香港01丨直连]`，即 `route.final` → `PROXY` → 首成员 `AUTO` 走到了真节点，不再是静默直连。

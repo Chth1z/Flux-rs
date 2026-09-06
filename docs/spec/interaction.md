@@ -149,7 +149,7 @@ Four properties MUST hold for the defaults (`cargo xtask template-check` checks 
 | Constraint | Why |
 |---|---|
 | No `inbounds` | Flux injects two tproxy inbounds at runtime; a template inbound would compete for their listeners |
-| No `experimental.clash_api` | The default opens no control port; §27.2.4 defines the rules when users open one themselves |
+| No **active** `experimental.clash_api` | The default opens no control port. The original's block is carried in the file **commented out**, so the panel is discoverable without being enabled behind the user's back; §27.2.4 defines the rules once they uncomment it |
 | The five regional groups are empty, and `PROXY` is the menu over them | They are what the subscription fills (§28.2). An empty group is fatal to the engine, so with no node to fill them Flux refuses the candidate and stays Direct rather than starting sing-box on a template |
 | fakeip ranges avoid the fixed bypasses | Flux unconditionally bypasses the entire ULA `fc00::/7`; a fakeip inside it is sent Direct, silently breaking all IPv6 fakeip. Determine containment from parsed prefixes and `flux_core::cidr::fixed_bypass`, not string prefixes—both `fd00::/8` and `FD00::/8` MUST be rejected |
 
@@ -172,6 +172,8 @@ single redirect page: opened from the manager's module list, it reads the
 controller address and secret the user configured and navigates there, so
 neither has to be typed (§28.8); when no `clash_api` is configured the page
 says so rather than redirecting into a connection failure.
+
+The template carries the original's block, commented, at the end of `experimental`, with `secret` blank and both costs of enabling it stated in place: on Android every app holding INTERNET can reach `127.0.0.1`, so an empty secret hands any of them the proxy's controls; and `external_ui_download_url` has the engine fetch and unpack a zip at run time with no digest to check it against, through the proxy, into the engine's working directory (`/data/adb/flux-rs`). Commenting rather than omitting is what keeps "the shipped default is the original's template" true: the only difference is that this block is inert until the user acts.
 
 If a user configures `experimental.clash_api`:
 
