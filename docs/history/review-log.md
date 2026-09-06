@@ -483,3 +483,5 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **缺口 3 — `fluxd bugreport` 默认写 `.`。** root shell 的 cwd 是只读的 `/`，无 `-o` 时 `Read-only file system`。**处置：默认写到状态根。**
 
 **附带观察（未升格为合同更正）。** reactor 经 `/proc/self/exe` 再执行后 `ps` 显示 `exe daemon`，不是第二个 `fluxd daemon`。`kill -9` reactor 之后立刻切默认路由到 `wlan0`，同一进程内收敛卡在 `tc_filter:ESTALE`（`recorded filter is no longer exact-owned`），`disable`/`enable` 清不掉，重启后消失——像进程内记录与内核对象对不上，不是设备上的永久残留。
+
+**2026-09-06 补测（`eed47c6`，同一台设备）。** 动态链接后的 zip（sha256 `84adaede…ddb39dc`，`NEEDED`: `libdl.so`、`libc.so`）重装并重启：冷缓存 `fluxd subscribe` 在设备上抓取成功（`subscription cache committed atomically`，18665 字节），`last error: none`。出厂 `PROXY=["DIRECT"]` 的模板生成 32 个 outbound、`PROXY` 29 成员。内容不变的第二次 `subscribe` 不换代。`ps` 现为两个 `fluxd daemon`。无 `-o` 的 `bugreport` 写到 `/data/adb/flux-rs/`。
