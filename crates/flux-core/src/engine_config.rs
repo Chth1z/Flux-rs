@@ -85,8 +85,10 @@ pub enum EngineConfigError {
 
 /// Generates the engine-owned configuration from a user-owned template.
 ///
-/// Exactly two mutations are permitted (§28.2): fill an empty selector/urltest
+/// Exactly two mutations are permitted (§28.2): fill a vacant selector/urltest
 /// group from the refined node tags, then append the refined outbound objects.
+/// A group is vacant when its member list is empty, or when its tag is `PROXY`
+/// or `AUTO` and the only member is the bootstrap placeholder `DIRECT`.
 /// `PROXY`, `GLOBAL` and `AUTO` receive every node; other groups receive nodes
 /// carrying that exact group name. Every other value is cloned unchanged.
 pub fn generate_from_template(
@@ -131,12 +133,16 @@ pub fn generate_from_template(
         let Some(members) = object.get("outbounds").and_then(Value::as_array) else {
             continue;
         };
-        if !members.is_empty() {
-            continue;
-        }
         let Some(group_tag) = object.get("tag").and_then(Value::as_str) else {
             continue;
         };
+        let placeholder = is_direct_placeholder(group_tag, members);
+        if !members.is_empty() && !placeholder {
+            continue;
+        }
+        if placeholder && nodes.is_empty() {
+            continue;
+        }
         let all_nodes = matches!(group_tag, "PROXY" | "GLOBAL" | "AUTO");
         let filled = nodes
             .iter()
@@ -148,6 +154,11 @@ pub fn generate_from_template(
     }
     outbounds.extend(nodes.iter().map(|node| node.outbound.clone()));
     Ok(generated)
+}
+
+fn is_direct_placeholder(tag: &str, members: &[Value]) -> bool {
+    matches!(tag, "PROXY" | "AUTO")
+        && matches!(members, [Value::String(member)] if member == "DIRECT")
 }
 
 /// Injects Flux-owned inbounds into one generated engine configuration.
@@ -367,6 +378,42 @@ mod tests {
             serde_json::to_string_pretty(&restored).unwrap(),
             serde_json::to_string_pretty(&template).unwrap()
         );
+    }
+
+    #[test]
+    fn proxy_direct_placeholder_fills_like_an_empty_group() {
+        let template = json!({
+            "outbounds": [
+                { "type": "direct", "tag": "DIRECT" },
+                { "type": "selector", "tag": "PROXY", "outbounds": ["DIRECT"] },
+                { "type": "selector", "tag": "GLOBAL", "outbounds": ["PROXY"] },
+                { "type": "selector", "tag": "PINNED", "outbounds": ["DIRECT"] }
+            ]
+        });
+        let nodes = vec![RefinedNode {
+            outbound: json!({ "type": "trojan", "tag": "Tokyo", "server": "example" }),
+            groups: vec!["ASIA".to_string()],
+        }];
+
+        let generated = generate_from_template(&template, &nodes).expect("generation");
+        assert_eq!(generated["outbounds"][1]["outbounds"], json!(["Tokyo"]));
+        assert_eq!(generated["outbounds"][2], template["outbounds"][2]);
+        assert_eq!(generated["outbounds"][3], template["outbounds"][3]);
+        assert_eq!(generated["outbounds"].as_array().unwrap().len(), 5);
+
+        let mut restored = generated;
+        restored["outbounds"] = template["outbounds"].clone();
+        assert_eq!(restored, template);
+    }
+
+    #[test]
+    fn proxy_direct_placeholder_stays_when_there_are_no_nodes() {
+        let template = json!({
+            "outbounds": [
+                { "type": "selector", "tag": "PROXY", "outbounds": ["DIRECT"] }
+            ]
+        });
+        assert_eq!(generate_from_template(&template, &[]).unwrap(), template);
     }
 
     #[test]

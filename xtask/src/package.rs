@@ -350,12 +350,12 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
         .env("FLUX_BUILD_BPF", "1")
         .env("FLUX_COMMIT", &provenance)
         // RUSTFLAGS replaces the [target.aarch64-linux-android] rustflags from
-        // .cargo/config.toml, so crt-static must be restated here.
+        // .cargo/config.toml. crt-static is intentionally absent: a fully
+        // static binary cannot reach netd's resolver (blueprint §13.4).
         .env(
             "RUSTFLAGS",
             format!(
-                "-C target-feature=+crt-static \
-                 -C link-arg=-Wl,-z,max-page-size=16384 \
+                "-C link-arg=-Wl,-z,max-page-size=16384 \
                  -C link-arg=-Wl,-z,common-page-size=16384 \
                  --remap-path-prefix={}=/flux-rs",
                 root.display()

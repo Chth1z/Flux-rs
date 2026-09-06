@@ -154,11 +154,14 @@ Four properties MUST hold for the defaults (`cargo xtask template-check` checks 
 | fakeip ranges avoid the fixed bypasses | Flux unconditionally bypasses the entire ULA `fc00::/7`; a fakeip inside it is sent Direct, silently breaking all IPv6 fakeip. Determine containment from parsed prefixes and `flux_core::cidr::fixed_bypass`, not string prefixes—both `fd00::/8` and `FD00::/8` MUST be rejected |
 
 The template ships with no server, no subscription and no credential: `PROXY`
-initially points only at `DIRECT`.
+initially points only at `DIRECT`, so `check` can pass before any node exists.
+When a subscription produces refined nodes, that placeholder is replaced
+(§28.2); `GLOBAL` stays pointed at `PROXY`.
 
 **The user edits this template; they do not replace it with a finished config.**
 Flux generates `run/sing-box.<generation>.json` from the template plus the
-subscription (§28), filling empty selector groups and appending refined nodes.
+subscription (§28), filling empty selector groups (and the `PROXY`/`AUTO`
+`DIRECT` placeholder) and appending refined nodes.
 Everything else in the template passes through byte for byte, so what the user
 writes is what the engine runs.
 
@@ -259,7 +262,7 @@ By default, `fluxd bugreport` generates a redacted ZIP:
 - Applies stable redaction to sensitive address and interface values by default;
 - Excludes logcat by default; only `--with-logcat` explicitly includes it and emits a warning;
 - `--raw` disables address redaction and emits a warning;
-- `-o <dir>` selects the output directory.
+- Writes under the state root (`/data/adb/flux-rs`) unless `-o <dir>` says otherwise. The default is not the process working directory: a root shell's cwd is `/`, which is read-only.
 
 The diagnostic bundle MUST NOT claim "cleaned" unless a fresh actual enumeration proves that the objects are absent.
 

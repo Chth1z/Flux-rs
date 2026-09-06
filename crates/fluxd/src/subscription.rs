@@ -170,7 +170,7 @@ fn classify(error: &ureq::Error) -> (&'static str, String) {
         ureq::Error::Rustls(inner) => ("tls", format!("TLS handshake failed: {inner}")),
         ureq::Error::Tls(inner) => ("tls", format!("TLS failed: {inner}")),
         ureq::Error::Pem(inner) => ("tls", format!("root certificate PEM: {inner:?}")),
-        ureq::Error::Io(inner) => ("io", format!("I/O error: {inner}")),
+        ureq::Error::Io(inner) => classify_io(inner),
         ureq::Error::BadUri(_) => ("url", "the subscription URL is malformed".to_string()),
         ureq::Error::RequireHttpsOnly(_) => {
             ("url", "the subscription URL is not https".to_string())
@@ -180,6 +180,24 @@ fn classify(error: &ureq::Error) -> (&'static str, String) {
         }
         ureq::Error::BodyExceedsLimit(_) => ("too_large", format!("{error}")),
         other => ("request", format!("{other}")),
+    }
+}
+
+/// Bionic's getaddrinfo surfaces as `Error::Io` rather than `HostNotFound`
+/// when the lookup itself fails. The message is the only stable discriminator
+/// and never contains the URL.
+fn classify_io(error: &io::Error) -> (&'static str, String) {
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("failed to lookup address")
+        || lower.contains("no address associated")
+        || lower.contains("name or service not known")
+        || lower.contains("temporary failure in name resolution")
+        || lower.contains("nodename nor servname")
+    {
+        ("dns", detail)
+    } else {
+        ("io", format!("I/O error: {detail}"))
     }
 }
 
@@ -258,5 +276,31 @@ fn drain(fd: RawFd) {
     // SAFETY: fd is a non-blocking eventfd and value is an eight-byte buffer.
     unsafe {
         libc::read(fd, value.as_mut_ptr().cast(), value.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_io;
+    use std::io::{self, ErrorKind};
+
+    #[test]
+    fn lookup_failures_are_dns() {
+        let error = io::Error::new(
+            ErrorKind::Other,
+            "failed to lookup address information: No address associated with hostname",
+        );
+        let (token, detail) = classify_io(&error);
+        assert_eq!(token, "dns");
+        assert!(detail.contains("failed to lookup address information"));
+    }
+
+    #[test]
+    fn other_io_stays_io() {
+        let error = io::Error::new(ErrorKind::ConnectionRefused, "connection refused");
+        assert_eq!(
+            classify_io(&error),
+            ("io", "I/O error: connection refused".to_string())
+        );
     }
 }

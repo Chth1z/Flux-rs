@@ -40,7 +40,7 @@ pub struct BugreportOptions {
     pub with_logcat: bool,
     /// Disable redaction.
     pub raw: bool,
-    /// Output directory; current directory when `None`.
+    /// Output directory; the state root when `None` (§27.4).
     pub output_dir: Option<PathBuf>,
 }
 
@@ -144,7 +144,7 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
     let dir = options
         .output_dir
         .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| layout.root().to_path_buf());
     let path = dir.join(name);
     let comment = format!(
         "flux-rs {} commit {commit} {}",

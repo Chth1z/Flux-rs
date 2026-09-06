@@ -10,7 +10,8 @@
 //     port, and the original ships one with no secret (§27.2.3, C10);
 //   * PROXY starts as a one-member group pointing at DIRECT, because an empty
 //     selector cannot be resolved and a fresh install must pass `fluxd check`
-//     before the user has edited anything;
+//     before the user has edited anything. Generation treats that placeholder
+//     as vacant once a subscription produces nodes (blueprint §28.2);
 //   * the IPv6 fakeip range is 2001:db8:f::/48, not the original's fc00::/18.
 //     Flux bypasses all of fc00::/7 because ULA is private space that must go
 //     direct, so a fakeip inside it would be sent direct and every IPv6 fakeip

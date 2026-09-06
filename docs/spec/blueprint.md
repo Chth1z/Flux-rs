@@ -3143,7 +3143,7 @@ Everything else is derived by xtask: `module.prop`'s version line, `versionCode 
 `cargo xtask package` is the only packaging entry point, locally and in CI:
 
 1. Start from an empty staging directory.
-2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock`, the pinned NDK and the pinned LLVM/clang, targeting `aarch64-linux-android` API 31. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. No build path is remapped and no wall-clock value is embedded.
+2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock`, the pinned NDK and the pinned LLVM/clang, targeting `aarch64-linux-android` API 31. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd — a fully static binary cannot resolve names on Android. The ZIP still ships one `fluxd` file; it does not bundle a libc. No build path is remapped and no wall-clock value is embedded.
 3. Download and verify against `engine.lock`: size, SHA-256, and all four `PT_LOAD` alignments exactly `0x1000`.
 4. Generate `module.prop`.
 5. Copy files by the allowlist, normalising line endings to LF and fixing modes.
@@ -3432,7 +3432,13 @@ Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
 1. **Fill.** Every `selector` or `urltest` in the template whose `outbounds` is
    an empty array is filled with the regional group its tag matches. Tags
-   `PROXY`, `GLOBAL` and `AUTO` are filled with every node.
+   `PROXY`, `GLOBAL` and `AUTO` are filled with every node. The shipped
+   bootstrap writes `PROXY` as `["DIRECT"]` so an unsubscribed install still
+   passes `sing-box check` (§27.2.3); that single-member `DIRECT` list is the
+   same vacancy as an empty array **for those two tags only** (`PROXY` and
+   `AUTO`). A group the user named something else and pointed at `DIRECT` is
+   left alone. If there are no refined nodes yet, the placeholder is not
+   replaced — emptying `PROXY` would make the engine unable to start.
 2. **Append.** The refined nodes are appended to `outbounds`.
 
 Everything else MUST pass through byte for byte.

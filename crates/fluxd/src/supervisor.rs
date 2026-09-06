@@ -221,6 +221,7 @@ fn reset_supervised_dispositions() -> io::Result<()> {
 fn spawn_reactor() -> io::Result<libc::pid_t> {
     let mut command = Command::new("/proc/self/exe");
     command
+        .arg0("fluxd")
         .arg("daemon")
         .env("FLUX_SUPERVISOR", std::process::id().to_string());
 

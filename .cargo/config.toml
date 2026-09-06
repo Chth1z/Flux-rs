@@ -9,4 +9,3 @@ xtask = "run -p xtask --"
 # the linker here, before building for a device.
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android31-clang"
-rustflags = ["-C", "target-feature=+crt-static"]

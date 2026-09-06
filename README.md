@@ -121,7 +121,8 @@ The two authority files are:
 
 **You edit the template; Flux generates what the engine runs.** From the
 template plus the subscription it produces `run/sing-box.<generation>.json`,
-filling empty selector groups and appending the refined nodes. Everything else
+filling empty selector groups (and the bootstrap `PROXY`/`AUTO` placeholder
+`DIRECT`) and appending the refined nodes. Everything else
 passes through byte for byte, so what you wrote is what runs — and a
 subscription update needs no manual merge.
 

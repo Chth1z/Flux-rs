@@ -94,6 +94,21 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reproducible package verification, git-commit provenance, SHA256SUMS, and the
   pinned official sing-box Corresponding Source archive beside the module ZIP.
 
+### Fixed
+
+- Subscription fetch on the device. `fluxd` is dynamically linked against
+  Bionic so `getaddrinfo` reaches netd; a fully static binary cannot resolve
+  names on Android. Lookup failures are reported as
+  `subscription_fetch_failed:dns`, not `:io`.
+- Generation now treats a `PROXY` or `AUTO` group whose only member is `DIRECT`
+  as vacant, the same as an empty array. The shipped template keeps that
+  placeholder so an unsubscribed install still passes `check`; without this,
+  a fetched subscription produced an Active generation that sent every captured
+  flow to DIRECT.
+- `fluxd bugreport` writes under the state root unless `-o` is given. The
+  previous default was the process working directory, which is `/` in a root
+  shell and is read-only.
+
 ### Changed
 
 - The shipped bootstrap template now follows the original Flux module's
