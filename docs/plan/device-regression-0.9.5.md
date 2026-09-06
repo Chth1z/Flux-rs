@@ -3,6 +3,8 @@
 > **这是 `plan/` 层：会被做完。** 做完后把结果按"断言 / 实测"写进 `../history/review-log.md` §0.6 的新小节，本文移入 `history/`。
 >
 > 需要所有者授权（GOV-1.2：装卸模块、重启是改测试机的持久状态）。所有者上次授权的设备：SM-S9180 / 5.15.211 / KernelSU。
+>
+> **2026-09-06 进度。** 装卸、激活表、批次 B/D/E/F 的命令行断言已写入 [`../history/review-log.md`](../history/review-log.md) §0.6.6。仍未做：设备侧订阅抓取（缺口 1）、WebUI 按钮、Phase 3–7 套件、Magisk/APatch。三个缺口待所有者定处置后，本文才移入 `history/`。
 
 ## 为什么不能原地升级
 

@@ -446,3 +446,39 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 | 25 | §13.2 的 `service.sh` 用一个 shell 循环监督 `fluxd daemon`：非零退出就按 1/2/4/8 s 退避重启；§14.2 把它写成"a supervisor shell blocked in `wait`" | 这个循环的行为取决于退出码和时间，按 PHIL-7 的判据本就属于二进制（§17.0.1 第 5 项）。而且它有缺陷：对**任何**非零退出都重启，包括"另一个实例已在运行"——第二次执行 `service.sh` 会以 8 秒间隔永远重试，对着正在工作的实例撞 | 所有者 2026-09-05 在三个选项里选定"收进二进制"。§13.2.2：`fluxd daemon` 成为监督进程，重新执行 `/proc/self/exe` 作为 reactor；reactor 持锁、开 socket、拥有全部内核对象；监督进程只认退出码与信号——`0` 退出、`3`（锁已被持有）退出不重启、其余按引擎同一张 1/2/4/8/30 s 表重启并在稳定 60 s 后重置。不给 reactor 设 PDEATHSIG：监督进程被杀只是失去监督，代理继续工作。§23.1 第二实例的退出码从 1 改为 3，`service.sh` 变成一行 `exec` |
 | 26 | §23.1：状态根、`run/`、`config/` 的模式不是 0700 时 daemon 拒绝激活（`runtime_dir_mode`），"不自动 chmod，用户可能是故意改的" | 这三个目录是 Flux 自己创建、自己拥有的对象（§11.1），不是用户的文件；`/data/adb` 本身就是 root 专属，这个模式几乎不保护任何东西；而 `service.sh` 每次开机本来就 `chmod 0700` 一遍——开机静默改正、运行中却拒绝，两头矛盾，且 shell 在做本该由二进制做的事（PHIL-7） | 所有者 2026-09-05 在三个选项里选定"Flux 拥有自己的状态根"。`Layout::ensure()` 在每次启动与收敛时恢复 `root:0700` 并记一行日志；`service.sh` 只保证目录存在；唯一仍拒绝的是路径上是符号链接或非目录（`runtime_dir_type`）——那是外来对象，Flux 不替换不跟随（PHIL-5）。§23.1 两行改写 |
 | 27 | §9.6：模板里任何 `flux-` 前缀的 tag 都被拒绝 | 机制真正需要的只是两个注入 inbound 的 tag 不被撞。前缀保留把外部数据也卷进来：订阅提供方把一个节点命名为 `flux-hk`，整份生成配置就失效——外部数据决定用户的代理能不能跑（PHIL-1） | 所有者 2026-09-05 选定收窄为精确匹配：只有 `flux-in-v4` / `flux-in-v6` 两个 tag 被拒绝，其余归用户与提供方。§9.6 改写，`RESERVED_TAG_PREFIX` 变为 `RESERVED_TAGS` |
+
+### 0.6.6 0.9.5 真机回归（2026-09-06，SM-S9180 / 5.15.211 / KernelSU 3.3.0 lkm）
+
+从 `b4f367b` 打的 `Flux-rs-v0.9.0-arm64.zip`（sha256 `b129b812bedd47dedf4737a103b99f6f8271b937b3ca69a6e58a9fd7cf4b0a35`）卸载 0.9.1 形态后重装。卸载后重启：`/data/adb/flux-rs` 不在，`ip`/`tc` 无 `flxrs*`、无 pref 100、无 table 20260（§20 第 9 条，KernelSU 这一台）。安装日志打印新的三步引导，落地为禁用；`config/flux.toml` 是五个顶层表且带 `[ssid]`。
+
+**订阅抓取在设备上结构性失败，下列「精修 / 填组」行用的是宿主机抓到的 `subscription.raw` 加 `subscription.url` 归属文件，其余都是设备上的守护自己做的。** 原因见本节末。
+
+| 断言 | 实测结果 |
+|---|---|
+| 监督进程 + reactor 父子关系；锁在子进程 | `ps`：监督 2456（后为 2592）ppid 1、`fluxd daemon`；reactor 2549 / 2729 为其子。`run/daemon.lock` 写的是子进程 pid |
+| `service.log` 开机三行、无循环 | boot 三行之后是事件行；无 `while`/`sleep` 痕迹 |
+| 三个接口 `pref 2`、`reachable` | 蜂窝：`rmnet_data0/1/9`；重启后含 Wi-Fi：`rmnet_data1`、`rmnet_data8`、`wlan0`（`flx_cap_l2`）皆 `pref 2` / `reachable` |
+| 捕获数 = assign 数 | `tcp 36 captured / 0 direct, udp 46 captured; assigned 36 tcp / 46 udp`（后 `status --json`：`admit_*` 与 `in_assign_*` 相等） |
+| 真流量走节点 | 引擎日志 47 条 `outbound/hysteria2[香港01丨直连]: outbound connection to api.twitter.com:443` |
+| `module.prop` 状态行 | `🥰 [Active] gen 3 · 5 apps · rmnet_data0, rmnet_data1, rmnet_data9` |
+| 改模板无关字段换代；再 reload 不换代 | `log.level` error→info：generation 2→3，引擎 pid 变；不变模板再 `reload`：仍 generation 3、同一引擎 pid |
+| 精修 + 填组（缓存喂入后） | 默认模板的 `PROXY=["DIRECT"]` **不会被填**（见缺口 2）。把 `PROXY` 置空后再 reload：generation 2，`PROXY` 29 成员，垃圾标签（流量/到期/官网）为零，注入 inbound `flux-in-v4`/`flux-in-v6` |
+| 第二次 `fluxd daemon` 立刻以 3 退出并点名持锁 pid | 退出码 3，文案 `another fluxd instance holds the lock; not restarting`，点名 `run/daemon.lock` 里的 reactor |
+| `kill -9` reactor：监督 pid 不变、1 s 后新 reactor | `service.log`：`reactor killed by signal 9; restarting in 1 s`；监督仍 2456；新 reactor 22313；引擎重启。代号从 1 重开（§10.6：守护重启删除产物、从权威文件重建） |
+| `kill -9` 监督：reactor 与代理继续；再起被拒 | 监督死后 reactor 挂到 pid 1；`status` 仍 Active；再 `fluxd daemon` 以 3 退出并点名新锁持有者 |
+| 管理器开关不重启 | `ksud module disable`：6 s 内 `Disabled`、引擎停、`😴 [Disabled]`；`enable`：新一代 Active，三接口就绪 |
+| `clash_api` 空 secret 只告警 | `fluxd check` 退出 0，警告 `clash_api_secret_missing`；`status.warnings` 同一条 |
+| `[ssid]` 为空时 `status.ssid` 为 null，reactor 无 `NETLINK_GENERIC` | `status --json` 的 `ssid` 空；`/proc/<reactor>/net/netlink` 协议 16 无该 pid |
+| `[ssid]` blacklist 命中当前 Wi-Fi：暂停；删掉该项：恢复 | 干净 reactor 上：`wifi: connected · paused by [ssid] blacklist (entry 1)`，引擎停，`module.prop`：`😴 [Inactive] paused on this Wi-Fi network`。清空 list 后 generation 2、Active，三接口含 `wlan0` 再达 `reachable` |
+| SSID 字节不进 `status` / `module.prop` / `fluxd.log` | 三处零命中当前 SSID 字符串；日志只写「1 associated station interface(s); [ssid] blacklist matched entry 1; paused」 |
+| `bugreport` 不含权威文件与订阅 token | 默认写当前目录失败（见缺口 3）。`-o /data/local/tmp` 的 zip：无 `template.json` / `flux.toml` / `sing-box.<gen>.json`，无订阅 token/主机，目的域名为 `[domain-redacted]`。**引擎日志里的节点名未抹**（58 处 `outbound/hysteria2[…]`） |
+
+未跑：批次 C 的设备侧 `fluxd subscribe`（抓取本身失败）；KernelSU WebUI 按钮（需人手）；Phase 3–7 设备套件；Magisk / APatch smoke（§20 第 10 条）。
+
+**缺口 1 — 静态链接下订阅抓取永远解析不出域名。** `.cargo/config.toml` 给 `aarch64-linux-android` 加了 `+crt-static`；`llvm-readelf` 看产物是 `EXEC`、无 `INTERP`、无 `NEEDED`。Android 的 `getaddrinfo` 靠动态链接器注入 `libnetd_client` 才能问 netd；静态二进制没有这条注入，也没有 `/etc/resolv.conf`。root 下 `ping` 同一主机能解析，`fluxd` 报 `subscription_fetch_failed:io` / `failed to lookup address information: No address associated with hostname`（`failures.md` 承诺的类别是 `:dns`）。这是合同面：产品在设备上抓不到订阅。处置待所有者（GOV-1.2）：去掉 `+crt-static`、自己问 `dnsproxyd`、或写成发布边界。
+
+**缺口 2 — 出厂模板的 `PROXY=["DIRECT"]` 挡住填组。** §28 只填**空**的 selector/urltest。默认模板为了让未订阅的首装能过 `check`，把 `PROXY` 写成 `["DIRECT"]`。于是「订阅缓存已精修、29 个真节点已追加、`route.final` 仍是 PROXY、状态已是 Active」时，全部捕获流量走 DIRECT，`status` 不警告。把 `PROXY` 置空后再 reload，填充立刻生效。这不是用户配错，是两处各自正确的规则叠在一起得到的静默直连。
+
+**缺口 3 — `fluxd bugreport` 默认写 `.`。** root shell 的 cwd 是只读的 `/`，无 `-o` 时 `Read-only file system`。诊断包在设备上默认不可用。
+
+**附带观察（未升格为合同更正）。** reactor 经 `/proc/self/exe` 再执行后 `ps` 显示 `exe daemon`，不是第二个 `fluxd daemon`。`kill -9` reactor 之后立刻切默认路由到 `wlan0`，同一进程内收敛卡在 `tc_filter:ESTALE`（`recorded filter is no longer exact-owned`），`disable`/`enable` 清不掉，重启后消失——像进程内记录与内核对象对不上，不是设备上的永久残留。
