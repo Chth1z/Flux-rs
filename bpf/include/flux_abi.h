@@ -135,9 +135,11 @@ enum flux_uid_mode {
 	FLUX_UID_DRAINING = 2,
 };
 
-/* Android per-user app UID range. Anything outside is a configuration error;
- * this is what structurally guarantees the root-owned engine (uid 0) can
- * never appear in uid_policy.
+/* Android per-user app UID range. Blacklist app mode expands exactly this range
+ * (§1.4), so "everything except these apps" can never sweep the platform in;
+ * an explicitly named platform uid is allowed and warned about in userspace.
+ * What structurally keeps the root-owned engine out of uid_policy is the
+ * refusal of appId 0, not this range.
  */
 #define FLUX_APP_ID_MIN 10000u
 #define FLUX_APP_ID_MAX 19999u

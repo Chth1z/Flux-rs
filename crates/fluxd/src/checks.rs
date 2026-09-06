@@ -162,15 +162,16 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
         }
     };
     let index = PackageIndex::parse(&text);
-    if let Err(error) = config.resolve_selected_uids(&index) {
-        report
-            .errors
-            .push(format!("flux.toml: {}", describe_flux_error(&error)));
-        return;
-    }
+    // Every entry is diagnosed before the set is resolved: set resolution stops
+    // at the first bad selector without being able to say which one it was, and
+    // a list of twenty apps needs every offending line named at once.
+    let mut named_a_failure = false;
     for selector in &config.apps {
         match index.resolve(selector) {
             Ok(selection) => {
+                if let Some(warning) = system_uid_warning(selector, selection.uid) {
+                    report.warnings.push(warning);
+                }
                 let shared = index.shared_with(selection.uid % 100_000);
                 if shared.len() > 1 {
                     let effect = match config.apps_mode {
@@ -189,21 +190,60 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
                     ));
                 }
             }
-            Err(SelectorError::UnknownPackage(package)) => {
-                report.errors.push(format!(
-                    "{}: package `{package}` is not installed",
-                    selector.canonical()
-                ));
-            }
-            Err(e) => {
-                report.errors.push(format!(
-                    "{}: {}",
-                    selector.canonical(),
-                    describe_selector_error(&e)
-                ));
+            Err(error) => {
+                named_a_failure = true;
+                report
+                    .errors
+                    .push(describe_selector_failure(selector, &error));
             }
         }
     }
+    // Set-level resolution can still fail for a reason no single entry explains,
+    // the hard cap among them.
+    if let Err(error) = config.resolve_selected_uids(&index) {
+        if !named_a_failure {
+            report
+                .errors
+                .push(format!("flux.toml: {}", describe_flux_error(&error)));
+        }
+    }
+}
+
+/// One offending app entry, named, so the user knows which line to edit.
+pub(crate) fn describe_selector_failure(
+    selector: &flux_core::selector::AppSelector,
+    error: &SelectorError,
+) -> String {
+    format!(
+        "{}: {}",
+        selector.canonical(),
+        describe_selector_error(error)
+    )
+}
+
+/// What selecting a platform uid means, for the entries that are one.
+///
+/// Selecting one is the user's call — it is their device (§1.4) — but it is not
+/// the same act as selecting an app, so it is never silent.
+pub(crate) fn system_uid_warning(
+    selector: &flux_core::selector::AppSelector,
+    uid: u32,
+) -> Option<String> {
+    let app_id = uid % flux_core::abi::USER_ID_STRIDE;
+    if !flux_core::selector::is_system_app_id(app_id) {
+        return None;
+    }
+    let consequence = if app_id == 1000 {
+        "Android's connectivity validation, DHCP and time sync run there, so the device \
+         reports no internet whenever the proxy cannot carry their traffic"
+    } else {
+        "platform services are not written to expect a proxy, and none of them has a UI to \
+         tell you when one is failing"
+    };
+    Some(format!(
+        "{} is uid {uid}, a platform uid rather than an app: {consequence}",
+        selector.canonical()
+    ))
 }
 
 fn check_template_json(
@@ -707,8 +747,16 @@ fn describe_selector_error(e: &SelectorError) -> String {
         SelectorError::Malformed(text) => {
             format!("selector `{text}` is not `packageName` or `userId:packageName`")
         }
-        SelectorError::UserIdOutOfRange(id) => format!("user id {id} is out of range"),
-        SelectorError::AppIdOutOfRange(id) => format!("app id {id} is out of range"),
+        SelectorError::UserIdOutOfRange(id) => {
+            format!("user id {id} is above {}", flux_core::abi::USER_ID_MAX)
+        }
+        SelectorError::AppIdOutOfRange(0) => "it runs as root, the same user the proxy engine \
+             runs as; capturing it would feed the engine's own traffic back into itself, so no \
+             spelling of this entry can work"
+            .to_string(),
+        SelectorError::AppIdOutOfRange(id) => {
+            format!("uid {id} does not fit one Android user's range")
+        }
         SelectorError::UnknownPackage(package) => format!("package `{package}` is not installed"),
     }
 }
@@ -927,5 +975,27 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|warning| warning.contains("bind_interface")));
+    }
+
+    /// Selecting a platform uid is allowed and never silent; uid 1000 gets the
+    /// consequence that actually bites, and an app uid gets nothing (§1.4).
+    #[test]
+    fn platform_uids_warn_and_app_uids_do_not() {
+        let selector = flux_core::selector::AppSelector::parse("0:android").unwrap();
+        let warning = system_uid_warning(&selector, 1000).expect("uid 1000 warns");
+        assert!(warning.contains("0:android"));
+        assert!(warning.contains("no internet"));
+
+        let shell = flux_core::selector::AppSelector::parse("0:com.android.shell").unwrap();
+        let warning = system_uid_warning(&shell, 2000).expect("uid 2000 warns");
+        assert!(warning.contains("platform uid"));
+        assert!(!warning.contains("no internet"));
+
+        // Another user's copy of a platform uid is still a platform uid.
+        assert!(system_uid_warning(&shell, 1_002_000).is_some());
+
+        let app = flux_core::selector::AppSelector::parse("0:com.example.app").unwrap();
+        assert!(system_uid_warning(&app, 10_372).is_none());
+        assert!(system_uid_warning(&app, 1_010_372).is_none());
     }
 }

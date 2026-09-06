@@ -34,7 +34,7 @@ use flux_core::control_wire::{
     Counters, EngineStatus, Request, Response, RootManagerStatus, SsidStatus, State,
 };
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
-use flux_core::selector::{PackageIndex, SelectorError};
+use flux_core::selector::PackageIndex;
 use flux_core::ssid::ssid_verdict;
 
 use crate::checks;
@@ -3621,6 +3621,22 @@ impl Reactor {
                     )
                 })?;
                 let index = PackageIndex::parse(&packages);
+                // Diagnose every entry before resolving the set: set resolution
+                // stops at the first bad selector without naming it, and the
+                // user needs every offending line at once.
+                let failures: Vec<String> = flux
+                    .apps
+                    .iter()
+                    .filter_map(|selector| {
+                        index
+                            .resolve(selector)
+                            .err()
+                            .map(|error| checks::describe_selector_failure(selector, &error))
+                    })
+                    .collect();
+                if !failures.is_empty() {
+                    return Err(("selector_invalid".to_string(), Some(failures.join("; "))));
+                }
                 let selected = flux.resolve_selected_uids(&index).map_err(|error| {
                     (
                         "flux_config_invalid".to_string(),
@@ -3629,26 +3645,14 @@ impl Reactor {
                 })?;
                 for selector in &flux.apps {
                     let selection = index.resolve(selector).map_err(|error| {
-                        let detail = match error {
-                            SelectorError::UnknownPackage(package) => {
-                                format!(
-                                    "{}: package `{package}` is not installed",
-                                    selector.canonical()
-                                )
-                            }
-                            SelectorError::AppIdOutOfRange(app_id) => {
-                                format!("{}: app id {app_id} is out of range", selector.canonical())
-                            }
-                            SelectorError::UserIdOutOfRange(user_id) => format!(
-                                "{}: user id {user_id} is out of range",
-                                selector.canonical()
-                            ),
-                            SelectorError::Malformed(text) => {
-                                format!("{}: selector `{text}` is malformed", selector.canonical())
-                            }
-                        };
-                        ("selector_invalid".to_string(), Some(detail))
+                        (
+                            "selector_invalid".to_string(),
+                            Some(checks::describe_selector_failure(selector, &error)),
+                        )
                     })?;
+                    if let Some(warning) = checks::system_uid_warning(selector, selection.uid) {
+                        warnings.push(warning);
+                    }
                     let siblings = index
                         .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
                         .into_iter()

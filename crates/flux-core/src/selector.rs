@@ -5,15 +5,18 @@
 //!
 //! Two rules that are structural, not stylistic:
 //!
-//! * Only `appId` in `[10000, 19999]` is accepted. This is what guarantees the
-//!   root-owned engine (uid 0) can never appear in `uid_policy`, so no
-//!   self-exclusion logic is needed anywhere (blueprint §2.3, D9).
+//! * `appId` 0 is never accepted. The engine runs as root, so refusing uid 0 is
+//!   what guarantees it can never appear in `uid_policy`, and therefore that no
+//!   self-exclusion logic is needed anywhere (blueprint §2.3, D9). Every other
+//!   uid `packages.list` names is the user's to select, including a system one;
+//!   blacklist mode still expands only `[APP_ID_MIN, APP_ID_MAX]`, so a system
+//!   uid can only ever enter by being written down (§1.4).
 //! * Resolution never goes through binder. `cmd package` would introduce a
 //!   `system_server` readiness dependency at boot; a plain file read plus
 //!   inotify does not (blueprint D8).
 //!
 //! Blueprint §15.2 test 1 lives at the bottom: `userId:package` canonical
-//! parse, `appId` range rejection, shared-UID listing, and the hard cap.
+//! parse, uid 0 rejection, shared-UID listing, and the hard cap.
 
 use std::collections::BTreeMap;
 
@@ -26,7 +29,8 @@ pub enum SelectorError {
     Malformed(String),
     /// `userId` was above [`USER_ID_MAX`].
     UserIdOutOfRange(u32),
-    /// `appId` was outside `[APP_ID_MIN, APP_ID_MAX]`.
+    /// `appId` was 0 — the engine's own uid — or would not fit one user's
+    /// stride, so the composed UID would belong to another user.
     AppIdOutOfRange(u32),
     /// The package was absent from `packages.list`.
     UnknownPackage(String),
@@ -92,16 +96,25 @@ impl AppSelector {
 
 /// Composes an Android UID from a user id and an app id.
 ///
-/// Both bounds are checked, because accepting an out-of-range `appId` is how a
-/// user would otherwise be able to select `system_server` and brick the device.
+/// Refuses exactly two things: `appId` 0, because that is the engine's own uid
+/// and admitting it is what would open the capture loop (§7.4); and an `appId`
+/// at or beyond one user's stride, because the composed UID would then land in
+/// a different user. A system uid such as 1000 or 2000 composes normally — the
+/// caller warns about what selecting it means (§1.4).
 pub fn compose_uid(user_id: u32, app_id: u32) -> Result<u32, SelectorError> {
     if user_id > USER_ID_MAX {
         return Err(SelectorError::UserIdOutOfRange(user_id));
     }
-    if !(APP_ID_MIN..=APP_ID_MAX).contains(&app_id) {
+    if app_id == 0 || app_id >= USER_ID_STRIDE {
         return Err(SelectorError::AppIdOutOfRange(app_id));
     }
     Ok(user_id * USER_ID_STRIDE + app_id)
+}
+
+/// Whether an app id is outside the ordinary Android application range, and so
+/// belongs to the platform rather than to an installed app.
+pub fn is_system_app_id(app_id: u32) -> bool {
+    !(APP_ID_MIN..=APP_ID_MAX).contains(&app_id)
 }
 
 /// Splits an Android UID back into `(user_id, app_id)`.
@@ -171,8 +184,10 @@ impl PackageIndex {
 
     /// Every installed third-party application id, sorted and de-duplicated.
     ///
-    /// Blacklist app mode expands this iterator into concrete UIDs. System and
-    /// isolated ranges remain structurally unselectable (§2.3, §11.2.1).
+    /// Blacklist app mode expands this iterator into concrete UIDs, so it stays
+    /// inside `[APP_ID_MIN, APP_ID_MAX]`: "proxy everything except these apps"
+    /// must never sweep the platform's own uids in. A system uid enters the
+    /// policy only by being written down in whitelist mode (§1.4, §11.2.1).
     pub fn application_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.by_app_id
             .keys()
@@ -182,8 +197,9 @@ impl PackageIndex {
 
     /// Resolves a parsed selector to a concrete [`Selection`].
     ///
-    /// Fails if the package is unknown or its app id is outside the application
-    /// range; a shared UID is not an error, it is surfaced by [`shared_with`].
+    /// Fails if the package is unknown or its app id is refused by
+    /// [`compose_uid`]; a shared UID is not an error, it is surfaced by
+    /// [`shared_with`].
     ///
     /// [`shared_with`]: PackageIndex::shared_with
     pub fn resolve(&self, selector: &AppSelector) -> Result<Selection, SelectorError> {
@@ -210,17 +226,29 @@ mod tests {
         assert_eq!(compose_uid(10, 10_123), Ok(1_010_123));
     }
 
+    /// A system uid is the user's to select once they write it down; only uid 0
+    /// and an app id that would cross into another user are refused (§1.4).
     #[test]
-    fn compose_rejects_system_and_isolated_uids() {
+    fn compose_accepts_system_uids_but_never_root_or_a_foreign_user() {
+        assert_eq!(compose_uid(0, 1000), Ok(1000));
+        assert_eq!(compose_uid(0, 2000), Ok(2000));
+        assert_eq!(compose_uid(0, 90_000), Ok(90_000));
+        assert_eq!(compose_uid(10, 2000), Ok(1_002_000));
+
         assert_eq!(compose_uid(0, 0), Err(SelectorError::AppIdOutOfRange(0)));
         assert_eq!(
-            compose_uid(0, 1000),
-            Err(SelectorError::AppIdOutOfRange(1000))
+            compose_uid(0, USER_ID_STRIDE),
+            Err(SelectorError::AppIdOutOfRange(USER_ID_STRIDE))
         );
-        assert_eq!(
-            compose_uid(0, 90_000),
-            Err(SelectorError::AppIdOutOfRange(90_000))
-        );
+    }
+
+    #[test]
+    fn system_app_ids_are_recognised_for_the_warning() {
+        assert!(is_system_app_id(1000));
+        assert!(is_system_app_id(2000));
+        assert!(is_system_app_id(90_000));
+        assert!(!is_system_app_id(10_000));
+        assert!(!is_system_app_id(19_999));
     }
 
     #[test]
@@ -297,6 +325,7 @@ com.example.chat 10232 0 /data/user/0/com.example.chat default:targetSdkVersion=
 com.vendor.first 10500 0 /data/user/0/com.vendor.first default none 0
 com.vendor.second 10500 0 /data/user/0/com.vendor.second default none 0
 android 1000 0 /data/system default none 0
+com.example.rootowned 0 0 /data/system default none 0
 ";
 
     #[test]
@@ -325,17 +354,35 @@ android 1000 0 /data/system default none 0
     }
 
     #[test]
-    fn package_index_rejects_out_of_range_and_unknown() {
+    fn package_index_resolves_a_system_package_and_refuses_root_and_unknown() {
         let index = PackageIndex::parse(SAMPLE_PACKAGES);
-        // `android` is uid 1000, below the application range: structurally
-        // unselectable even though it is in the file.
+        // `android` is uid 1000: selectable once written down, and flagged as a
+        // system uid so the caller can warn (§1.4).
+        let selection = index
+            .resolve(&AppSelector::parse("0:android").unwrap())
+            .expect("a system package resolves");
+        assert_eq!(selection.uid, 1000);
+        assert!(is_system_app_id(selection.uid));
+
+        // Nothing running as root can be selected: that is the loop invariant.
         assert_eq!(
-            index.resolve(&AppSelector::parse("0:android").unwrap()),
-            Err(SelectorError::AppIdOutOfRange(1000))
+            index.resolve(&AppSelector::parse("0:com.example.rootowned").unwrap()),
+            Err(SelectorError::AppIdOutOfRange(0))
         );
         assert_eq!(
             index.resolve(&AppSelector::parse("0:com.absent").unwrap()),
             Err(SelectorError::UnknownPackage("com.absent".to_string()))
+        );
+    }
+
+    /// Blacklist mode must never sweep the platform in: `application_ids` stays
+    /// inside the app range even though a system package is in the file.
+    #[test]
+    fn blacklist_expansion_excludes_system_uids() {
+        let index = PackageIndex::parse(SAMPLE_PACKAGES);
+        assert_eq!(
+            index.application_ids().collect::<Vec<_>>(),
+            vec![10_231, 10_232, 10_500]
         );
     }
 }

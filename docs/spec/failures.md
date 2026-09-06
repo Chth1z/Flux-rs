@@ -30,7 +30,8 @@ Every possible failure point specifies **how it is detected, what action is take
 | SELinux denies BPF load/attach | `EPERM`/`EACCES` | `Inactive`; **do not inject sepolicy** (§1.3 non-goal) | `"bpf_denied:check root manager policy"` |
 | `packages.list` is unreadable | errno from `open` | Retain the current policy; on cold start, `Inactive` | `"packages_list_unreadable"` (`fluxd check` appends `: <errno>`) |
 | A configured package does not exist | Table lookup misses after parsing | Reject the entire candidate configuration; **do not apply it partially** | `"selector_invalid"` + detail identifying the entry |
-| `appId` is out of range | Range check | Same as above | `"selector_invalid"` + detail |
+| A configured package runs as root (`appId` 0) | Composition refuses it (§1.4) | Same as above — and no spelling of the entry can work, so the detail says why rather than suggesting a fix | `"selector_invalid"` + detail identifying the entry |
+| A configured package is a platform uid outside `[10000, 19999]` | Same composition, which accepts it | **Warning only.** It is applied; `check` and `status` name the entry and what it costs (uid 1000 breaks Android's connectivity validation while the proxy is down) | warning naming the entry |
 | Engine binary is missing (incomplete module installation / test environment) | `stat` the engine path | `Inactive`; do not enter the §9.4 transaction | `"engine_binary_missing:<path>"` |
 | `config/template.json` is missing or unreadable | errno from `open` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_missing"` / `"engine_config_unreadable:<errno>"` |
 | The template fails to parse: non-UTF-8, or invalid JSONC syntax | `parse_jsonc` | Cold start: `Inactive`; hot update: retain the current generation | `"engine_config_invalid"` + specific reason in warnings |

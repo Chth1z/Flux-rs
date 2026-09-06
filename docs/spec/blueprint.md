@@ -187,10 +187,10 @@ per-app DNS routing with zero additional mechanism.
 
 Note what the last row of the table below means for self-capture: **the engine
 excludes itself structurally.** sing-box runs as root, its own upstream DNS
-queries carry uid 0, and uid 0 can never be in `uid_policy` because §1.4 admits
-only appIds 10000–19999. So Flux captures the app's system DNS without
-swallowing the engine's. A device-wide `:53` hijack needs a dedicated non-root
-UID to reach the same place; here it comes for nothing.
+queries carry uid 0, and §1.4 refuses `appId` 0 outright, so uid 0 can never be
+in `uid_policy`. So Flux captures the app's system DNS without swallowing the
+engine's. A device-wide `:53` hijack needs a dedicated non-root UID to reach the
+same place; here it comes for nothing.
 
 | Who sent the DNS | `sk_uid` seen at TC egress | Captured |
 |---|---|---|
@@ -399,8 +399,21 @@ bypass list.
 
 - The configuration unit is `userId:packageName`; the kernel enforcement unit is
   `UID = userId * 100000 + appId`.
-- **Only `appId ∈ [10000, 19999]` is accepted.** Anything else is a
-  configuration error.
+- **`appId` 0 is never accepted**, and that single refusal is what the loop
+  argument of §7.4 rests on: the engine runs as root, so a uid it cannot be
+  named by is a uid it cannot capture itself through.
+- **Every other uid `packages.list` names is the user's to select**, including a
+  platform one such as `android` (1000) or `com.android.shell` (2000). Ordinary
+  apps occupy `[10000, 19999]`; selecting outside it is a deliberate act, so
+  `check` and `status` warn, naming the entry and what it costs — for uid 1000,
+  that Android's connectivity validation, DHCP and time sync run there and the
+  device reports no internet whenever the proxy cannot carry their traffic.
+  Flux does not refuse it: the user is root on their own device, and a proxy
+  that silently drops the app it was asked to proxy is the failure mode this
+  project exists to avoid (PHIL-6).
+- **Blacklist mode expands only `[10000, 19999]`.** "Proxy everything except
+  these apps" must never sweep the platform in; a platform uid enters the policy
+  only by being written down.
 - A shared UID selects every package and process under it, with no way to
   distinguish them per packet. `check` and `status` MUST list every package
   sharing the UID.
@@ -786,8 +799,9 @@ blocklist.** The argument:
 
 1. `uid_policy` is a HASH containing **only selected app UIDs**. Step E1 of §7.3
    is "miss ⇒ `TC_ACT_UNSPEC`", not "hit an exclusion entry ⇒ let it through".
-2. §1.4 admits only `appId ∈ [10000, 19999]`. sing-box runs as root, uid 0, so it
-   is **structurally incapable of appearing in the table**.
+2. §1.4 refuses `appId` 0. sing-box runs as root, uid 0, so it is
+   **structurally incapable of appearing in the table** — no spelling of any
+   entry composes to it.
 3. `bpf_get_socket_uid()` returns `overflowuid` (65534) when there is no
    `skb->sk`, which is also absent from the table ⇒ `TC_ACT_UNSPEC`. **A failure
    to resolve the UID therefore means no capture, not a wrong capture.** A
@@ -810,10 +824,12 @@ no engine-specific mark, no GID bypass and no upstream-destination CIDR
 exception. Adding any of them would add hot-path cost and configuration surface
 against a threat that does not exist.
 
-**One invariant carries the whole argument:** `uid_policy` MUST never contain an
-entry with `appId < 10000` (enforced by the parser, §11.2), and the engine MUST
-never run as a selected app's UID (fixed root, §13.3). Breaking either one is
-what would open the loop.
+**One invariant carries the whole argument:** `uid_policy` MUST never contain
+uid 0 (enforced by the parser, §11.2), and the engine MUST never run as a
+selected app's UID (fixed root, §13.3). Breaking either one is what would open
+the loop. A platform uid other than 0 — 1000 or 2000, say — is not part of this
+argument: it is not the engine, capturing it loops nothing, and §1.4 leaves that
+choice to the user with a warning.
 
 ---
 
@@ -2825,7 +2841,7 @@ com.example.browser 10231 0 /data/user/0/com.example.browser default:targetSdkVe
 The second column is the uid under user 0, and `app_id = uid % 100000`. The rules:
 
 1. Read the whole file, at most 8 MiB, and parse both directions: `package -> app_id` and `app_id -> [package]`.
-2. For each `userId:package` in the configuration, look up the `app_id`, check `app_id ∈ [10000, 19999]`, and compute `uid = userId * 100000 + app_id`.
+2. For each `userId:package` in the configuration, look up the `app_id`, refuse `app_id` 0 (§1.4), and compute `uid = userId * 100000 + app_id`. An `app_id` outside `[10000, 19999]` resolves, and is reported as a platform uid rather than an app.
 3. A package that does not exist fails the candidate configuration with an explicit error. **Silently ignoring it is forbidden**: the user asked for an app to be proxied and would otherwise believe it is.
 4. Other packages sharing the same `app_id` are listed in the shared-UID note in `status` (§1.4).
 5. inotify watches the file **and its parent**, because Android rewrites it by atomic replacement and a watch on the inode alone would follow the file that was replaced. Event, debounce, reconverge.
