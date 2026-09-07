@@ -527,6 +527,8 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 | 连续三轮开关 | 同上；`admit_tcp` 81→88、`admit_udp` 111→113 持续增长，`drop_inactive` / `drop_stale_gen` / `egress_listener_miss` 全为 0 |
 | 日志 | 修复后 113 行里 `ESTALE` 与 `data-plane convergence blocked` 各 0 条（最后一条 `04:08:23Z` 属修复前的复现） |
 
-门禁：`cargo fmt --check`、`fluxd` + `flux-core` 181 项测试、aarch64 与宿主 `clippy -D warnings`、`template-check`、`doc-check` 全过。设备上换的是 `bin/fluxd` 单个二进制（sha256 `7e8eed3c2999…d14c0d77`），不是重打的 ZIP；发版前仍需 `cargo xtask package` 走完整流程。
+门禁：`cargo fmt --check`、`fluxd` + `flux-core` 181 项测试、aarch64 与宿主 `clippy -D warnings`、`template-check`、`doc-check` 全过。
+
+**打包安装复验（`c6a3c6a`，同一台设备）。** `cargo xtask package` 产物 `Flux-rs-v0.9.0-arm64.zip`（sha256 `566f10c89de5…c58504fa`，provenance 干净、无 `-dirty`，`NEEDED`: `libdl.so`/`libc.so`）经 `ksud module install` 装入 `modules_update`、重启后落到 `modules/flux_rs`。`bin/fluxd` sha256 `1d99dec31946…25812c19` 与 ZIP 内一致。开机 Active；两轮 `svc wifi disable` 切回蜂窝：`Active` / `generation 1` / 引擎 pid 2766 全程不变，`admit_*` 与 `in_assign_*` 相等，`last_error` 空，日志里自本次开机起零条 `ESTALE` 与 `convergence blocked`（最后一条仍是修复前复现的 `04:08:23Z`）。
 
 **附带观察。** 卡死那四个小时里，日志被 652 条 `BPF fault: generation=6 … reason=1` 加同样多的 `ignored stale/repeated BPF fault` 刷到 600 KB。这不是第二个 bug：代 6 被冻结后，属于它的旧 TCP 流仍在发包，而 §7.4 规定旧代事件「只清 latch 然后忽略」，清掉的 latch 让下一个包再报一次。§7.4 承诺的是「稳态无事件风暴」，而这个状态本不该稳态存在——修复后 113 行日志里 `BPF fault` 为 0。
