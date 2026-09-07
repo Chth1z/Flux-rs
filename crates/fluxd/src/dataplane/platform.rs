@@ -1478,26 +1478,34 @@ impl Manager {
         Ok(())
     }
 
+    /// Deletes one recorded filter, if there is still one of ours to delete.
+    ///
+    /// A record the dump no longer backs is not a failure. §8.5.1: netd deletes
+    /// a physical `clsact` every time an interface joins or leaves a network,
+    /// which takes the filter underneath it along, so every Wi-Fi handover
+    /// empties a slot Flux still has written down. The slot being occupied by
+    /// something that is not ours reaches the same conclusion by the rule that
+    /// Flux deletes only exact matches: whatever is there, our filter is not.
+    /// Reporting either as an error escalates capture-side drift into a global
+    /// transaction, which §26 invariant 4 forbids.
     fn detach_identity(&mut self, owned: &OwnedFilter) -> Result<(), DataplaneError> {
-        let first = self
-            .route
-            .dump_filters(owned.identity.ifindex, owned.identity.parent)
-            .map_err(|error| DataplaneError::io("tc_dump_failed", error))?;
-        let second = self
-            .route
-            .dump_filters(owned.identity.ifindex, owned.identity.parent)
-            .map_err(|error| DataplaneError::io("tc_dump_failed", error))?;
+        let Some(first) = self.dump_recorded_parent(owned)? else {
+            return Ok(());
+        };
+        let Some(second) = self.dump_recorded_parent(owned)? else {
+            return Ok(());
+        };
         if first != second {
             return Err(DataplaneError::new(
                 "tc_filter:ESTALE",
-                "filter identity changed across the double dump",
+                format!(
+                    "{} filter identity changed across the double dump",
+                    owned.ifname
+                ),
             ));
         }
         let Some(filter) = second.iter().find(|filter| owned.identity.matches(filter)) else {
-            return Err(DataplaneError::new(
-                "tc_filter:ESTALE",
-                "recorded filter is no longer exact-owned",
-            ));
+            return Ok(());
         };
         if !bpf::attached_program_owned(
             filter.prog_id.expect("identity requires id"),
@@ -1508,13 +1516,13 @@ impl Manager {
         {
             return Err(DataplaneError::new(
                 "tc_filter:ESTALE",
-                "recorded filter program map set changed",
+                format!("{} recorded filter program map set changed", owned.ifname),
             ));
         }
         if RouteNetlink::if_nametoindex(&owned.ifname).ok() != Some(owned.identity.ifindex) {
             return Err(DataplaneError::new(
                 "tc_filter:ESTALE",
-                "interface identity changed before delete",
+                format!("{} identity changed before delete", owned.ifname),
             ));
         }
         self.route
@@ -1527,6 +1535,29 @@ impl Manager {
                 owned.identity.protocol,
             )
             .map_err(|error| DataplaneError::io("tc_detach_failed", error))
+    }
+
+    /// Dumps the parent a recorded filter hangs from. `None` means the
+    /// interface itself is gone, which took every filter on it along.
+    fn dump_recorded_parent(
+        &mut self,
+        owned: &OwnedFilter,
+    ) -> Result<Option<Vec<Filter>>, DataplaneError> {
+        match self
+            .route
+            .dump_filters(owned.identity.ifindex, owned.identity.parent)
+        {
+            Ok(filters) => Ok(Some(filters)),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENODEV) | Some(libc::ENOENT)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(DataplaneError::io("tc_dump_failed", error)),
+        }
     }
 
     fn lower_filter_names(&mut self, iface: &IfaceStatus, pref: u16) -> Vec<String> {

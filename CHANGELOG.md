@@ -96,6 +96,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
+  daemon is restarted. netd deletes an interface's `clsact` when it leaves a
+  network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter
+  with it; the manager then tried to delete a filter that was already gone,
+  reported `tc_filter:ESTALE`, stopped the engine and blocked every convergence
+  after it. Nothing cleared that state, because a filter that no longer exists
+  cannot come back. A record the dump no longer backs is now read as what it is
+  — there is nothing left to delete — so capture-side drift stays local instead
+  of escalating into a global transaction (§26 invariant 4), and `active` and
+  the generation are untouched across a handover.
 - Subscription fetch on the device. `fluxd` is dynamically linked against
   Bionic so `getaddrinfo` reaches netd; a fully static binary cannot resolve
   names on Android. Lookup failures are reported as

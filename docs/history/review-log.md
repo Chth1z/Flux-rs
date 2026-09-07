@@ -499,3 +499,34 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **2026-09-07 放宽 appId 范围后实测（第 30 条，同一台设备）。** 所有者的 18 项清单（含 `com.android.shell`，uid 2000）应用成功：`policy: apps whitelist (18 selected)`，`last error: none`，并带一条点名警告 `0:com.android.shell is uid 2000, a platform uid rather than an app: …`。端到端判别：`curl http://icanhazip.com` 以 root（uid 0，永不可选）执行返回本地出口 `123.151.200.37`，以 shell（uid 2000，已选中）执行返回节点出口 `8.216.47.244`，同时 `admit_tcp`/`in_assign_tcp` 从 149 同步涨到 150。清单里两个本机未安装的包（`com.openai.chatgpt`、`proton.android.pass`）仍按 §11.3 第 3 条整份拒绝，报错各自点名——修复前它只报「app id 2000 is out of range」，既不点名也不说原因，用户改完配置只会看到「浏览器还是不走代理」。同一条 `cn`/`cnip` 规则让 `ifconfig.me` 在两侧都返回本地出口，那是模板的设计行为而不是失效。
 
 **2026-09-06 旧版形状首测（模板换回原版 + `AUTO` + `DIRECT` 占位，已被上一段取代）。** 清掉订阅缓存、装回出厂模板后重启：开机自行抓取订阅并 Active（generation 1，38 个 outbound）。填充结果：`AUTO` 29 个节点，`HK` 7、`JP` 8、`SG` 8、`US` 6，**`TW` 保留 `DIRECT`**——这个机场没有台湾节点，填不出成员就原样保留；`PROXY`（`AUTO, HK, TW, JP, SG, US`）与 `GLOBAL` 是写好的菜单，未被改动。真流量：`tcp 35 captured / assigned 35`、`udp 41 / 41`，引擎日志新增 `outbound/hysteria2[香港01丨直连]`，即 `route.final` → `PROXY` → 首成员 `AUTO` 走到了真节点，不再是静默直连。
+
+### 0.6.7 一次 Wi-Fi 切蜂窝打死整个代理（2026-09-07，SM-S9180 / 5.15.211 / KernelSU 3.3.0 lkm）
+
+§0.6.6 末尾那条「附带观察（未升格为合同更正）」不是残留，是 bug。所有者报「手机使用流量时 flux 报错」，现场就是它：`state: Inactive`、`engine: not running`、`last error: tc_filter:ESTALE`、`warning: recorded filter is no longer exact-owned`、`ifaces` 为空数组，自当日 07:34 起持续四小时；`fluxd reload` 每次复现同一条；`rmnet_data0` 的 egress 上一条 filter 都没有，clsact 还在。
+
+**根因。** `admit_interfaces` 在接纳接口之前，先删掉自己记录在「已不在候选集里」的接口上的 egress filter，走 `detach_identity`。后者把「两次 dump 里都找不到自己记录的那条 filter」判为 `tc_filter:ESTALE` 并抛出，`?` 让它穿过 `converge_inner` 成为 `status.error`，reactor 于是打出 `data-plane convergence blocked`、停引擎、进 Inactive。但接口离网时 netd 会删掉它的 clsact（§8.5.1），filter 随之消失——所以这条错误**不会自行清除**：记录指向的对象已经不存在，此后每次收敛都在同一处失败，`ifaces` 因此连一条都产不出来。这正是 §26 不变量 4 禁止的「把 capture-side drift 升格为全局事务」，代价也正是那条不变量预告的那一个：一次 Wi-Fi 切换掐断全设备的代理流量。
+
+**复现（修复前二进制，蜂窝 → Wi-Fi → 蜂窝）。**
+
+| 步骤 | 实测 |
+|---|---|
+| 蜂窝下 Active，`svc wifi enable` | 四接口，`wlan0 active (flx_cap_l2, pref 2, reachable)` |
+| `svc wifi disable`（切回流量） | 15 秒内 `Inactive` / `engine: not running` / `last error: tc_filter:ESTALE`，`ifaces` 空 |
+| `fluxd reload` | 日志再打一条 `data-plane convergence blocked: tc_filter:ESTALE`，状态不变 |
+| `kill -9 <reactor pid>` | 新 reactor 立即 Active、三个 rmnet `reachable`——**唯一坏掉的是进程内那条记录** |
+
+**处置（代码改，合同不改；§8.5.1 与 §26 早已写明该怎么做）。** `detach_identity` 不再把「记录对不上」当失败：dump 里没有自己那条 filter，就是没有可删的东西——被 netd 带走，或槽位已被别人占据，两种情况下要删的对象都不在，而 Flux 只删逐项精确匹配的自有对象；接口本身已经消失（dump 报 `ENODEV`/`ENOENT`）同理。仍然报错的只剩三种，它们都意味着那条 filter **还在**：两次 dump 之间身份变了、程序 map 集变了、删除本身失败。另外给这三条 ESTALE 文案补上接口名——修复前那句 `recorded filter is no longer exact-owned` 不带任何接口信息，是这次定位里最慢的一段。
+
+**验证（修复后二进制，同一台设备，替换 `bin/fluxd` 后重启走真实开机路径）。**
+
+| 断言 | 实测 |
+|---|---|
+| 开机在蜂窝上 Active | `generation 1`、引擎 pid 2773、`rmnet_data0/1/9` 皆 `reachable` |
+| 开 Wi-Fi | `wlan0 active`，`rmnet_data0` 因默认路由归 Wi-Fi 退出候选集，`last error: none` |
+| 关 Wi-Fi（即复现步骤） | **`Active` 不变、`generation 1` 不变、引擎 pid 2773 不变**，`last error: none`，三个 rmnet 重新 `active` |
+| 连续三轮开关 | 同上；`admit_tcp` 81→88、`admit_udp` 111→113 持续增长，`drop_inactive` / `drop_stale_gen` / `egress_listener_miss` 全为 0 |
+| 日志 | 修复后 113 行里 `ESTALE` 与 `data-plane convergence blocked` 各 0 条（最后一条 `04:08:23Z` 属修复前的复现） |
+
+门禁：`cargo fmt --check`、`fluxd` + `flux-core` 181 项测试、aarch64 与宿主 `clippy -D warnings`、`template-check`、`doc-check` 全过。设备上换的是 `bin/fluxd` 单个二进制（sha256 `7e8eed3c2999…d14c0d77`），不是重打的 ZIP；发版前仍需 `cargo xtask package` 走完整流程。
+
+**附带观察。** 卡死那四个小时里，日志被 652 条 `BPF fault: generation=6 … reason=1` 加同样多的 `ignored stale/repeated BPF fault` 刷到 600 KB。这不是第二个 bug：代 6 被冻结后，属于它的旧 TCP 流仍在发包，而 §7.4 规定旧代事件「只清 latch 然后忽略」，清掉的 latch 让下一个包再报一次。§7.4 承诺的是「稳态无事件风暴」，而这个状态本不该稳态存在——修复后 113 行日志里 `BPF fault` 为 0。
