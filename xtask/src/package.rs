@@ -626,11 +626,7 @@ pub fn build_bpf() -> Result<(), String> {
         ])
         .arg(format!("-ffile-prefix-map={prefix_map}"))
         .arg(format!("-fdebug-prefix-map={prefix_map}"))
-        .arg(format!("-I{}", root.join("bpf/include").display()))
-        .arg(format!(
-            "-I{}",
-            root.join("bpf/vendor/libbpf/include").display()
-        ));
+        .arg(format!("-I{}", root.join("bpf/include").display()));
     if let Some(system_include) = multiarch_include() {
         command.arg(format!("-I{}", system_include.display()));
     }

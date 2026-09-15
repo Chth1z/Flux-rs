@@ -619,3 +619,19 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **代码代理复验。** Astra low 在 WSL 的已安装 Rust stable 1.97.0、NDK 27.3.13750724、host clang 21.1.8 上完成：flux-core 109 / fluxd bin 81 / xtask 37 项，完整 daemon_e2e 与 engine_lifecycle，Linux workspace Clippy 和 Android all-targets Clippy。实际官方 1.14.1 host 模板检查通过，Android archive 验证和单次含真实 BPF 的 release 编译/15 项打包通过。ShellCheck 覆盖模块及 CI 脚本；NDK 选择用已安装 preview 与稳定可用包的模拟列表验证，没有安装工具链。
 
 宿主生命周期夹具整体通过，但非 root WSL 中的 root chown 操作未成功；这项结果不证明 Android 安装后的 root 所有权。最终干净提交的双构建、对应源码及主代理独立检查另行补记。
+
+### 0.6.12 构建头文件的版本来源（2026-09-15）
+
+复核完整编译输入时，发现上一批仍遗漏了 `bpf/vendor/libbpf/VERSION` 所记录的固定 1.6.3 头文件。它虽不参与运行时链接，仍是被仓库固定的第三方构建依赖。
+
+| 原说法 / 实现 | 实际问题 | 处置 |
+|---|---|---|
+| Rust、引擎和工具链解除固定即可覆盖全部依赖 | BPF 编译命令显式优先读取 vendored 的三个 libbpf 头文件 | 删除该固定副本及 VERSION；使用 host clang 的标准 include 搜索路径，构建环境提供 libbpf 开发头文件。CI 已安装 libbpf-dev，无新增下载器或路径开关 |
+| Cargo 只跟踪仓库内 include 目录 | 改用系统头文件后，升级它们不一定触发 BPF 重编译 | 使用 clang 的 -MD 依赖输出，包括系统头文件，向 Cargo 注册实际路径；编译器负责决定来源，Flux 不复制 include 搜索算法 |
+| BSD 许可全文只放在 vendored 目录 | 删除目录后还需要让编译进模块的头文件许可随二进制交付 | 将原通知全文移入现有 THIRD_PARTY_NOTICES.md，仍使用原有 15 项包结构 |
+
+**验证范围。** 本机系统 libbpf-dev 为 `1:1.6.3-1ubuntu1`，这是当次环境记录，不是项目要求。Astra low 已完成真实 BPF 编译、ABI/BTF 核对、14 项 BPF 测试，以及嵌入真实 BPF 的 Linux workspace / Android all-targets Clippy；daemon_e2e 与 engine_lifecycle 同样通过。实际 Cargo 构建输出包含三个系统 libbpf 头文件的依赖路径。
+
+依赖路径转译用实际 clang -MD 输出验证：在含空格、`#`、`$` 的目录和头文件上运行当前解析代码，确认路径正确还原且均真实存在。`$$` 按 Make 语法还原为 `$`；没有另增下载或版本兼容分支。
+
+上一提交 `7e79c379a0e70424dfcd867bcbeb27d6decc152a` 的主代理本地 `release v0.9.0` 已完成两次独立构建与对应源码获取，ZIP 摘要为 `36d34bc9d74acefb2cc15f81214baa0b2005ff67e24f08d3ae06f7725e7bda92`。此处仅记录先前验证范围；头文件来源调整后的候选将重新打包。

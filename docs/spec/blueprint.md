@@ -2896,11 +2896,11 @@ The VPN provider warning is best-effort: `check` MAY run one `cmd package` query
 ```text
 clang -target bpf -O2 -g -Wall -Wextra -Werror \
       -mcpu=v3 -D__TARGET_ARCH_arm64 \
-      -Ibpf/include -Ibpf/vendor/libbpf/include \
+      -Ibpf/include \
       -c bpf/flux.bpf.c -o $OUT_DIR/flux.bpf.o
 ```
 
-**What "no libbpf" precisely means.** The libbpf *library* is not linked, so libelf and zlib are not needed and `fluxd` is a single binary of Rust plus libc. The BPF **side** still vendors three **header-only** libbpf files — `bpf_helpers.h`, `bpf_helper_defs.h`, `bpf_endian.h`, BSD-2 — for the `SEC`, `__uint` and `__type` macros and the helper prototypes. They are used only while compiling the BPF object and are not a runtime dependency. Hand-writing those macros is possible, roughly 60 lines, and buys nothing.
+**What "no libbpf" precisely means.** The libbpf *library* is not linked, so libelf and zlib are not needed and `fluxd` is a single binary of Rust plus libc. The BPF **side** uses three **header-only** libbpf files — `bpf_helpers.h`, `bpf_helper_defs.h`, `bpf_endian.h`, BSD-2 — for the `SEC`, `__uint` and `__type` macros and the helper prototypes. The build environment supplies them through the host compiler's include search path; Flux does not vendor a fixed revision. They are compilation inputs, not a runtime dependency. Hand-writing those macros would duplicate upstream definitions without improving the ownership boundary.
 
 - `-g` is required: it produces the `.BTF` section, which is used **only** to cross-check the hand-written BTF blob (§12.3), never loaded.
 - No `vmlinux.h`, no access to private kernel structs, no CO-RE relocation. Only the `linux/bpf.h` UAPI and fixed helper prototypes.

@@ -5,10 +5,10 @@
 // Build:
 //   clang -target bpf -O2 -g -Wall -Wextra -Werror -mcpu=v3 \
 //         -D__TARGET_ARCH_arm64 \
-//         -Ibpf/include -Ibpf/vendor/libbpf/include \
+//         -Ibpf/include \
 //         -c bpf/flux.bpf.c -o $OUT_DIR/flux.bpf.o
 //
-// Dependencies: only the vendored HEADER-ONLY libbpf macros/helper prototypes
+// Dependencies: only the system HEADER-ONLY libbpf macros/helper prototypes
 // (bpf_helpers.h, bpf_helper_defs.h, bpf_endian.h) plus Linux UAPI. No libbpf
 // library, no libelf, no zlib, no vmlinux.h, no CO-RE relocations. The map
 // declarations below are documentation: crates/fluxd/src/bpf/maps.rs owns the

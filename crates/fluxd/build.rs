@@ -23,11 +23,10 @@ fn main() {
         .expect("crates/fluxd is two levels below the repo root");
     let source = repo_root.join("bpf").join("flux.bpf.c");
     let include = repo_root.join("bpf").join("include");
-    let libbpf_include = repo_root.join("bpf/vendor/libbpf/include");
 
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", include.display());
-    println!("cargo:rerun-if-changed={}", libbpf_include.display());
+    println!("cargo:rerun-if-env-changed=CLANG");
     println!("cargo:rerun-if-env-changed=FLUX_BUILD_BPF");
     println!("cargo:rerun-if-env-changed=FLUX_COMMIT");
     println!("cargo:rustc-env=FLUX_BPF_OBJECT={}", object.display());
@@ -61,12 +60,13 @@ fn main() {
         ])
         .arg(format!("-ffile-prefix-map={prefix_map}"))
         .arg(format!("-fdebug-prefix-map={prefix_map}"))
-        .arg(format!("-I{}", include.display()))
-        .arg(format!("-I{}", libbpf_include.display()));
+        .arg(format!("-I{}", include.display()));
     if let Some(system_include) = multiarch_include() {
         command.arg(format!("-I{}", system_include.display()));
     }
     let status = command
+        .args(["-MD", "-MT", "flux_bpf", "-MF"])
+        .arg(out_dir.join("flux.bpf.d"))
         .arg("-c")
         .arg(&source)
         .arg("-o")
@@ -75,6 +75,32 @@ fn main() {
         .unwrap_or_else(|e| panic!("failed to run {clang}: {e}"));
 
     assert!(status.success(), "{clang} failed to compile {source:?}");
+    // Clang includes system headers in -MD output. Track the actual inputs,
+    // including paths escaped by Make syntax, without duplicating its search.
+    let dependencies = fs::read_to_string(out_dir.join("flux.bpf.d"))
+        .expect("read clang dependency file")
+        .replace("\\\n", "");
+    let mut path = String::new();
+    let mut escaped = false;
+    for ch in dependencies
+        .trim_start_matches("flux_bpf:")
+        .chars()
+        .chain([' '])
+    {
+        if escaped {
+            path.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch.is_whitespace() {
+            if !path.is_empty() {
+                println!("cargo:rerun-if-changed={}", path.replace("$$", "$"));
+                path.clear();
+            }
+        } else {
+            path.push(ch);
+        }
+    }
 }
 
 fn multiarch_include() -> Option<PathBuf> {
