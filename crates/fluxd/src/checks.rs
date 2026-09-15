@@ -10,7 +10,6 @@
 //! and is removed before returning.
 
 use std::io;
-use std::path::Path;
 
 use flux_core::cidr::{Ipv4Cidr, Ipv6Cidr};
 use flux_core::config::{ConfigError, FluxConfig, MAX_CONFIG_BYTES};
@@ -18,7 +17,8 @@ use flux_core::engine_config::{self, EngineParams, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::{PackageIndex, SelectorError};
 
 use crate::engine::{self, EngineSpec};
-use crate::layout::Layout;
+use crate::layout::{read_capped, Layout};
+use crate::subscription::{subscription_error_status, subscription_snapshot};
 
 /// The findings of one check pass. `errors` non-empty means the check failed
 /// (CLI exit code non-zero, `ok=false` on the wire); `warnings` never fail it.
@@ -360,85 +360,6 @@ fn check_template_json(
     Some(generated)
 }
 
-/// Selects current pending input before consulting the accepted URL-bound cache.
-/// A replacement response must remain usable even when old disk state is unreadable.
-pub fn subscription_snapshot<'a>(
-    layout: &Layout,
-    flux: &FluxConfig,
-    pending: Option<&'a [u8]>,
-    use_cache: bool,
-) -> Result<Option<std::borrow::Cow<'a, [u8]>>, (String, String)> {
-    if flux.subscription.url.is_empty() {
-        return Ok(None);
-    }
-    if let Some(raw) = pending {
-        return Ok(Some(std::borrow::Cow::Borrowed(raw)));
-    }
-    if !use_cache {
-        return Ok(None);
-    }
-    let binding_path = layout.subscription_url_binding();
-    let binding = match read_capped(
-        &binding_path,
-        flux_core::config::MAX_CONFIG_BYTES.saturating_add(1),
-    ) {
-        Ok(binding) => binding,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err((
-                "subscription_fetch_failed:cache_read".to_string(),
-                format!("{}: {error}", binding_path.display()),
-            ));
-        }
-    };
-    if binding.len() > flux_core::config::MAX_CONFIG_BYTES {
-        return Err((
-            "subscription_fetch_failed:too_large".to_string(),
-            format!("{} exceeds the Flux config limit", binding_path.display()),
-        ));
-    }
-    if binding != flux.subscription.url.as_bytes() {
-        return Ok(None);
-    }
-    let path = layout.subscription_raw();
-    let raw = match read_capped(&path, crate::subscription::MAX_SUBSCRIPTION_BYTES + 1) {
-        Ok(raw) => raw,
-        // A first-use check is read-only and may precede the initial fetch.
-        // The daemon will fetch before it creates an enabled generation.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err((
-                "subscription_fetch_failed:cache_read".to_string(),
-                format!("{}: {error}", path.display()),
-            ));
-        }
-    };
-    if raw.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
-        return Err((
-            "subscription_fetch_failed:too_large".to_string(),
-            format!(
-                "{} exceeds the {}-byte limit",
-                path.display(),
-                crate::subscription::MAX_SUBSCRIPTION_BYTES
-            ),
-        ));
-    }
-    Ok(Some(std::borrow::Cow::Owned(raw)))
-}
-
-pub fn subscription_error_status(
-    error: &flux_core::subscription::SubscriptionError,
-) -> (String, String) {
-    use flux_core::subscription::SubscriptionError;
-    let token = match error {
-        SubscriptionError::ZeroNodes => "subscription_empty",
-        SubscriptionError::InvalidExcludePattern(_)
-        | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
-        _ => "subscription_fetch_failed:invalid_content",
-    };
-    (token.to_string(), error.to_string())
-}
-
 /// Warnings required on both `check` and the normal status surface. These are
 /// consequences the user may intentionally accept, so they never invalidate a
 /// candidate (§9.6).
@@ -710,16 +631,6 @@ fn write_check_config(effective: &serde_json::Value) -> io::Result<std::path::Pa
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique check config",
     ))
-}
-
-/// Reads at most `cap` bytes; the caller's parser enforces its own limit, this
-/// only prevents an accidentally huge file from being slurped whole.
-pub(crate) fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::File::open(path)?;
-    let mut buf = Vec::new();
-    file.take(cap as u64).read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 /// Human-readable rendering of [`ConfigError`]. Lives here, not in flux-core:

@@ -18,6 +18,16 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// Reads at most `cap` bytes; the caller's parser enforces its own limit, this
+/// only prevents an accidentally huge file from being slurped whole.
+pub(crate) fn read_capped(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    file.take(cap as u64).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 /// Root of all runtime state (blueprint §1.1).
 pub const RUNTIME_ROOT: &str = "/data/adb/flux-rs";
 

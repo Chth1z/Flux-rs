@@ -588,3 +588,15 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **验证。** Windows 最终 `cargo fmt --all -- --check`、flux-core 109 / xtask 34 / fluxd bin 8 项测试、doc-check、diff-check 通过。子代理在 WSL 完成 workspace clippy、workspace 单元和 daemon_e2e / engine_lifecycle 集成测试、Android all-targets clippy；复核补丁后重跑 core 和 checks 聚焦回归及两种 clippy。坏缓存用真实目录读取错误复现，新响应仍能生成候选；超限错误保留具体分类。未进行设备或校园网测试。
 
 **哲学复核。** 节点来源增加，生成/验证/换代路径仍是一条；已有列表文件机制和配置目录事件直接复用；外部数据在解析边界保真或拒绝，没有增加守护进程、联网探针或备用激活模式。模板保持用户权威，手工名字不受机场规则改写。
+
+### 0.6.10 刷新计划独立于网络恢复（2026-09-15）
+
+| 原说法 / 实现 | 实際问题 | 处置 |
+|---|---|---|
+| 抓取失败就取消订阅 timer，只等默认路由恢复 | 校园认证放行并不保证默认路由再次出现；用户已配置的刷新计划也随一次失败消失 | 删除失败标志对计划的阻断。失败后继续按已配置 interval 刷新，默认路由恢复是额外触发，不增加第二个 timer 或联网探针 |
+| 重设 timer 时回读 `current_policy` | 新 interval 已进入派生 schedule，旧 policy 尚未提交；1 秒改为 0 后仍有一次旧计划抓取 | timer 只读当前派生的 `subscription_schedule`，移除旧策略回读与重复配置解析 |
+| 订阅快照选择和错误分类放在 checks，文件读取也由诊断模块提供 | 运行时从诊断模块获得输入，职责方向颠倒 | 快照/错误归入 `subscription`，有界文件读取归入现有 `layout`；调用方共用原逻辑，无新模块或抽象层 |
+
+**回归证据。** `daemon_e2e` 使用本机 loopback 的不可用端口，不访问外网：失败后观察至少两次计划抓取，原引擎仍运行；把 interval 改成 0 后不再出现计划抓取，手动 subscribe 仍立即触发。该场景先复现旧 interval 问题，修复后整套 daemon 场景通过。WSL fluxd bin 81 项、Linux/Android all-target clippy 通过；主代理 Windows fmt、core 109 / xtask 34 / fluxd bin 8、doc-check、diff-check 通过。
+
+这是独立可复现的调度缺陷修正，**不是校园网已修复的证明**。没有现场网络和设备执行证据；校园网分层判断仍以所有者提供的开关现象和源码分析为限。

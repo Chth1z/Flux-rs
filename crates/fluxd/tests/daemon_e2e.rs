@@ -150,6 +150,7 @@ mod tests {
                 scenario_reactor_crash_recovery(&env, &mut daemon);
                 scenario_policy_domain_hot_reload(&env);
                 scenario_queued_reload_waits_for_convergence(&env);
+                scenario_subscription_refresh_after_failure(&env);
             }
             scenario_bugreport(&env);
             scenario_stop(&env, &mut daemon, &root);
@@ -582,6 +583,64 @@ mod tests {
             "PASS overlapping reloads converged through generation {}",
             after.generation
         );
+    }
+
+    fn scenario_subscription_refresh_after_failure(env: &Env) {
+        let config_path = env.root.join("config/flux.toml");
+        let previous = std::fs::read(&config_path).ok();
+        let log_path = env.root.join("fluxd.log");
+        let scheduled = || {
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .matches("subscription fetch started (scheduled refresh)")
+                .count()
+        };
+        let baseline = scheduled();
+        // Loopback port zero cannot be a subscription service. No external
+        // network or route changes are needed to exercise failed refreshes.
+        std::fs::write(
+            &config_path,
+            "[subscription]\nurl = 'http://127.0.0.1:0'\ninterval = 1\ntimeout = 1\nretries = 0\n",
+        )
+        .unwrap();
+        let _ = env.run(&["reload"]);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while scheduled() < baseline + 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            scheduled() >= baseline + 2,
+            "failed requests must not stop the configured refresh schedule"
+        );
+        assert!(
+            env.status().engine.running,
+            "failed refresh preserves the existing generation"
+        );
+
+        std::fs::write(
+            &config_path,
+            "[subscription]\nurl = 'http://127.0.0.1:0'\ninterval = 0\ntimeout = 1\nretries = 0\n",
+        )
+        .unwrap();
+        let _ = env.run(&["reload"]);
+        let manual_only = scheduled();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(
+            scheduled(),
+            manual_only,
+            "interval zero disables scheduled refresh"
+        );
+        let _ = env.run(&["subscribe"]);
+        assert!(std::fs::read_to_string(&log_path)
+            .unwrap()
+            .contains("subscription fetch started (manual refresh)"));
+
+        match previous {
+            Some(bytes) => std::fs::write(&config_path, bytes).unwrap(),
+            None => std::fs::remove_file(&config_path).unwrap(),
+        }
+        let _ = env.run(&["reload"]);
+        println!("PASS failed subscriptions keep configured refresh, interval zero stays manual");
     }
 
     fn scenario_bugreport(env: &Env) {

@@ -2814,7 +2814,8 @@ impl Reactor {
 
     fn flux_config_from_authority(&self) -> Result<FluxConfig, (String, Option<String>)> {
         let path = self.layout.flux_toml();
-        let flux = match checks::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES + 1) {
+        let flux = match crate::layout::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES + 1)
+        {
             Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
                 (
                     "flux_config_invalid".to_string(),
@@ -2966,21 +2967,21 @@ impl Reactor {
                     return;
                 }
                 self.subscription_retry_on_route = true;
-                disarm_timer(&self.subscription_timer);
+                self.rearm_subscription_timer();
                 self.logger
-                    .log("subscription fetch failed; waiting for default-route recovery");
+                    .log("subscription fetch failed; keeping configured refresh policy and route-recovery trigger");
                 self.complete_convergence_controls();
                 return;
             }
         };
 
-        // A completed HTTP exchange ends the route-recovery wait even when
-        // its content is rejected. Resume the user-configured refresh cadence.
+        // A completed HTTP exchange ends the extra route-recovery trigger even
+        // when its content is rejected. The configured cadence is independent.
         self.subscription_retry_on_route = false;
         self.rearm_subscription_timer();
 
         if let Err(error) = flux_core::subscription::assemble_nodes(&flux, Some(&raw)) {
-            let (token, detail) = checks::subscription_error_status(&error);
+            let (token, detail) = crate::subscription::subscription_error_status(&error);
             self.pending_subscription = None;
             self.set_subscription_error(token, Some(detail));
             self.logger.log("subscription content was rejected");
@@ -3127,13 +3128,14 @@ impl Reactor {
 
     fn subscription_cache_matches(&self, url: &str) -> io::Result<bool> {
         let path = self.layout.subscription_url_binding();
-        let bytes =
-            match checks::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES.saturating_add(1))
-            {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(error),
-            };
+        let bytes = match crate::layout::read_capped(
+            &path,
+            flux_core::config::MAX_CONFIG_BYTES.saturating_add(1),
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
         if bytes.len() > flux_core::config::MAX_CONFIG_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -3167,35 +3169,21 @@ impl Reactor {
     }
 
     fn rearm_subscription_timer(&self) {
-        let config = self
-            .current_policy
-            .as_ref()
-            .map(|policy| policy.flux.subscription.clone())
-            .or_else(|| self.subscription_config_from_authority().ok());
-        let Some(config) = config else {
+        // This is the schedule derived from the latest valid configuration.
+        // Re-reading current_policy here can see its predecessor while the
+        // configuration transaction is still applying an interval change.
+        let Some((url, interval)) = self.subscription_schedule.as_ref() else {
             disarm_timer(&self.subscription_timer);
             return;
         };
-        if self.shutdown_requested
-            || self.layout.disabled()
-            || self.subscription_retry_on_route
-            || config.url.is_empty()
-            || config.interval == 0
-        {
+        if self.shutdown_requested || self.layout.disabled() || url.is_empty() || *interval == 0 {
             disarm_timer(&self.subscription_timer);
         } else {
-            arm_timer(
-                &self.subscription_timer,
-                Duration::from_secs(config.interval),
-            );
+            arm_timer(&self.subscription_timer, Duration::from_secs(*interval));
         }
     }
 
     fn start_scheduled_subscription_fetch(&mut self, reason: &str) {
-        if self.subscription_retry_on_route {
-            disarm_timer(&self.subscription_timer);
-            return;
-        }
         let config = self
             .current_policy
             .as_ref()
@@ -3453,7 +3441,7 @@ impl Reactor {
         use_cache: bool,
     ) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.template_json();
-        let bytes = match checks::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
+        let bytes = match crate::layout::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err((
@@ -3495,11 +3483,12 @@ impl Reactor {
                 !flux.subscription.url.is_empty() && pending.url == flux.subscription.url
             })
             .map(|pending| pending.raw.as_slice());
-        let raw = checks::subscription_snapshot(&self.layout, flux, pending, use_cache)
-            .map_err(|(token, detail)| (token, Some(detail)))?;
+        let raw =
+            crate::subscription::subscription_snapshot(&self.layout, flux, pending, use_cache)
+                .map_err(|(token, detail)| (token, Some(detail)))?;
         let nodes =
             flux_core::subscription::assemble_nodes(flux, raw.as_deref()).map_err(|error| {
-                let (token, detail) = checks::subscription_error_status(&error);
+                let (token, detail) = crate::subscription::subscription_error_status(&error);
                 (token, Some(detail))
             })?;
 
@@ -3520,7 +3509,7 @@ impl Reactor {
     }
 
     fn read_policy_config(&self) -> Result<PolicyCandidate, (String, Option<String>)> {
-        let flux = match checks::read_capped(
+        let flux = match crate::layout::read_capped(
             &self.layout.flux_toml(),
             flux_core::config::MAX_CONFIG_BYTES + 1,
         ) {
