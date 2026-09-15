@@ -1813,20 +1813,6 @@ impl Reactor {
             });
         let mut candidate_user = if want_engine {
             match engine_flux.as_ref() {
-                Some(flux)
-                    if subscription_url_changed
-                        && !flux.subscription.url.is_empty()
-                        && self.current_engine_user.is_some()
-                        && self
-                            .pending_subscription
-                            .as_ref()
-                            .is_none_or(|pending| pending.url != flux.subscription.url) =>
-                {
-                    // A new URL has no matching cache yet. Keep the current
-                    // generated artifact until its fetch completes instead of
-                    // rotating to a template-only intermediate generation.
-                    self.current_engine_user.clone()
-                }
                 Some(flux) => {
                     self.ensure_subscription_schedule(&flux.subscription);
                     match self.read_engine_config(flux, !subscription_url_changed) {
@@ -2822,6 +2808,11 @@ impl Reactor {
     fn subscription_config_from_authority(
         &self,
     ) -> Result<SubscriptionConfig, (String, Option<String>)> {
+        self.flux_config_from_authority()
+            .map(|flux| flux.subscription)
+    }
+
+    fn flux_config_from_authority(&self) -> Result<FluxConfig, (String, Option<String>)> {
         let path = self.layout.flux_toml();
         let flux = match checks::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES + 1) {
             Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
@@ -2838,7 +2829,7 @@ impl Reactor {
                 ));
             }
         };
-        Ok(flux.subscription)
+        Ok(flux)
     }
 
     fn start_subscription_fetch(&mut self, reason: &str) -> Result<(), (String, Option<String>)> {
@@ -2922,7 +2913,7 @@ impl Reactor {
         let Some(completed) = self.subscription_worker.take_result() else {
             return;
         };
-        let config = match self.subscription_config_from_authority() {
+        let flux = match self.flux_config_from_authority() {
             Ok(config) => config,
             Err((token, detail)) => {
                 self.set_subscription_error(token, detail);
@@ -2930,6 +2921,7 @@ impl Reactor {
                 return;
             }
         };
+        let config = &flux.subscription;
 
         if completed.url != config.url || config.url.is_empty() || self.layout.disabled() {
             self.logger
@@ -2937,7 +2929,7 @@ impl Reactor {
             let unavailable = config.url.is_empty() || self.layout.disabled();
             if !unavailable {
                 if let Err((token, detail)) =
-                    self.start_subscription_fetch_with(&config, "configured URL changed")
+                    self.start_subscription_fetch_with(config, "configured URL changed")
                 {
                     self.set_subscription_error(token, detail);
                 }
@@ -2987,8 +2979,8 @@ impl Reactor {
         self.subscription_retry_on_route = false;
         self.rearm_subscription_timer();
 
-        if let Err(error) = flux_core::subscription::parse_and_refine(&raw, &config) {
-            let (token, detail) = subscription_error_status(&error);
+        if let Err(error) = flux_core::subscription::assemble_nodes(&flux, Some(&raw)) {
+            let (token, detail) = checks::subscription_error_status(&error);
             self.pending_subscription = None;
             self.set_subscription_error(token, Some(detail));
             self.logger.log("subscription content was rejected");
@@ -3496,73 +3488,26 @@ impl Reactor {
         let template = engine_config::parse_jsonc(&text)
             .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
 
-        let nodes = if flux.subscription.url.is_empty() {
-            Vec::new()
-        } else {
-            let pending = self.pending_subscription.as_ref().and_then(|pending| {
-                (pending.url == flux.subscription.url).then_some(pending.raw.as_slice())
-            });
-            let cache_matches = if use_cache {
-                self.subscription_cache_matches(&flux.subscription.url)
-                    .map_err(|error| {
-                        (
-                            "subscription_fetch_failed:cache_read".to_string(),
-                            Some(format!(
-                                "cannot read {}: {error}",
-                                self.layout.subscription_url_binding().display()
-                            )),
-                        )
-                    })?
-            } else {
-                false
-            };
-            let cached;
-            let raw = if let Some(raw) = pending {
-                raw
-            } else if cache_matches {
-                let raw_path = self.layout.subscription_raw();
-                cached = match checks::read_capped(
-                    &raw_path,
-                    crate::subscription::MAX_SUBSCRIPTION_BYTES + 1,
-                ) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        return Err((
-                            "subscription_cache_missing".to_string(),
-                            Some(format!("{} does not exist", raw_path.display())),
-                        ));
-                    }
-                    Err(error) => {
-                        return Err((
-                            "subscription_fetch_failed:cache_read".to_string(),
-                            Some(format!("cannot read {}: {error}", raw_path.display())),
-                        ));
-                    }
-                };
-                if cached.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
-                    return Err((
-                        "subscription_fetch_failed:too_large".to_string(),
-                        Some(format!(
-                            "{} exceeds the {}-byte limit",
-                            raw_path.display(),
-                            crate::subscription::MAX_SUBSCRIPTION_BYTES
-                        )),
-                    ));
-                }
-                cached.as_slice()
-            } else {
-                return Err((
-                    "subscription_cache_missing".to_string(),
-                    Some("no raw response matches the configured subscription URL".to_string()),
-                ));
-            };
-            flux_core::subscription::parse_and_refine(raw, &flux.subscription).map_err(|error| {
-                let (token, detail) = subscription_error_status(&error);
+        let pending = self
+            .pending_subscription
+            .as_ref()
+            .filter(|pending| {
+                !flux.subscription.url.is_empty() && pending.url == flux.subscription.url
+            })
+            .map(|pending| pending.raw.as_slice());
+        let raw = checks::subscription_snapshot(&self.layout, flux, pending, use_cache)
+            .map_err(|(token, detail)| (token, Some(detail)))?;
+        let nodes =
+            flux_core::subscription::assemble_nodes(flux, raw.as_deref()).map_err(|error| {
+                let (token, detail) = checks::subscription_error_status(&error);
                 (token, Some(detail))
-            })?
-        };
+            })?;
 
         engine_config::generate_from_template(&template, &nodes).map_err(|error| {
+            if matches!(error, engine_config::EngineConfigError::UnfilledGroups(_))
+                && raw.is_none() && !flux.subscription.url.is_empty() {
+                return ("subscription_cache_missing".to_string(), Some("no available input fills the template groups; waiting for the configured subscription".to_string()));
+            }
             let token = match error {
                 engine_config::EngineConfigError::UnfilledGroups(_) => "engine_config_unfilled",
                 _ => "engine_config_invalid",
@@ -3955,19 +3900,6 @@ fn is_retryable(e: &EngineError) -> bool {
         | EngineError::ConfigInvalid(_)
         | EngineError::CheckFailed { .. } => false,
     }
-}
-
-fn subscription_error_status(
-    error: &flux_core::subscription::SubscriptionError,
-) -> (String, String) {
-    use flux_core::subscription::SubscriptionError;
-    let token = match error {
-        SubscriptionError::ZeroNodes => "subscription_empty",
-        SubscriptionError::InvalidExcludePattern(_)
-        | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
-        _ => "subscription_fetch_failed:invalid_content",
-    };
-    (token.to_string(), error.to_string())
 }
 
 /// Engine rotation is decided by the serialized generated artifact, including

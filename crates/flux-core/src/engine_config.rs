@@ -56,7 +56,7 @@ pub struct EngineParams {
 ///
 /// Batch B feeds an empty slice. Keeping the already-refined outbound and its
 /// group names together makes generation a pure fill-and-append operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinedNode {
     /// Official sing-box outbound object, including its unique tag.
     pub outbound: Value,

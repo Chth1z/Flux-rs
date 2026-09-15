@@ -4,13 +4,13 @@
 # 位置：/data/adb/flux-rs/config/flux.toml
 # 生效：运行中的 Flux 会在保存后自动验证并应用；`fluxd check` 用于诊断。
 #
-# 严格模式：只接受下面五个顶层表。未知键、重复项、非 canonical CIDR
+# 严格模式：只接受已定义的配置项。未知键、重复项、非 canonical CIDR
 # 与超限内容都会使整份候选配置被拒绝；Flux 不会截断或部分应用。
 #
 # 开关不在本文件里。唯一开关就是你 root 管理器里的模块开关，
 # 拨动后当场生效，不需要重启。等价命令：fluxd enable / fluxd disable
 # 首次安装后为停用状态，填好配置后启用并重启一次。
-# Flux 会抓取订阅、生成完整配置并验证后激活；check 用于诊断。
+# Flux 用可用节点生成完整配置并验证后激活；check 用于诊断。
 # 当前状态直接显示在管理器的模块描述里。
 # ==============================================================================
 
@@ -37,15 +37,19 @@ list = []
 mode = "blacklist"
 list = []
 
+[nodes]
+# 手工节点：可直接写分享链接，也可用 ["@nodes.txt"]，文件每行一条链接。
+# 节点名来自链接的 #片段；只有整行以 # 开头才是注释。
+# 手工节点保留你写的名字，不经过机场公告过滤或名称清洗。
+list = []
+
 [subscription]
-# 空 URL 完全禁用订阅：不抓取、不启用定时器、不创建 subscription.raw。
+# 可选。只用手工节点时保持空 URL；手工节点和订阅也可以同时使用。
+# 空 URL 不抓取、不启用订阅定时器、不创建 subscription.raw。
 url = ""
-interval = 86400
-timeout = 10
-retries = 2
-exclude_pattern = "(expire|traffic|官网|到期|流量|剩余|套餐|重置|联系|群组|通知|平台|网站|时间|建议|反馈|版本|更新)"
-rename = [
-  { match = "【(亚洲|北美洲|欧洲|南美洲|非洲|大洋洲|南极洲)】", replace = "" },
-]
-strip_emoji = true
-max_tag_length = 32
+interval = 86400          # 秒；0 关闭定时刷新，仍可手动或由网络恢复触发
+
+# 按需添加 timeout / retries 调整抓取参数。
+# 远端节点名称整理属于 [subscription.refine]：
+# exclude_pattern、rename、strip_emoji、max_tag_length。
+# 省略时使用内置默认值；这些设置只影响远端订阅，不改变手工节点。

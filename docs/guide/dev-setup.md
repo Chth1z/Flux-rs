@@ -16,7 +16,7 @@
 
 ## Windows 主机
 
-1. 装 rustup。工具链版本由 `rust-toolchain.toml` 钉死（当前 1.93.0，含 `rustfmt`、`clippy`、`aarch64-linux-android` target），进仓库目录后 `cargo` 会自动装。
+1. 装 rustup。`rust-toolchain.toml` 跟随 `stable` 通道，包含 `rustfmt`、`clippy`、`aarch64-linux-android` target；不固定 Rust 版本。用 `rustup update stable` 更新已安装的通道。Cargo 依赖没有版本上界，`Cargo.lock` 是不提交的本地解析结果；已有工作区用 `cargo update` 更新依赖。
 2. 装 Git。仓库文件一律 LF、无 BOM；`.gitattributes` 已对脚本、`module/**`、BPF 源与 lock 文件强制 `eol=lf`。
 3. 装 `rg`（ripgrep）。文档与代码里的章节引用靠它查。
 4. **不要用 PowerShell 读写含中文的文件**——5.1 版按 GBK 解释无 BOM 文件，写会毁字、读会数错行。用编辑器或 `rg`；`.ps1` 脚本保持纯 ASCII。提交说明用 `git commit -F <file>`，PowerShell 没有 heredoc。
@@ -44,9 +44,9 @@ sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 sudo apt-get install -y shellcheck unzip curl bpftool
 ```
 
-`bpftool` 只用于验证器门（`bpftool prog loadall`）；Ubuntu 的 `/usr/sbin/bpftool` 在 WSL 内核上通常能用，CI 因宿主内核过新而自行编译 v7.5.0，本机不必。
+`bpftool` 只用于验证器门（`bpftool prog loadall`）；Ubuntu 的 `/usr/sbin/bpftool` 在 WSL 内核上通常能用，CI 从上游获取当前版本构建，本机不必。
 
-**NDK**：Android 交叉构建需要 NDK **r27**（CI 用 `r27d`，本机是 `27.3.13750724`）。放在 `~/Android/Sdk/ndk/<版本>/`，然后在跑交叉构建的 shell 里：
+**NDK**：Android 交叉构建使用 `ANDROID_NDK_HOME` 指向的安装，需提供 API 31 的 arm64 编译器；不检查固定修订号。CI 获取最新稳定版，本机使用自己安装的版本。例如本机已有目录如下，按实际安装路径修改：
 
 ```sh
 export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/27.3.13750724
@@ -55,7 +55,7 @@ export PATH="$HOME/.cargo/bin:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x
 
 顺序有讲究：`~/.cargo/bin` 在前（非登录 shell 不 source `~/.cargo/env`），NDK 的 clang 在后，别让它遮住宿主的 clang——BPF 目标要用宿主那个。`.cargo/config.toml` 已把 `aarch64-linux-android` 的 linker 指向 `aarch64-linux-android31-clang`，PATH 对了就能找到。
 
-**target 目录**：从 WSL 构建 `/mnt/d` 上的仓库时，用 `CARGO_TARGET_DIR=/tmp/flux-linux`（Linux）和 `/tmp/flux-android`（aarch64），一是避免和 Windows 侧的 `target/` 互相覆盖，二是 9p 文件系统上的增量构建慢得离谱。`verify-package` 例外——它要清理 `target/aarch64-linux-android` 做两次干净构建，就让它用仓库内的 `target/`。
+**target 目录**：从 WSL 构建 `/mnt/d` 上的仓库时，用 `CARGO_TARGET_DIR=/tmp/flux-linux`（Linux）和 `/tmp/flux-android`（aarch64），避免和 Windows 的 `target/` 互相覆盖，也避开跨文件系统的构建开销。`verify-package` 同样尊重该设置；它在解析出的目标目录下创建两个独立、全新的构建目录，完成后只清理自己创建的目录。
 
 Linux 门禁：
 
@@ -80,7 +80,7 @@ cargo xtask template-check   # 官方 sing-box 校验默认模板
 cargo xtask verify-package   # 两次干净交叉构建，字节一致才算过；产物在 dist/
 ```
 
-`verify-package` 第一次会下载 `engine.lock` 钉死的官方 sing-box 资产（约 18 MB）到 `target/xtask/engine/`，之后复用。
+`verify-package` 每次顶层操作解析一次官方 sing-box 最新稳定发布，两次干净构建共用这次解析。下载按实际发布缓存；包内 `build-info.toml` 记录引擎来源、摘要和构建工具，`licenses/DEPENDENCIES.md` 记录本次 Rust 依赖。不同时间解析到不同上游版本时，产物不要求相同；验证的是同样输入的可复现性。
 
 ## 真机
 

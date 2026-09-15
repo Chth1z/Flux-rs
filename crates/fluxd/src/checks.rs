@@ -296,17 +296,25 @@ fn check_template_json(
     };
 
     let nodes = match flux {
-        Some(flux) => match check_subscription_nodes(layout, flux) {
-            Ok(Some(nodes)) => nodes,
-            Ok(None) => {
-                report.warnings.push(
-                    "subscription cache is missing: template checks passed, but subscribed nodes will be validated after the initial fetch"
+        Some(flux) => match subscription_snapshot(layout, flux, None, true) {
+            Ok(raw) => {
+                if raw.is_none() && !flux.subscription.url.is_empty() {
+                    report.warnings.push(
+                    "subscription cache is missing: checking the available manual and template inputs; remote nodes will be checked after fetching"
                         .to_string(),
                 );
-                Vec::new()
+                }
+                match flux_core::subscription::assemble_nodes(flux, raw.as_deref()) {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        let (token, detail) = subscription_error_status(&error);
+                        report.errors.push(format!("{token}: {detail}"));
+                        return None;
+                    }
+                }
             }
-            Err(error) => {
-                report.errors.push(error);
+            Err((token, detail)) => {
+                report.errors.push(format!("{token}: {detail}"));
                 return None;
             }
         },
@@ -352,12 +360,22 @@ fn check_template_json(
     Some(generated)
 }
 
-fn check_subscription_nodes(
+/// Selects current pending input before consulting the accepted URL-bound cache.
+/// A replacement response must remain usable even when old disk state is unreadable.
+pub fn subscription_snapshot<'a>(
     layout: &Layout,
     flux: &FluxConfig,
-) -> Result<Option<Vec<engine_config::RefinedNode>>, String> {
+    pending: Option<&'a [u8]>,
+    use_cache: bool,
+) -> Result<Option<std::borrow::Cow<'a, [u8]>>, (String, String)> {
     if flux.subscription.url.is_empty() {
-        return Ok(Some(Vec::new()));
+        return Ok(None);
+    }
+    if let Some(raw) = pending {
+        return Ok(Some(std::borrow::Cow::Borrowed(raw)));
+    }
+    if !use_cache {
+        return Ok(None);
     }
     let binding_path = layout.subscription_url_binding();
     let binding = match read_capped(
@@ -367,16 +385,16 @@ fn check_subscription_nodes(
         Ok(binding) => binding,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!(
-                "subscription_fetch_failed:cache_read: {}: {error}",
-                binding_path.display()
+            return Err((
+                "subscription_fetch_failed:cache_read".to_string(),
+                format!("{}: {error}", binding_path.display()),
             ));
         }
     };
     if binding.len() > flux_core::config::MAX_CONFIG_BYTES {
-        return Err(format!(
-            "subscription_fetch_failed:cache_read: {} exceeds the Flux config limit",
-            binding_path.display()
+        return Err((
+            "subscription_fetch_failed:too_large".to_string(),
+            format!("{} exceeds the Flux config limit", binding_path.display()),
         ));
     }
     if binding != flux.subscription.url.as_bytes() {
@@ -389,31 +407,36 @@ fn check_subscription_nodes(
         // The daemon will fetch before it creates an enabled generation.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!(
-                "subscription_fetch_failed:cache_read: {}: {error}",
-                path.display()
+            return Err((
+                "subscription_fetch_failed:cache_read".to_string(),
+                format!("{}: {error}", path.display()),
             ));
         }
     };
     if raw.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
-        return Err(format!(
-            "subscription_fetch_failed:too_large: {} exceeds the {}-byte limit",
-            path.display(),
-            crate::subscription::MAX_SUBSCRIPTION_BYTES
+        return Err((
+            "subscription_fetch_failed:too_large".to_string(),
+            format!(
+                "{} exceeds the {}-byte limit",
+                path.display(),
+                crate::subscription::MAX_SUBSCRIPTION_BYTES
+            ),
         ));
     }
-    flux_core::subscription::parse_and_refine(&raw, &flux.subscription)
-        .map(Some)
-        .map_err(|error| {
-            use flux_core::subscription::SubscriptionError;
-            let token = match &error {
-                SubscriptionError::ZeroNodes => "subscription_empty",
-                SubscriptionError::InvalidExcludePattern(_)
-                | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
-                _ => "subscription_fetch_failed:invalid_content",
-            };
-            format!("{token}: {error}")
-        })
+    Ok(Some(std::borrow::Cow::Owned(raw)))
+}
+
+pub fn subscription_error_status(
+    error: &flux_core::subscription::SubscriptionError,
+) -> (String, String) {
+    use flux_core::subscription::SubscriptionError;
+    let token = match error {
+        SubscriptionError::ZeroNodes => "subscription_empty",
+        SubscriptionError::InvalidExcludePattern(_)
+        | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
+        _ => "subscription_fetch_failed:invalid_content",
+    };
+    (token.to_string(), error.to_string())
 }
 
 /// Warnings required on both `check` and the normal status surface. These are
@@ -818,6 +841,74 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("flux.toml missing")));
+        std::fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn manual_candidate_works_without_remote_cache_and_merges_only_matching_cache() {
+        let layout = tmp_layout("manual-pool");
+        std::fs::write(
+            layout.template_json(),
+            r#"{"outbounds":[{"type":"selector","tag":"PROXY","outbounds":[]}]}"#,
+        )
+        .unwrap();
+        let flux = FluxConfig::parse(b"[nodes]\nlist = ['trojan://placeholder@example.invalid:443#manual']\n[subscription]\nurl = 'https://example.invalid/sub'\n").unwrap();
+        let mut report = CheckReport::default();
+        let generated = check_template_json(&layout, Some(&flux), &mut report).unwrap();
+        assert!(report.errors.is_empty());
+        assert_eq!(
+            generated["outbounds"][0]["outbounds"],
+            serde_json::json!(["manual"])
+        );
+        std::fs::write(layout.subscription_raw(), br#"{"outbounds":[{"type":"trojan","tag":"remote","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#).unwrap();
+        for (binding, expected) in [
+            ("https://example.invalid/old", vec!["manual"]),
+            ("https://example.invalid/sub", vec!["manual", "remote"]),
+        ] {
+            std::fs::write(layout.subscription_url_binding(), binding).unwrap();
+            let generated =
+                check_template_json(&layout, Some(&flux), &mut CheckReport::default()).unwrap();
+            assert_eq!(
+                generated["outbounds"][0]["outbounds"],
+                serde_json::json!(expected)
+            );
+        }
+        std::fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn pending_response_bypasses_broken_old_cache_and_cache_errors_keep_their_token() {
+        let layout = tmp_layout("pending-cache");
+        let flux =
+            FluxConfig::parse(b"[subscription]\nurl = 'https://example.invalid/sub'\n").unwrap();
+        std::fs::create_dir(layout.subscription_url_binding()).unwrap();
+        assert_eq!(
+            subscription_snapshot(&layout, &flux, None, true)
+                .unwrap_err()
+                .0,
+            "subscription_fetch_failed:cache_read"
+        );
+        let pending = br#"{"outbounds":[{"type":"trojan","tag":"JP node","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#;
+        let raw = subscription_snapshot(&layout, &flux, Some(pending), true).unwrap();
+        let pool = flux_core::subscription::assemble_nodes(&flux, raw.as_deref()).unwrap();
+        let template = engine_config::parse_jsonc(engine_config::DEFAULT_TEMPLATE_JSONC).unwrap();
+        let generated = engine_config::generate_from_template(&template, &pool).unwrap();
+        assert_eq!(
+            generated["outbounds"].as_array().unwrap().last().unwrap()["tag"],
+            "JP node"
+        );
+        std::fs::remove_dir(layout.subscription_url_binding()).unwrap();
+        std::fs::write(
+            layout.subscription_url_binding(),
+            vec![b'x'; flux_core::config::MAX_CONFIG_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            subscription_snapshot(&layout, &flux, None, true)
+                .unwrap_err()
+                .0,
+            "subscription_fetch_failed:too_large"
+        );
         std::fs::remove_dir_all(layout.root()).unwrap();
     }
 

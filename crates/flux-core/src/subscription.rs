@@ -18,7 +18,7 @@ use regex_lite::{Regex, RegexBuilder};
 use serde_json::{Map, Number, Value};
 use url::{form_urlencoded, Host, Url};
 
-use crate::config::SubscriptionConfig;
+use crate::config::{FluxConfig, RefinementConfig};
 use crate::engine_config::RefinedNode;
 
 const INFRASTRUCTURE_TYPES: &[&str] = &["selector", "urltest", "direct", "block", "dns"];
@@ -145,9 +145,37 @@ impl std::error::Error for SubscriptionError {}
 /// directly to [`crate::engine_config::generate_from_template`].
 pub fn parse_and_refine(
     response: &[u8],
-    config: &SubscriptionConfig,
+    config: &RefinementConfig,
 ) -> Result<Vec<RefinedNode>, SubscriptionError> {
     refine_nodes(parse_subscription(response)?, config)
+}
+
+/// Builds the available input pool: explicit nodes first, then one accepted
+/// provider snapshot. Missing remote input never hides a usable manual node.
+pub fn assemble_nodes(
+    config: &FluxConfig,
+    response: Option<&[u8]>,
+) -> Result<Vec<RefinedNode>, SubscriptionError> {
+    let mut nodes = config.nodes.clone();
+    if let Some(response) = response {
+        nodes.extend(parse_and_refine(response, &config.subscription.refine)?);
+    }
+    Ok(nodes)
+}
+
+/// Parses one explicit sharing URI, retaining its name and protocol settings.
+/// Errors describe the field without reproducing credentials or the URI.
+pub fn parse_manual_node(uri: &str) -> Result<RefinedNode, String> {
+    let outbound = parse_uri(uri)?;
+    let tag = outbound["tag"]
+        .as_str()
+        .expect("URI parser always supplies a tag");
+    let groups = compile_regions()
+        .iter()
+        .filter(|(_, pattern)| pattern.is_match(tag))
+        .map(|(group, _)| (*group).to_string())
+        .collect();
+    Ok(RefinedNode { outbound, groups })
 }
 
 /// Detects the provider format by content and returns unrefined outbounds.
@@ -185,7 +213,7 @@ pub fn parse_subscription(response: &[u8]) -> Result<Vec<Value>, SubscriptionErr
 /// Applies the fixed refinement order and attaches Flux-original region keys.
 pub fn refine_nodes(
     outbounds: Vec<Value>,
-    config: &SubscriptionConfig,
+    config: &RefinementConfig,
 ) -> Result<Vec<RefinedNode>, SubscriptionError> {
     let exclude = if config.exclude_pattern.is_empty() {
         None
@@ -336,6 +364,7 @@ fn parse_uri(line: &str) -> Result<Value, String> {
     match scheme.as_str() {
         "vmess" => parse_vmess(line),
         "ss" => parse_shadowsocks(line),
+        "hy2" => parse_url_outbound(line, "hysteria2"),
         "vless" | "trojan" | "hysteria" | "hysteria2" | "tuic" | "socks" | "http" => {
             parse_url_outbound(line, &scheme)
         }
@@ -374,7 +403,7 @@ fn parse_vmess(line: &str) -> Result<Value, String> {
     outbound.insert("security".to_string(), Value::String(security));
 
     let network = json_string(source, "net").unwrap_or_default();
-    if let Some(transport) = vmess_transport(source, &network) {
+    if let Some(transport) = vmess_transport(source, &network)? {
         outbound.insert("transport".to_string(), Value::Object(transport));
     }
     if json_string(source, "tls").is_some_and(|tls| tls.eq_ignore_ascii_case("tls")) {
@@ -394,7 +423,10 @@ fn parse_vmess(line: &str) -> Result<Value, String> {
     Ok(Value::Object(outbound))
 }
 
-fn vmess_transport(source: &Map<String, Value>, network: &str) -> Option<Map<String, Value>> {
+fn vmess_transport(
+    source: &Map<String, Value>,
+    network: &str,
+) -> Result<Option<Map<String, Value>>, String> {
     let mut transport = Map::new();
     match network {
         "ws" => {
@@ -424,9 +456,10 @@ fn vmess_transport(source: &Map<String, Value>, network: &str) -> Option<Map<Str
         "quic" => {
             transport.insert("type".to_string(), Value::String("quic".to_string()));
         }
-        _ => return None,
+        "" | "tcp" | "none" => return Ok(None),
+        _ => return Err("unsupported vmess transport".to_string()),
     }
-    Some(transport)
+    Ok(Some(transport))
 }
 
 fn parse_url_outbound(line: &str, scheme: &str) -> Result<Value, String> {
@@ -442,6 +475,11 @@ fn parse_url_outbound(line: &str, scheme: &str) -> Result<Value, String> {
 
     match scheme {
         "vless" => {
+            if query_value(&url, &["encryption"])
+                .is_some_and(|value| !value.is_empty() && value != "none")
+            {
+                return Err("unsupported vless encryption".to_string());
+            }
             outbound.insert(
                 "uuid".to_string(),
                 Value::String(required_username(&url, "vless UUID")?),
@@ -453,7 +491,7 @@ fn parse_url_outbound(line: &str, scheme: &str) -> Result<Value, String> {
                 &url,
                 &["packetEncoding", "packet_encoding"],
             );
-            apply_transport(&mut outbound, &url);
+            apply_transport(&mut outbound, &url)?;
             apply_tls(&mut outbound, &url, false);
         }
         "trojan" => {
@@ -461,7 +499,7 @@ fn parse_url_outbound(line: &str, scheme: &str) -> Result<Value, String> {
                 "password".to_string(),
                 Value::String(required_userinfo(&url, "trojan password")?),
             );
-            apply_transport(&mut outbound, &url);
+            apply_transport(&mut outbound, &url)?;
             apply_tls(&mut outbound, &url, true);
         }
         "hysteria" => parse_hysteria_fields(&mut outbound, &url)?,
@@ -558,8 +596,13 @@ fn parse_hysteria_fields(outbound: &mut Map<String, Value>, url: &Url) -> Result
 }
 
 fn parse_hysteria2_fields(outbound: &mut Map<String, Value>, url: &Url) -> Result<(), String> {
-    let password = query_value(url, &["password", "auth"])
-        .or_else(|| userinfo(url))
+    for field in ["pinSHA256", "mport"] {
+        if query_value(url, &[field]).is_some() {
+            return Err(format!("unsupported hysteria2 query parameter '{field}'"));
+        }
+    }
+    let password = userinfo(url)
+        .or_else(|| query_value(url, &["password", "auth"]))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "hysteria2 URI has no password".to_string())?;
     outbound.insert("password".to_string(), Value::String(password));
@@ -686,7 +729,7 @@ fn required_username(url: &Url, what: &str) -> Result<String, String> {
 
 fn userinfo(url: &Url) -> Option<String> {
     let username = decode_url_component(url.username());
-    if username.is_empty() {
+    if username.is_empty() && url.password().is_none() {
         return None;
     }
     Some(match url.password() {
@@ -740,11 +783,11 @@ fn query_bool(value: &str) -> bool {
     )
 }
 
-fn apply_transport(outbound: &mut Map<String, Value>, url: &Url) {
+fn apply_transport(outbound: &mut Map<String, Value>, url: &Url) -> Result<(), String> {
     let Some(kind) = query_value(url, &["type", "network", "net"])
-        .filter(|kind| !matches!(kind.as_str(), "tcp" | "none"))
+        .filter(|kind| !matches!(kind.as_str(), "" | "tcp" | "none"))
     else {
-        return;
+        return Ok(());
     };
     let mut transport = Map::new();
     match kind.as_str() {
@@ -794,9 +837,10 @@ fn apply_transport(outbound: &mut Map<String, Value>, url: &Url) {
         "quic" => {
             transport.insert("type".to_string(), Value::String("quic".to_string()));
         }
-        _ => return,
+        _ => return Err("unsupported URI transport".to_string()),
     }
     outbound.insert("transport".to_string(), Value::Object(transport));
+    Ok(())
 }
 
 fn insert_query_u64_lossless(
@@ -973,6 +1017,69 @@ mod tests {
     use super::*;
     use crate::config::RenameRule;
 
+    #[test]
+    fn manual_and_remote_pool_preserves_source_order_and_cleanup_boundary() {
+        let refinement = config();
+        let mut config = FluxConfig::default();
+        config.nodes.push(
+            parse_manual_node("trojan://placeholder@example.invalid:443#traffic%20node").unwrap(),
+        );
+        config.subscription.refine = refinement;
+        config.subscription.refine.rename = vec![RenameRule {
+            match_pattern: "old".to_string(),
+            replace: "remote".to_string(),
+        }];
+        let raw = br#"{"outbounds":[{"type":"trojan","tag":"old","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#;
+        assert_eq!(assemble_nodes(&config, None).unwrap(), config.nodes);
+        let pool = assemble_nodes(&config, Some(raw)).unwrap();
+        assert_eq!(pool[0].outbound["tag"], "traffic node");
+        assert_eq!(pool[1].outbound["tag"], "remote");
+        let template = json!({"outbounds":[{"type":"selector","tag":"AUTO","outbounds":[]}]});
+        let generated = crate::engine_config::generate_from_template(&template, &pool).unwrap();
+        assert_eq!(
+            generated["outbounds"][0]["outbounds"],
+            json!(["traffic node", "remote"])
+        );
+    }
+
+    #[test]
+    fn unsupported_uri_semantics_are_not_downgraded() {
+        for query in ["type=xhttp", "type=kcp", "encryption=mlkem768x25519plus"] {
+            let error =
+                parse_manual_node(&format!("vless://placeholder@example.invalid:443?{query}"))
+                    .unwrap_err();
+            assert!(error.contains("unsupported"));
+            assert!(!error.contains("placeholder"));
+        }
+        let payload = STANDARD.encode(
+            json!({"add":"example.invalid","port":443,"id":"placeholder","net":"kcp"}).to_string(),
+        );
+        assert!(parse_manual_node(&format!("vmess://{payload}"))
+            .unwrap_err()
+            .contains("transport"));
+        for field in ["pinSHA256", "mport"] {
+            let error = parse_manual_node(&format!(
+                "hy2://placeholder@example.invalid:443?{field}=private-placeholder"
+            ))
+            .unwrap_err();
+            assert!(error.contains(field));
+            assert!(!error.contains("private-placeholder"));
+        }
+    }
+
+    #[test]
+    fn hysteria2_alias_preserves_complete_decoded_userinfo() {
+        for scheme in ["hy2", "hysteria2"] {
+            let leading_colon =
+                parse_manual_node(&format!("{scheme}://:password@example.invalid:443")).unwrap();
+            assert_eq!(leading_colon.outbound["password"], ":password");
+            let node = parse_manual_node(&format!("{scheme}://user%3Aname:pass%3Aword@example.invalid:443?sni=front.example.invalid#name")).unwrap();
+            assert_eq!(node.outbound["type"], "hysteria2");
+            assert_eq!(node.outbound["password"], "user:name:pass:word");
+            assert_eq!(node.outbound["tls"]["server_name"], "front.example.invalid");
+        }
+    }
+
     fn parse_one(uri: &str) -> Value {
         let response = STANDARD.encode(format!("{uri}\n"));
         parse_subscription(response.as_bytes())
@@ -981,13 +1088,12 @@ mod tests {
             .expect("one outbound")
     }
 
-    fn config() -> SubscriptionConfig {
-        SubscriptionConfig {
+    fn config() -> RefinementConfig {
+        RefinementConfig {
             exclude_pattern: String::new(),
             rename: Vec::new(),
             strip_emoji: false,
             max_tag_length: 64,
-            ..SubscriptionConfig::default()
         }
     }
 

@@ -22,10 +22,10 @@
 
 | 文件 | 干什么 |
 |---|---|
-| `flux.toml` | 挑哪些应用走代理、订阅地址。带注释，照着填 |
+| `flux.toml` | 挑哪些应用走代理，配置手工节点和可选订阅 |
 | `template.json` | 代理配置的**模板**：DNS、路由规则、节点分组的骨架 |
 
-**你编辑模板，不编辑引擎实际跑的那份。** Flux 拿模板加上订阅内容，生成 `run/sing-box.<代数>.json` 交给 sing-box。`config/` 下的都是你的，Flux 永不改写；`run/` 下的都是机器产物，随时可以删掉重建。
+**你编辑模板，不编辑引擎实际跑的那份。** Flux 拿模板加上手工节点和可用订阅内容，生成 `run/sing-box.<代数>.json` 交给 sing-box。`config/` 下的都是你的，Flux 永不改写；`run/` 下的都是机器产物，随时可以删掉重建。
 
 这样订阅更新才不需要你手工合并——填空和追加节点是 Flux 的活。
 
@@ -37,7 +37,7 @@
 
 > 首次安装后需要重启一次，模块才真正加载；之后的开关都是当场生效。
 
-首次启动会抓取订阅，并把完整配置交给官方 sing-box 检查，通过后才激活。下载失败或配置无效时会显示 `Inactive` 及具体原因；按提示修改后会自动重新处理。
+首次启动会把可用节点组成完整配置，交给官方 sing-box 检查，通过后激活。订阅可选：只用手工节点也能运行；同时配置了订阅而暂时下载失败时，只要现有输入仍能生成有效配置，就能激活并显示下载错误。没有可用节点或配置无效时显示 `Inactive` 及具体原因。
 
 ## 看它有没有在工作
 
@@ -52,7 +52,7 @@ Per-app proxy: the apps you pick go through sing-box, everything else is left al
 
 要更细的就跑 `fluxd status`。它逐接口报告，包括某个接口为什么被排除——完整示例与怎么读见 [`introduction.md`](introduction.md#状态会直接列出覆盖面)。
 
-需要诊断配置和设备能力时运行 `fluxd check`。它只检查、不下载订阅；首次抓取前的 `engine_config_unfilled` 表示分组还没有节点。启用前无需先跑这条命令，启动过程会验证完整配置。
+需要诊断配置和设备能力时运行 `fluxd check`。它只检查、不下载订阅；`engine_config_unfilled` 表示手工节点和已有缓存仍无法填充分组。启用前无需先跑这条命令，启动过程会验证完整配置。
 
 ## 出问题怎么自救
 
@@ -70,7 +70,55 @@ Per-app proxy: the apps you pick go through sing-box, everything else is left al
 
 Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用哪个服务器、按什么规则——由 [sing-box](https://github.com/SagerNet/sing-box) 负责，Flux **原封不动**用官方版本，不打补丁。
 
-订阅在 `flux.toml` 的 `[subscription]` 里填地址就行，Flux 自己抓取、解析并填进模板的节点分组；`fluxd subscribe` 手动触发一次。抓回来的原始响应存在 `run/subscription.raw`，精修规则（排除公告条目、改名、剥 emoji、截断）都在 `flux.toml` 里，**改这些规则不需要重新联网**。
+### 手工节点、订阅可以任选或混用
+
+只用手工节点时，在 `flux.toml` 加上：
+
+```toml
+[nodes]
+list = ["@nodes.txt"]
+```
+
+在同目录的 `nodes.txt` 中每行放一条完整分享链接。以下只示意格式，替换成自己的原始链接：
+
+```text
+# 整行注释；链接内部的 # 后面是节点名
+hysteria2://user%3Apassword@proxy.example.invalid:443?sni=front.example.invalid#US-LA-hy2
+```
+
+也可以直接写 `list = ["hysteria2://…", "vless://…"]`，或与 `@nodes.txt` 混写。
+列表文件只能是 `config/` 的直接子文件，不能继续引用另一个文件。粘贴原始 URI，不带聊天消息中的花括号或 Markdown 链接包装。
+
+订阅在同一份 `flux.toml` 中按需增加；已有这个表时只改值，不重复声明：
+
+```toml
+[subscription]
+url = "https://provider.example.invalid/subscription"
+interval = 86400
+```
+
+只用手工节点时，省略 `[subscription]` 或保持 `url = ""`。`interval = 0` 关闭定时刷新；`fluxd subscribe` 仍可手动抓取，失败后的网络恢复事件也可触发重试。非零刷新计划不会因为一次失败而消失。
+
+**原来的 `outbounds` 菜单保持原样。** 节点名称匹配地区时会进入对应空分组，例如 `US-LA-hy2`。没有地区标识的名字照常保留；你可以在现有菜单里显式引用它，或者自行增加空 `AUTO` 分组接收全部节点。`nodes_unreferenced` 表示节点已加入配置，但没有分组引用它，不会替你改名或重排菜单。
+
+手工节点不会经过机场公告过滤、改名或截断。Hysteria2 的 userinfo 会完整解码，`hy2://` 也可用。转换器无法准确表达的参数会明确报错，例如当前未实现的 VLESS 非 `none` 加密、未知传输，以及 Hysteria2 的 `pinSHA256`、`mport`；不会静默删掉后继续。引擎新特性也可以直接使用原生 sing-box JSON 配置，最终由实际安装的官方引擎检查。
+
+### 抓取和名称整理按职责分开
+
+普通使用只需订阅 URL 和刷新间隔。`timeout`、`retries` 可在 `[subscription]` 中按需填写；排除公告、改名、去 emoji 和截断名称属于 `[subscription.refine]`：
+
+```toml
+[subscription.refine]
+strip_emoji = false
+max_tag_length = 64
+rename = [{ match = "旧名称", replace = "新名称" }]
+```
+
+省略的项使用内置默认值。无需增加“普通/极客模式”，也无需为这几项再建配置文件。只有长列表用 `@file` 拆出，常用的 `flux.toml` 保持简短。
+
+**旧配置迁移一次：** 把原先 `[subscription]` 中的 `exclude_pattern`、`rename`、`strip_emoji`、`max_tag_length` 移到 `[subscription.refine]` 下；`url`、`interval`、`timeout`、`retries` 留在原表。旧平铺键会报未知配置项；Flux 不会改写你的文件。
+
+抓回来的原始响应保存在 `run/subscription.raw`，只用于当前配置的 URL；换订阅不会混入旧来源。**修改名称整理规则无需重新联网。**
 
 更新永远先过官方 `sing-box check` 才部署，不过就保留当前配置并报错——订阅更新不会把你的网络搞没。
 

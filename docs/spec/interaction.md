@@ -121,6 +121,9 @@ list = []
 [subscription]
 url = ""            # empty disables subscription entirely; no fetch, no timer
 interval = 86400    # seconds; 0 = manual only
+
+[nodes]
+list = []           # sharing URIs and/or @nodes.txt; subscription is optional
 ```
 
 Rules:
@@ -142,7 +145,7 @@ Rules:
 
 ### 27.2.3 Bootstrap engine configuration
 
-The packaged path is `etc/default-template.json`; the repository source is `module/template.json`; the installed device path is `config/template.json`. It is the original Flux `conf/template.json`, so both projects present the same shape to users: DNS splitting and fakeip, `clash_mode` rules, remote rule-sets, `PROXY` as a menu over the five regional groups `HK`/`TW`/`JP`/`SG`/`US`, and `GLOBAL`.
+The packaged path is `etc/default-template.json`; the repository source is `module/template.json`; the installed device path is `config/template.json`. The default retains the original DNS splitting, fakeip, `clash_mode`, rule-sets and outbound menus: `PROXY` selects `HK`/`TW`/`JP`/`SG`/`US`, and `GLOBAL` selects `PROXY`. Adding a node source MUST NOT rewrite these menus.
 
 Four properties MUST hold for the defaults (`cargo xtask template-check` checks each one and then runs one real `check` with the official sing-box):
 
@@ -150,20 +153,23 @@ Four properties MUST hold for the defaults (`cargo xtask template-check` checks 
 |---|---|
 | No `inbounds` | Flux injects two tproxy inbounds at runtime; a template inbound would compete for their listeners |
 | No **active** `experimental.clash_api` | The default opens no control port. The original's block is carried in the file **commented out**, so the panel is discoverable without being enabled behind the user's back; §27.2.4 defines the rules once they uncomment it |
-| The five regional groups are empty, and `PROXY` is the menu over them | They are what the subscription fills (§28.2). An empty group is fatal to the engine, so with no node to fill them Flux refuses the candidate and stays Direct rather than starting sing-box on a template |
+| The five regional groups start empty; `PROXY` and `GLOBAL` keep their written menus | Generation fills empty groups and appends nodes (§28.2); it never replaces a nonempty menu. With no nodes to fill the groups, Flux reports the incomplete candidate |
 | fakeip ranges avoid the fixed bypasses | Flux unconditionally bypasses the entire ULA `fc00::/7`; a fakeip inside it is sent Direct, silently breaking all IPv6 fakeip. Determine containment from parsed prefixes and `flux_core::cidr::fixed_bypass`, not string prefixes—both `fd00::/8` and `FD00::/8` MUST be rejected |
 
-The template ships with no server, no subscription and no credential: the five
-regional groups are empty, waiting for the subscription to fill them (§28.2).
+The template ships with no server, no subscription and no credential: its five
+regional groups are empty, waiting for manual nodes or a subscription (§28.2).
 Until something fills them there is nothing to run, and `check` says exactly
-that — `engine_config_unfilled`, naming the groups. `PROXY` and `GLOBAL` are
-written menus and stay as they are.
+that — `engine_config_unfilled`, naming the groups. A manual node participates
+in a regional group when its name matches that region. A user can also name it
+explicitly in an existing menu or add an empty `AUTO` selector to receive all
+nodes. Such menu edits belong to the user. Flux never rewrites the user's
+template during an upgrade.
 
 **The user edits this template; they do not replace it with a finished config.**
-Flux generates `run/sing-box.<generation>.json` from the template plus the
-subscription (§28), filling empty selector groups and appending refined nodes.
-Everything else in the template passes through byte for byte, so what the user
-writes is what the engine runs.
+Flux generates `run/sing-box.<generation>.json` from the template plus available
+manual and remote nodes (§28), filling empty selector groups and appending nodes.
+Everything else retains its JSON value; JSONC comments and formatting are not
+part of the generated JSON. The source template remains untouched.
 
 ### 27.2.4 Optional `clash_api`
 
@@ -278,12 +284,12 @@ A fresh install follows this deterministic order:
 2. It creates `disable` in the module directory, so **the module appears off in the manager immediately after installation**, and installation itself captures no traffic;
 3. The user edits `config/flux.toml` and `config/template.json`;
 4. Enable the module in the manager (or run `fluxd enable`; both write the same file), then reboot once after the first installation;
-5. The daemon fetches the configured subscription and checks the complete generated candidate before activation (§28.6). A failed fetch or invalid candidate stays Inactive with its reason;
+5. The daemon assembles the available manual and remote nodes, and checks the complete generated candidate before activation (§28.6). It fetches a subscription only when one is configured. A failed fetch does not prevent an independently complete candidate from running; an incomplete or invalid first candidate stays Inactive with its reason;
 6. Use `fluxd status` or the manager description to confirm the engine and per-interface coverage; use `fluxd check` for configuration and capability diagnostics.
 
 `check` is a diagnostic command, not a prerequisite for enabling: the activation
 transaction owns validation. It is read-only and cannot fetch a subscription.
-Before the initial fetch, the shipped template therefore reports
+Before any node source supplies nodes, the shipped template therefore reports
 `engine_config_unfilled`, naming its empty groups (§27.2.3); the user need not
 run and interpret that incomplete check as an installation step.
 

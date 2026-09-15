@@ -51,7 +51,7 @@ Direct with a specific reason in `status`.
 The version and kernel floor are courtesy filters, not capability proof.
 Activation performs the real operations and stays `Inactive`/Direct on the
 first unsupported capability or ownership conflict. A 16 KiB base-page device
-is unsupported in 0.9.0 because the pinned official sing-box ELF has 4 KiB
+is currently unsupported; the previously tested sing-box 1.13.19 ELF has 4 KiB
 `PT_LOAD` alignment; `fluxd` itself is built with at least 16 KiB alignment so
 it can report the refusal cleanly.
 
@@ -115,22 +115,22 @@ The two authority files are:
 
 - `/data/adb/flux-rs/config/flux.toml` — which apps, which destinations, which
   interfaces and which Wi-Fi networks, each as a mode plus a list, along with
-  the subscription settings.
+  manual node inputs and optional subscription settings.
 - `/data/adb/flux-rs/config/template.json` — the sing-box configuration
   template: DNS, routing rules, and the skeleton of the selector groups.
 
 **You edit the template; Flux generates what the engine runs.** From the
-template plus the subscription it produces `run/sing-box.<generation>.json`,
+template plus manual and available subscription nodes it produces `run/sing-box.<generation>.json`,
 filling the selector groups that are still vacant and appending the refined
-nodes. Everything else
-passes through byte for byte, so what you wrote is what runs — and a
+nodes. Everything else retains its JSON value; comments and formatting stay in
+your source template. A
 subscription update needs no manual merge.
 
 The shipped bootstrap template is the original Flux module's, so both projects
 present the same shape: DNS splitting with fakeip, `clash_mode` rules, remote
 rule-sets, and `PROXY` as a menu over the regional groups `HK`/`TW`/`JP`/`SG`/
 `US`. It contains no servers, no subscription and no credentials — those five
-groups are empty, waiting for the subscription to fill them — and it declares no
+groups are empty, waiting for matching nodes to fill them — and it declares no
 inbound of its own, because Flux injects two tproxy inbounds. The original's
 control panel is in the file too, commented out with its secret blank: a default
 must not open a port that every app on the device can reach, but you should not
@@ -146,8 +146,9 @@ overwrite it, and everything under `run/` can be deleted at any time and will be
 rebuilt.
 
 After editing the configuration, enable the module in the manager and reboot
-once. Flux fetches the subscription and validates the complete configuration
-before activation; the manager description reports the result. Later toggles
+once. Flux validates the complete configuration before activation and fetches a
+subscription when configured. Valid manual nodes can run while an optional
+subscription is unavailable; the fetch error remains visible. Later toggles
 and saved configuration edits take effect without rebooting.
 
 For details or diagnostics after that first reboot:
@@ -159,8 +160,30 @@ $FLUXD check
 ```
 
 `check` is optional diagnostics, not an activation prerequisite. It does not
-fetch subscriptions, so a check before the initial fetch reports the empty
-groups as `engine_config_unfilled`.
+fetch subscriptions. If neither manual nodes nor a cached response fill the
+template, it reports `engine_config_unfilled`.
+
+### Manual nodes and optional subscriptions
+
+```toml
+[nodes]
+list = ["@nodes.txt"]
+
+[subscription]
+url = ""                 # optional; manual nodes also work on their own
+interval = 86400
+```
+
+`nodes.txt` lives beside `flux.toml`, with one sharing URI per line. Inline URIs
+in `list` are also accepted. Manual names and protocol settings are preserved.
+The original regional menus remain unchanged: use a matching regional name,
+reference a node's tag in a menu yourself, or add an empty `AUTO` selector for
+all nodes. Flux does not choose a new menu for you.
+
+Provider cleanup settings belong under `[subscription.refine]`; leave the table
+out to use defaults. Existing pre-release configs move `exclude_pattern`,
+`rename`, `strip_emoji` and `max_tag_length` into that table. See the
+[configuration guide](docs/guide/how-to.md) for examples and protocol boundaries.
 
 The manager's WebUI entry opens a redirect page for the external controller
 configured in the template's optional `clash_api` block. When no controller is
@@ -173,8 +196,11 @@ and `--raw` disables address redaction with a warning.
 
 ## Build and verify
 
-The Rust toolchain, Cargo lockfile, Android NDK revision, engine asset, and BPF
-ABI are pinned. Packaging has one entry point and an exact 15-file allowlist.
+Dependency versions are not pinned. Rust follows `stable`, Cargo requirements
+are open, and `Cargo.lock` is a local generated resolution; `cargo update`
+refreshes it. Packaging resolves the latest stable official sing-box once per
+operation and uses the configured NDK. The BPF ABI remains an explicit
+compatibility contract. Packaging has one entry point and 15 allowed files.
 
 ```sh
 cargo test --workspace
@@ -184,14 +210,15 @@ cargo xtask verify-package
 ```
 
 `verify-package` performs two clean Android release builds and requires
-byte-identical module ZIPs. It verifies the official sing-box archive and
-binary size/SHA-256, enforces its recorded ELF alignment, embeds the current git
-commit as build provenance, and writes the ZIP plus `dist/SHA256SUMS`.
+byte-identical module ZIPs from the same resolved dependencies. It verifies the
+official sing-box archive, measures ELF alignment, records actual inputs in
+`build-info.toml`, and writes the ZIP plus `dist/SHA256SUMS`. Builds that resolve
+different upstream versions are not expected to match.
 
 Only a signed annotated `v*` tag whose suffix exactly matches
 `[workspace.package] version` can run the release workflow. The release also
-publishes the exact sing-box Corresponding Source archive pinned by
-`engine.lock`, including upstream build scripts and dependency manifests.
+publishes the sing-box source archive for the same resolved upstream revision,
+including upstream build scripts and dependency manifests.
 
 ## Documentation and license
 

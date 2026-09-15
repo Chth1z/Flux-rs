@@ -95,7 +95,7 @@
 | 产品合同 | `spec/blueprint.md`，唯一一份 |
 | 技术决策的判据 | `philosophy.md` |
 | 数据面 ABI | `../bpf/include/flux_abi.h`（`crates/flux-core/src/abi.rs` 是手写镜像；size/offset 由 `cargo xtask abi-check` 用 clang 的 `_Static_assert` 核对，另有 `abi.rs` 的单元测试，关系型不变量才是 `const _: ()`） |
-| engine 资产 | `../engine.lock` |
+| engine 资产选择 | 上游最新稳定发布，解析规则在 §9.7；包内 `build-info.toml` 记录本次实际结果 |
 | 实测数据 | `../tools/phase0/results/`，只增不改 |
 | 研究引用的第三方源码 | `../tools/clone-manifest.md` + `../tools/reclone.sh` 重建 `clone/` |
 | 标识符与编号 | 本文 |

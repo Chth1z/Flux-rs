@@ -1,6 +1,6 @@
 # Flux-rs Design Blueprint
 
-- Specifies: **0.9.5**. This is the single normative blueprint and it is edited
+- Specifies: **1.0.0 candidate, pending owner review**. This is the single normative blueprint and it is edited
   in place; there are no incremental layers (`../authoring.md` AUTH-7.2).
 - Nature: **the implementation contract.** Where this document and the code
   disagree, the code is wrong. Where this document and `../philosophy.md`
@@ -97,7 +97,7 @@ does not (`../governance.md` GOV-6.2).
 | Kernel baseline | **5.15** (owner, 2026-08-25). The real gate is a successful load, attach and behaviour at run time; admitting a device by version string is forbidden. Consequence: devices that shipped with Android 12 (GKI 5.10 at most) are out of scope, so the supportable set is roughly devices that shipped with Android 13 or later |
 | Base page | `4096` only; any other value means Inactive/Direct |
 | Root manager | one module envelope shared by Magisk, KernelSU and APatch |
-| Engine | official sing-box, version pinned by `engine.lock`, zero patches |
+| Engine | unmodified official sing-box; builds resolve the latest stable release (§9.7) |
 | Licence | Flux-rs's own code is `GPL-3.0-only`; third parties keep theirs |
 | Data-plane ABI | `FLUX_ABI_MAGIC` (`bpf/include/flux_abi.h`), unrelated to SemVer |
 
@@ -1028,10 +1028,14 @@ broad sepolicy to widen device compatibility is forbidden.
 ## 3.8 4 KiB and 16 KiB
 
 Android 15 allows a 16 KiB base-page kernel, and the API level does not imply
-the page size. All four `PT_LOAD` segments of the pinned official sing-box arm64
-asset have `p_align == 0x1000`, which does not satisfy AOSP's 16 KiB ELF
+the page size. All four `PT_LOAD` segments of the previously tested official
+sing-box 1.13.19 arm64 asset have `p_align == 0x1000`, which does not satisfy AOSP's 16 KiB ELF
 alignment requirement, and `zipalign` cannot modify a program header. Flux
 therefore supports `sysconf(_SC_PAGESIZE) == 4096` only.
+
+This is the current device-support boundary, not a dependency version pin.
+Packaging measures the selected asset's actual load alignment. A newer engine
+with better alignment does not by itself establish device evidence for Flux.
 
 `fluxd` itself is still built 16 KiB aligned, for installation and diagnostic
 hygiene: on a device with another page size it can then produce a definite
@@ -1100,9 +1104,8 @@ implementation.
 ```text
 Flux-rs/
 ├── Cargo.toml                     # [workspace] members = ["crates/flux-core","crates/fluxd","xtask"]
-├── Cargo.lock
-├── rust-toolchain.toml            # stable, pinned exactly; targets = ["aarch64-linux-android"]
-├── engine.lock                    # the official sing-box pin
+├── Cargo.lock                     # generated locally, not version-controlled
+├── rust-toolchain.toml            # stable channel; targets = ["aarch64-linux-android"]
 ├── LICENSE / README.md / CHANGELOG.md / THIRD_PARTY_NOTICES.md
 ├── licenses/…
 ├── bpf/
@@ -2546,20 +2549,34 @@ verbatim and domain rules will not apply. **Warn, never refuse.** A user may
 genuinely want DNS to pass through untouched, and §23 keeps the line between a
 diagnosable difference of intent and an undiagnosable failure.
 
-## 9.7 engine.lock
+## 9.7 Upstream resolution and build evidence
 
-```toml
-version         = "1.13.19"
-upstream_commit = "b5ebaa1fc0f2b94256180b95468e73ef53caa27d"
-asset           = "sing-box-1.13.19-android-arm64.tar.gz"
-asset_size      = 18106459
-sha256          = "e737ac40187563673e1fc282aebf1774e09f3b2057203872798968a2126fab53"
-pt_load_align   = "0x1000"   # all four segments; hence 4 KiB base pages only
-```
+Flux does not pin sing-box or other dependency versions. A top-level package,
+template-check or release operation resolves the latest stable official
+sing-box release once. Its Android asset, host validation asset and upstream
+source revision all come from that result. The build verifies the official
+archive's published size and digest and extracts the binary unchanged:
+**no strip, no patch, no re-sign.**
 
-The build downloads only that official asset, verifies its size and SHA-256, and extracts the binary unchanged: **no strip, no patch, no re-sign.** `xtask` additionally parses the ELF program headers and requires all four `PT_LOAD` segments to still be exactly `0x1000`, which is what catches an upstream asset changing silently behind an unchanged name.
+`build-info.toml` is generated for the artifact, recording the resolved engine
+version, source revision, asset digests and actual build tools. It describes
+what was built; it does not select a version for the next build. The source
+tree contains no `engine.lock`. Cached downloads are addressed by the resolved
+release; an old cached release is not a substitute for resolving the current
+one.
 
-**Raising the engine version is an explicit design change, not a dependency bump.** Re-verify the TProxy listener options, the orig-dst contract and the ELF alignment first, then update the lock — §9.2's zero-hit `SO_REUSEPORT` finding is a property of one release and has to be re-established. Each release page MUST offer, alongside the ZIP, the exact Corresponding Source bundle for that official binary together with its build scripts and dependency sources, for GPL compliance. The source bundle is not packed into the module ZIP.
+Compatibility is a behaviour contract: the real engine checks the generated
+configuration, ELF inspection establishes load alignment for the supported
+page size, and the existing listener and data-plane tests establish the
+TProxy/original-destination requirements. No version allowlist substitutes for
+these properties. The source findings in §9.2 remain evidence for the stated
+revision, not a claim about every future release.
+
+Each release page offers the source archive for the same resolved upstream
+revision beside the module ZIP, with its build scripts and dependency
+manifests. Source identity must follow the packaged engine, even if upstream
+publishes a newer release during the build. The archive is not packed into the
+module ZIP.
 
 ---
 
@@ -2726,6 +2743,10 @@ list = []
 ```
 
 §29.1 adds `[ssid]` as a fourth dimension in the same shape.
+
+Node inputs use `[nodes] list` (§28.2.2), without a mode: the list contributes
+nodes rather than matching traffic. `[subscription]` controls remote acquisition;
+`[subscription.refine]` controls provider-name cleanup (§28.2.1).
 
 ### 11.2.1 Why one idiom rather than several switches
 
@@ -2943,7 +2964,7 @@ bin/fluxd
 bin/sing-box
 etc/default-flux.toml
 etc/default-template.json
-engine.lock
+build-info.toml             # generated evidence of this build's inputs
 LICENSE
 THIRD_PARTY_NOTICES.md
 licenses/{sing-box-LICENSE, DEPENDENCIES.md}
@@ -3124,8 +3145,8 @@ Everything else is derived by xtask: `module.prop`'s version line, `versionCode 
 `cargo xtask package` is the only packaging entry point, locally and in CI:
 
 1. Start from an empty staging directory.
-2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock` and the pinned NDK, using a host LLVM/clang with the BPF backend and targeting `aarch64-linux-android` API 31. Keep that toolchain unchanged between reproducibility runs; byte identity across different clang versions is not claimed. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd — a fully static binary cannot resolve names on Android. The ZIP still ships one `fluxd` file; it does not bundle a libc. The workspace path is remapped to `/flux-rs` for reproducibility; no wall-clock value is embedded.
-3. Download and verify against `engine.lock`: size, SHA-256, and all four `PT_LOAD` alignments exactly `0x1000`.
+2. Resolve dependencies without repository version pins. Rust follows `stable`; Cargo dependency requirements are open and its local `Cargo.lock` is generated, not committed. `cargo update` refreshes an existing development resolution. Use the configured NDK and a host LLVM/clang with the BPF backend, targeting `aarch64-linux-android` API 31. Keep the resolved dependencies and tools unchanged within a reproducibility run. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd. The ZIP ships one `fluxd` file and does not bundle a libc. Remap the workspace path to `/flux-rs`; embed no wall-clock value.
+3. Obtain the official engine resolved in §9.7, verify its archive and measure its ELF load alignment. Generate `build-info.toml` from these actual inputs; derive the dependency inventory from the local Cargo resolution.
 4. Generate `module.prop`.
 5. Copy files by the allowlist, normalising line endings to LF and fixing modes.
 6. Build the ZIP with a fixed entry order, `SOURCE_DATE_EPOCH`, and no extra attributes.
@@ -3139,6 +3160,11 @@ a fallback. Each reproducibility run uses a fresh, exclusively created target
 directory; cleanup is confined to that run's directory. Cargo documents
 `target_directory` as an absolute output path in
 [`cargo metadata`](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html).
+
+`verify-package` resolves upstream once and reuses those inputs for both clean
+builds. Reproducibility means equal inputs produce equal bytes; two builds that
+resolve different upstream releases need not be identical. `release` retains
+that same result when obtaining the engine's source archive.
 
 No SBOM, signature, per-file hash or layered manifest is produced unless a real distribution channel actually requires one.
 
@@ -3187,7 +3213,7 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
   **Passing on a newer kernel does not mean passing on 5.15.** CI runs `ubuntu-latest`, whose kernel is far newer than the baseline, so this gate proves only that the programs hold under some modern verifier. **The baseline verifier evidence comes from the device**: the Phase 3-8 device suites load the same programs on SM-S9180 running 5.15.211, and that is the first-hand result for 5.15. The CI gate exists to fail early, not to be the verdict; both must pass (GOV-4.1).
 
 - Shell: CI runs `shellcheck --shell=sh --severity=warning` over `module/*.sh`. **The target runtime is BusyBox `ash` and shellcheck is not `ash`**, so it checks portability rather than what the target interpreter accepts. Scripts under `tools/**` are outside that scope and are executed by hand on a development host or a device.
-- ELF checks: every `LOAD` segment of `fluxd` has `p_align >= 0x4000`, and the official engine matches `engine.lock` exactly and is still `0x1000`.
+- ELF checks: every `LOAD` segment of `fluxd` has `p_align >= 0x4000`; the official engine's measured alignment supports the product's page size and its asset digest matches the selected upstream release.
 - Clean staging from the allowlist, version consistency, and two packaging runs hashing identically.
 
 ## 15.2 Eight logic tests that MUST exist, all in `flux-core`
@@ -3249,8 +3275,9 @@ to meet it rather than to argue it is minor.
    observed by the real engine**, not through a map agreeing with itself.
 2. The repository contains only the structure §5 permits, with no old code or
    artefacts.
-3. The official sing-box version, commit and asset digest match `engine.lock`
-   exactly, and all four `PT_LOAD` segments are still `0x1000`.
+3. The official sing-box asset is verified against the selected upstream
+   release; `build-info.toml` describes the actual binary, source revision and
+   tools, and measured ELF alignment supports the product's page size.
 4. The release notes and the runtime both state `base page == 4096` as a product
    boundary; `fluxd`'s own LOAD segments are 16 KiB aligned; a device with any
    other page size stays Inactive and Direct and starts no engine.
@@ -3414,9 +3441,16 @@ nodes, and writes the runtime config. The user edits only the template.
 ## 28.2 Generation is a pure function
 
 ```
-template.json  +  subscription.raw  +  flux.toml refinement rules
+template.json + configured manual nodes + available subscription snapshot
   → sing-box.<gen>.json
 ```
+
+Manual nodes and a remote subscription are independent inputs to one node pool.
+Either may be absent. The cached remote response contributes only when it is
+bound to the currently configured URL. A missing response contributes no nodes;
+it does not prevent a valid configuration built from manual nodes from running.
+All inputs converge through this same generation function and the existing
+engine transaction, without a separate manual-node activation path.
 
 Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
@@ -3427,7 +3461,7 @@ Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
 Two consequences follow from one measured fact: **the engine rejects an empty
 group outright** — `initialize outbound[N]: missing tags` at both `check` and
-`run`, measured against the pinned 1.13.19, whether or not anything references
+`run`, measured against official 1.13.19, whether or not anything references
 the group.
 
 - **A group with no matching node becomes `DIRECT`.** An Asia-only plan leaves
@@ -3448,7 +3482,8 @@ The configuration is valid and the user may mean it, but every selected app
 still egresses direct, so `status` and `check` say so instead of reporting a
 clean Active (§17.1).
 
-Everything else MUST pass through byte for byte.
+Everything else MUST retain the same JSON value. Comments and formatting are
+not part of that value and are not copied into generated JSON.
 
 That last sentence is a testable claim, not a statement of intent: **substitute
 the template's `outbounds` back into the generated file and the result MUST be
@@ -3467,6 +3502,8 @@ url = ""
 interval = 86400          # seconds; 0 = manual refresh only
 timeout = 10
 retries = 2
+
+[subscription.refine]
 exclude_pattern = "(expire|traffic|官网|到期|流量|剩余|套餐|重置|联系|群组|通知|平台|网站|时间|建议|反馈|版本|更新)"
 rename = [
   { match = "【(亚洲|北美洲|欧洲|南美洲|非洲|大洋洲|南极洲)】", replace = "" },
@@ -3479,6 +3516,48 @@ An empty `url` disables subscription entirely: no fetch, no timer, and
 `run/subscription.raw` is never created. That is the default, so a fresh install
 makes no network request of its own.
 
+Acquisition settings belong to `[subscription]`; provider-specific name cleanup
+belongs to `[subscription.refine]`. These are responsibilities, not beginner
+and expert modes. Both tables have defaults and may be omitted. The former
+flat refinement keys move into the nested table for the 1.0.0 candidate schema;
+Flux never rewrites an existing user configuration to migrate it.
+
+### 28.2.2 Manual node inputs
+
+```toml
+[nodes]
+list = ["@nodes.txt"]
+```
+
+Each list entry is a sharing URI or an `@file` reference using the existing
+direct-child, non-recursive list-file rules of §11.2.2. A file contains one URI
+per line; only whole lines starting with `#` are comments, because a URI's
+fragment is its node name. Inline URIs and list files may be mixed without a
+second configuration format. An empty or absent list means no manual nodes.
+
+The parser preserves the manual node's name and protocol settings. Provider
+announcement filters, renaming and truncation MUST NOT alter a node the user
+entered explicitly. Region membership may be derived from its name for an
+optional regional selector, but no region match is required to use the node.
+Manual nodes appear first in the pool, followed by the accepted remote nodes.
+Neither source silently replaces nodes from the other. The complete candidate
+still goes through official engine validation, including tag collisions.
+
+The original outbound menus remain intact. A matching name places a manual
+node in a regional group; otherwise the user can reference its tag in an
+existing menu or add an empty `AUTO` selector to receive the entire pool.
+Generation never makes that policy choice. The existing `nodes_unreferenced`
+warning identifies an appended node that no group selects. A complete template
+with its own populated outbounds also remains valid without either external
+input.
+
+On cold start, manual nodes can form a generation while the optional remote
+fetch is pending or unavailable. The fetch failure remains visible. A later
+valid response enters the same candidate transaction. An invalid manual URI
+invalidates that candidate; it is never skipped or replaced by a guessed node.
+Diagnostics identify the source entry and unsupported field, not the URI or
+its credentials.
+
 ## 28.3 Subscription input formats
 
 Two, distinguished **by content**, never by file extension, URL suffix or the
@@ -3489,7 +3568,17 @@ Two, distinguished **by content**, never by file extension, URL suffix or the
 - **Base64-encoded URI list** — decode, then parse each line as `vmess`,
   `vless`, `trojan`, `hysteria`, `hysteria2`, `tuic`, `ss`, `socks` or `http`.
 
-The supported set is exactly what the pinned engine can run, and nothing wider.
+Manual list entries use the same URI parser directly. `hy2` is an alias of
+`hysteria2`. A URI conversion MUST preserve protocol semantics: unsupported
+transports or VLESS encryption other than absent/`none` are errors in the
+current converter, never silently converted into ordinary TCP or unencrypted
+VLESS. Hysteria2 authentication is the entire percent-decoded URI userinfo,
+including an encoded username/password separator.
+
+URI support is the intersection of an exact conversion and the installed
+official engine's capabilities. Engine upgrades need no Flux version allowlist;
+the actual engine checks the generated configuration. Native sing-box JSON in
+the template or subscription can express features beyond the URI converter.
 `snell` was listed here through 0.9.5 and is not: it is Surge-proprietary and
 appears nowhere in sing-box, so under §1.1's unmodified official binary a snell
 node could never connect. Parsing one would have produced a candidate that fails
@@ -3510,7 +3599,9 @@ hand-rolled version of them is a source of defects.
 
 ## 28.4 Node refinement
 
-Fixed order, matching `updater.sh` Phase A/B:
+This pipeline handles provider output only, using `[subscription.refine]`.
+Manual nodes preserve their user-authored names (§28.2.2). Fixed order,
+matching `updater.sh` Phase A/B:
 
 1. drop infrastructure types (`selector`, `urltest`, `direct`, `block`, `dns`);
 2. discard entries matching `exclude_pattern`;
@@ -3537,7 +3628,7 @@ what distinguishes the two.
 refinement.
 
 The refinement rules (`exclude_pattern`, `rename`, `strip_emoji`,
-`max_tag_length`) live in `flux.toml`, so editing them is a purely local
+`max_tag_length`) live in `flux.toml` under `[subscription.refine]`, so editing them is a purely local
 operation. Caching the refined output would force a network round trip to see
 the effect of a local edit, which fails offline and is slow when it does not.
 Keeping the raw copy also keeps the network artifact single-purpose: exactly one
@@ -3701,14 +3792,18 @@ armed at all. **Recorded as an explicit exception**, on those grounds.
 external dependency and a second process, whereas a timerfd is already part of
 the reactor's event loop and costs nothing new.
 
-## 29.4 Retry on network recovery, not on a schedule
+## 29.4 Network recovery and configured refresh are independent
 
-A failed fetch MUST NOT start a fixed-interval retry loop. It waits for
-rtnetlink to report a usable default route, then retries.
+A failed fetch MUST NOT create a second retry schedule. A usable default route
+returning may trigger one earlier attempt through the existing rtnetlink event.
+The user's configured refresh interval (§29.3) continues independently after
+success or failure. `interval = 0` still means no scheduled refresh.
 
-Offline, this attempts nothing at all; on reconnection it attempts immediately.
-Compared with backoff it is both faster and cheaper in power, and it consumes an
-event Flux is already subscribed to.
+Route presence is not proof of Internet access or completion of a captive
+portal login. HTTP/TLS failures MUST NOT disable future configured refreshes
+until the route disappears and returns. A user can request an immediate fetch
+with `fluxd subscribe`; Flux does not invent a connectivity watchdog to discover
+when an external service or authentication session has recovered.
 
 ## 29.5 Boundaries
 
