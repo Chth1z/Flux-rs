@@ -539,10 +539,11 @@ impl Reactor {
                         self.rearm_subscription_timer();
                         self.start_scheduled_subscription_fetch("scheduled refresh");
                     }
-                    token if token >= TOK_CONTROL_CONN_BASE => {
-                        if self.handle_control_connection(token) {
-                            self.request_shutdown("stop request");
-                        }
+                    token
+                        if token >= TOK_CONTROL_CONN_BASE
+                            && self.handle_control_connection(token) =>
+                    {
+                        self.request_shutdown("stop request");
                     }
                     _ => {}
                 }

@@ -1344,10 +1344,7 @@ fn udp_gso_smoke(listener: &UdpSocket, ifname: &str, destination: SocketAddr) {
 
 fn drive_liveness(manager: &mut dataplane::Manager) {
     let mut progress = manager.begin_attachment().expect("begin TC attachment");
-    loop {
-        let dataplane::AttachmentProgress::Wait(delay) = progress else {
-            break;
-        };
+    while let dataplane::AttachmentProgress::Wait(delay) = progress {
         let ifname = current_verify_iface(manager).expect("verification filter missing");
         let before = manager.counter_for_test(Counter::SawPacket).unwrap();
         let socket = UdpSocket::bind("0.0.0.0:0").expect("liveness socket");

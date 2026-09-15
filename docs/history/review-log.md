@@ -600,3 +600,22 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **回归证据。** `daemon_e2e` 使用本机 loopback 的不可用端口，不访问外网：失败后观察至少两次计划抓取，原引擎仍运行；把 interval 改成 0 后不再出现计划抓取，手动 subscribe 仍立即触发。该场景先复现旧 interval 问题，修复后整套 daemon 场景通过。WSL fluxd bin 81 项、Linux/Android all-target clippy 通过；主代理 Windows fmt、core 109 / xtask 34 / fluxd bin 8、doc-check、diff-check 通过。
 
 这是独立可复现的调度缺陷修正，**不是校园网已修复的证明**。没有现场网络和设备执行证据；校园网分层判断仍以所有者提供的开关现象和源码分析为限。
+
+### 0.6.11 上游解析、构建记录与网络设计（2026-09-15）
+
+所有者明确要求 sing-box 和依赖均不锁版本。版本选择回到上游，构建记录只说明这次实际用了什么，不参与下一次选择。
+
+| 原说法 / 实现 | 实际问题 | 处置 |
+|---|---|---|
+| engine.lock 决定 engine 版本；Cargo/Rust/NDK/CI action 固定版本 | 与所有者的版本策略不符，旧版本还会限制对当前配置能力的判断 | 删除 engine.lock，Cargo 开放依赖且不跟踪本地 Cargo.lock，Rust 跟随 stable，CI action 使用上游维护分支，NDK 从稳定频道可用包中解析 |
+| host 模板检查、Android 打包和源码下载可以各自选择输入 | latest 在执行中变化会产生来源不同的检查、二进制与源码；GitHub release 的 target_commitish 还可能只是移动分支 | 一个 Release 拥有一次解析结果；通过 tag 取得实际 commit，host/Android/source 与双构建共用；构建工具生成 build-info.toml 替换原 ZIP 的 engine.lock，仍为 15 项 |
+| 缓存目录按文件名复用；临时解压由调用方管理 | 上游同名资产重新上传后旧缓存可能一直校验失败，临时文件清理也成为调用顺序负担 | archive 按官方发布 digest 寻址并验证 size/hash，每次从已验证 archive 提取；Artifact 拥有临时目录并在生命周期结束时清理 |
+| 工具读取 TOML 文档时使用 Value::FromStr | 更新到 TOML 1.x 后该接口解析单值，原 Cargo.toml/Cargo.lock 文档读取失败 | 改为 toml::from_str 文档解析；不保留按版本分支的兼容层 |
+| 校园网认证、默认路由恢复、本地 Active 被混作同一种联网状态 | 认证可能只改变网关权限和 Android 网络能力；引擎 DIRECT 新建 root socket，不继承原应用绑定的 Network | §3.6.1 分开三种状态和两种流量路径；复用应用/CIDR/SSID 策略，不增加猜测认证状态的探针或自动旁路 |
+| 把 local DNS 或 network_strategy 当作裸 CLI 自动使用 Android 当前网络的方式 | 当前普通 CLI 路径读取 resolv.conf；network_strategy 依赖图形客户端平台接口 | 追踪 1.14.1 实现并记录源码范围；校园域名解析放在用户 dns.rules，保留原网络身份由捕获前旁路表达 |
+
+**源码核对。** [`网络参考研究`](network-reference-research-2026-09-15.md) 记录当前官方 1.14.1、Clash-Config 对应提交、Hysteria2 auth/混淆与 VLESS 参数边界，以及 DNS 和 TProxy listener 路径。它们是对应修订的源码证据，不是现场连通性结论。`module/template.json` 与本轮基准 `aa4715d` 完全一致，未改原有 outbounds。
+
+**代码代理复验。** Astra low 在 WSL 的已安装 Rust stable 1.97.0、NDK 27.3.13750724、host clang 21.1.8 上完成：flux-core 109 / fluxd bin 81 / xtask 37 项，完整 daemon_e2e 与 engine_lifecycle，Linux workspace Clippy 和 Android all-targets Clippy。实际官方 1.14.1 host 模板检查通过，Android archive 验证和单次含真实 BPF 的 release 编译/15 项打包通过。ShellCheck 覆盖模块及 CI 脚本；NDK 选择用已安装 preview 与稳定可用包的模拟列表验证，没有安装工具链。
+
+宿主生命周期夹具整体通过，但非 root WSL 中的 root chown 操作未成功；这项结果不证明 Android 安装后的 root 所有权。最终干净提交的双构建、对应源码及主代理独立检查另行补记。

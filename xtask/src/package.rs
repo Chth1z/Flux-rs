@@ -4,9 +4,8 @@
 //!
 //! 1. Derive everything version-shaped from `[workspace.package] version`
 //!    (single version source; `module.prop` is generated, never maintained).
-//! 2. Obtain and verify the pinned engine: `engine.lock` size + SHA-256 for
-//!    both the archive and the extracted binary, and every `PT_LOAD` still
-//!    exactly at the recorded alignment. Any mismatch refuses to package.
+//! 2. Resolve one official stable release, verify its archives, measure the
+//!    ELF binaries and check the generated template with its host asset.
 //! 3. Cross-build `fluxd` (`aarch64-linux-android`, embedded BPF object,
 //!    16 KiB max-page-size link flags) and require `p_align >= 0x4000`.
 //! 4. Stage the §13.1 allowlist — never "everything except" — with LF line
@@ -17,7 +16,7 @@
 //! state and asserts the two archives hash identically (§17.4 exit
 //! criterion 4).
 
-use crate::{elf, sha256, util, zip};
+use crate::{elf, engine_release, sha256, util, zip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -33,7 +32,7 @@ const ALLOWLIST: [&str; 15] = [
     "bin/sing-box",
     "etc/default-flux.toml",
     "etc/default-template.json",
-    "engine.lock",
+    "build-info.toml",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "licenses/sing-box-LICENSE",
@@ -42,7 +41,8 @@ const ALLOWLIST: [&str; 15] = [
 
 pub fn run() -> Result<(), String> {
     let target = util::target_dir(&util::repo_root())?;
-    let (zip_path, digest) = package_once(&target)?;
+    let inputs = prepare_inputs(&util::repo_root())?;
+    let (zip_path, digest) = package_once(&target, &inputs)?;
     println!("package: OK — {}", zip_path.display());
     println!("package: sha256 {}", sha256::hex(&digest));
     Ok(())
@@ -50,16 +50,21 @@ pub fn run() -> Result<(), String> {
 
 /// Two full runs from clean cross-build state must agree byte for byte.
 pub fn verify() -> Result<(), String> {
+    let inputs = prepare_inputs(&util::repo_root())?;
+    verify_with(&inputs)
+}
+
+fn verify_with(inputs: &Inputs) -> Result<(), String> {
     let root = util::repo_root();
     let target = util::target_dir(&root)?;
     let work = util::work_dir(&target.join("xtask"), "verify-package")?;
     println!("verify-package: clean build roots under {}", work.display());
-    let (zip_path, first) = package_once(&work.join("run1"))?;
+    let (zip_path, first) = package_once(&work.join("run1"), inputs)?;
     let first_copy = zip_path.with_extension("zip.run1");
     std::fs::copy(&zip_path, &first_copy)
         .map_err(|e| format!("copy {}: {e}", zip_path.display()))?;
 
-    let (zip_path, second) = package_once(&work.join("run2"))?;
+    let (zip_path, second) = package_once(&work.join("run2"), inputs)?;
 
     if first != second {
         return Err(format!(
@@ -98,8 +103,12 @@ pub fn release(tag: &str) -> Result<(), String> {
             "release tag `{tag}` does not equal workspace version tag `{expected}`"
         ));
     }
-    verify()?;
-    let (source, digest) = corresponding_source(&root)?;
+    let inputs = prepare_inputs(&root)?;
+    verify_with(&inputs)?;
+    let (source, digest) = inputs.release.corresponding_source(
+        &util::target_dir(&root)?.join("xtask/source"),
+        &root.join("dist"),
+    )?;
     let zip_name = flux_core::version::artifact_name(&version);
     let sums = root.join("dist/SHA256SUMS");
     let module_sum = util::read_text(&sums)?;
@@ -118,7 +127,7 @@ pub fn release(tag: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn package_once(target: &Path) -> Result<(PathBuf, [u8; 32]), String> {
+fn package_once(target: &Path, inputs: &Inputs) -> Result<(PathBuf, [u8; 32]), String> {
     let root = util::repo_root();
 
     // 1. Single version source.
@@ -137,14 +146,14 @@ fn package_once(target: &Path) -> Result<(PathBuf, [u8; 32]), String> {
     }
     validate_webroot_shape(&root)?;
 
-    // 2. Engine pin.
-    let engine = verify_engine(&root)?;
+    // 2. Official engine and host validation were resolved once for this operation.
+    let engine = &inputs.engine;
 
     // 3. Cross-built daemon.
     let fluxd = build_fluxd(&root, target)?;
 
     // 4 + 5. Stage the allowlist and write the archive.
-    let entries = collect_entries(&root, &module_prop, &engine, &fluxd)?;
+    let entries = collect_entries(&root, &module_prop, engine, &fluxd, &inputs.build_info)?;
     debug_assert!(entries.iter().map(|e| e.name.as_str()).eq(ALLOWLIST));
 
     let stage = target.join("xtask/stage");
@@ -178,8 +187,7 @@ fn package_once(target: &Path) -> Result<(PathBuf, [u8; 32]), String> {
 }
 
 fn workspace_version(root: &Path) -> Result<String, String> {
-    let manifest: toml::Value = util::read_text(&root.join("Cargo.toml"))?
-        .parse()
+    let manifest: toml::Value = toml::from_str(&util::read_text(&root.join("Cargo.toml"))?)
         .map_err(|e| format!("parse Cargo.toml: {e}"))?;
     manifest
         .get("workspace")
@@ -192,137 +200,90 @@ fn workspace_version(root: &Path) -> Result<String, String> {
 
 // ------------------------------------------------------------------ engine
 
-struct Engine {
-    binary: PathBuf,
-    license: PathBuf,
+struct Inputs {
+    release: engine_release::Release,
+    engine: engine_release::Artifact,
+    build_info: Vec<u8>,
 }
 
-fn lock_str<'a>(lock: &'a toml::Value, key: &str) -> Result<&'a str, String> {
-    lock.get("engine")
-        .and_then(|e| e.get(key))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("engine.lock: missing or non-string [engine] {key}"))
+fn prepare_inputs(root: &Path) -> Result<Inputs, String> {
+    let release = engine_release::Release::resolve()?;
+    let cache = util::target_dir(root)?
+        .join("xtask/engine")
+        .join(&release.tag);
+    let host = release.host.acquire(&cache)?;
+    check_template_with_binary(root, &host.binary, &release.version)?;
+    let engine = release.android.acquire(&cache)?;
+    let bytes = util::read_bytes(&engine.binary)?;
+    if bytes.get(18..20) != Some(&183u16.to_le_bytes()) {
+        return Err("official Android engine is not an AArch64 ELF".into());
+    }
+    if elf::load_aligns(&bytes)?
+        .iter()
+        .any(|align| *align < 0x1000)
+    {
+        return Err("official Android engine does not support 4 KiB load alignment".into());
+    }
+    let tools = build_tools()?;
+    let info = toml::Value::Table(toml::Table::from_iter([
+        ("engine".into(), release.evidence(&engine, &host)),
+        ("tools".into(), tools),
+    ]));
+    let build_info = toml::to_string(&info)
+        .map_err(|error| format!("serialize build evidence: {error}"))?
+        .into_bytes();
+    Ok(Inputs {
+        release,
+        engine,
+        build_info,
+    })
 }
 
-fn lock_int(lock: &toml::Value, key: &str) -> Result<u64, String> {
-    lock.get("engine")
-        .and_then(|e| e.get(key))
-        .and_then(|v| v.as_integer())
-        .and_then(|v| u64::try_from(v).ok())
-        .ok_or_else(|| format!("engine.lock: missing or non-integer [engine] {key}"))
-}
-
-/// Download (once), then verify the pinned engine against `engine.lock`.
-/// Every digest or size mismatch is a hard refusal to package (§17.4 exit
-/// criterion 5); this automates the manual verification recorded in the lock.
-fn verify_engine(root: &Path) -> Result<Engine, String> {
-    let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
-        .parse()
-        .map_err(|e| format!("parse engine.lock: {e}"))?;
-
-    let version = lock_str(&lock, "version")?;
-    let url = lock_str(&lock, "archive_url")?;
-    let binary_in_archive = lock_str(&lock, "binary_path_in_archive")?;
-    let license_in_archive = lock_str(&lock, "license_path_in_archive")?;
-    let p_align = lock_str(&lock, "max_load_p_align")?;
-    let expected_p_align = p_align
-        .strip_prefix("0x")
-        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-        .ok_or_else(|| format!("engine.lock: max_load_p_align `{p_align}` is not 0x-hex"))?;
-    if !url.contains(version) || !binary_in_archive.contains(version) {
-        return Err(format!(
-            "engine.lock is internally inconsistent: version {version} does not appear in \
-             archive_url or binary_path_in_archive"
-        ));
-    }
-
-    let cache = util::target_dir(root)?.join("xtask/engine");
-    let archive_name = url
-        .rsplit('/')
-        .next()
-        .expect("rsplit yields at least one piece");
-    let archive_path = cache.join(archive_name);
-    if !archive_path.is_file() {
-        std::fs::create_dir_all(&cache).map_err(|e| format!("create {}: {e}", cache.display()))?;
-        println!("package: downloading pinned engine {url}");
-        let partial = cache.join("download.partial");
-        util::run(
-            Command::new("curl")
-                .arg("-fsSL")
-                .arg("--retry")
-                .arg("3")
-                .arg("-o")
-                .arg(&partial)
-                .arg(url),
-            "engine download",
-        )?;
-        std::fs::rename(&partial, &archive_path).map_err(|e| format!("rename download: {e}"))?;
-    }
-
-    let archive = util::read_bytes(&archive_path)?;
-    check_pin(&lock, "archive", &archive)?;
-
-    let extract = cache.join("extract");
-    let binary = extract.join(binary_in_archive);
-    let license = extract.join(license_in_archive);
-    if !binary.is_file() || !license.is_file() {
-        std::fs::create_dir_all(&extract)
-            .map_err(|e| format!("create {}: {e}", extract.display()))?;
-        util::run(
-            Command::new("tar")
-                .arg("-xzf")
-                .arg(&archive_path)
-                .arg("-C")
-                .arg(&extract)
-                .arg(binary_in_archive)
-                .arg(license_in_archive),
-            "engine extraction",
-        )?;
-    }
-
-    let binary_bytes = util::read_bytes(&binary)?;
-    check_pin(&lock, "binary", &binary_bytes)?;
-
-    // "Still exactly 0x1000": the 16 KiB gap is a *documented* limitation
-    // (§3.8, §22.2). If a new engine build changes alignment, the lock — and
-    // that documentation — must be updated deliberately, so drift is an error
-    // in both directions.
-    let aligns = elf::load_aligns(&binary_bytes)
-        .map_err(|e| format!("engine binary is not a readable ELF: {e}"))?;
-    for align in &aligns {
-        if *align != expected_p_align {
-            return Err(format!(
-                "engine PT_LOAD p_align {align:#x} != engine.lock max_load_p_align \
-                 {expected_p_align:#x}; re-measure and update engine.lock and blueprint §3.8"
-            ));
+fn build_tools() -> Result<toml::Value, String> {
+    let clang = std::env::var_os("CLANG")
+        .map(PathBuf::from)
+        .or_else(find_system_clang)
+        .ok_or("no host clang found; set CLANG")?;
+    let linker = find_in_path("aarch64-linux-android31-clang")
+        .or_else(|| ndk_bin_dir().map(|bin| bin.join("aarch64-linux-android31-clang")))
+        .ok_or("no Android API 31 clang found; configure ANDROID_NDK_HOME or PATH")?;
+    let version = |tool: &Path| -> Result<toml::Value, String> {
+        let output = Command::new(tool)
+            .arg("--version")
+            .output()
+            .map_err(|error| format!("run {}: {error}", tool.display()))?;
+        if !output.status.success() {
+            return Err(format!("{} --version failed", tool.display()));
         }
-    }
-
-    println!(
-        "package: engine {version} verified — archive + binary sha256/size match engine.lock, \
-         {} LOAD segments at {expected_p_align:#x}",
-        aligns.len()
-    );
-    Ok(Engine { binary, license })
-}
-
-/// Verify `<what>_sha256` and `<what>_size` from `engine.lock` against bytes.
-fn check_pin(lock: &toml::Value, what: &str, data: &[u8]) -> Result<(), String> {
-    let expected_sha = lock_str(lock, &format!("{what}_sha256"))?;
-    let expected_size = lock_int(lock, &format!("{what}_size"))?;
-    if data.len() as u64 != expected_size {
-        return Err(format!(
-            "engine {what} is {} bytes, engine.lock pins {expected_size}; refusing to package",
-            data.len()
-        ));
-    }
-    let actual = sha256::hex(&sha256::digest(data));
-    if actual != expected_sha.to_ascii_lowercase() {
-        return Err(format!(
-            "engine {what} sha256 {actual} != engine.lock {expected_sha}; refusing to package"
-        ));
-    }
-    Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+            .into())
+    };
+    let ndk_root = linker
+        .ancestors()
+        .find(|path| path.join("source.properties").is_file())
+        .ok_or("cannot locate NDK root from its compiler path")?;
+    let properties = util::read_text(&ndk_root.join("source.properties"))?;
+    let revision = properties
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Pkg.Revision")
+                .and_then(|rest| rest.trim().strip_prefix('='))
+        })
+        .map(str::trim)
+        .ok_or("NDK source.properties has no Pkg.Revision")?;
+    Ok(toml::Value::Table(toml::Table::from_iter([
+        ("rustc".into(), version(Path::new("rustc"))?),
+        ("cargo".into(), version(Path::new(&util::cargo()))?),
+        ("clang".into(), version(&clang)?),
+        ("android_clang".into(), version(&linker)?),
+        ("ndk".into(), revision.to_string().into()),
+        ("android_api".into(), 31i64.into()),
+    ])))
 }
 
 // ------------------------------------------------------------------- fluxd
@@ -335,7 +296,6 @@ fn build_fluxd(root: &Path, target: &Path) -> Result<PathBuf, String> {
     cmd.current_dir(root)
         .args([
             "build",
-            "--locked",
             "--release",
             "-p",
             "fluxd",
@@ -376,8 +336,7 @@ fn build_fluxd(root: &Path, target: &Path) -> Result<PathBuf, String> {
     if find_in_path(LINKER).is_none() {
         let ndk_bin = ndk_bin_dir().ok_or_else(|| {
             format!(
-                "`{LINKER}` is not on PATH and ANDROID_NDK_HOME is not set; install the NDK \
-                 pinned in .cargo/config.toml"
+                "`{LINKER}` is not on PATH and ANDROID_NDK_HOME is not set; configure an NDK with the API 31 driver"
             )
         })?;
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -451,49 +410,6 @@ fn git_provenance(root: &Path) -> Result<String, String> {
 fn valid_provenance(value: &str) -> bool {
     let commit = value.strip_suffix("-dirty").unwrap_or(value);
     (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// Fetch and verify the exact upstream tree used to build the pinned binary.
-/// The archive includes upstream's Makefile, release scripts, `go.mod` and
-/// `go.sum`, satisfying the build-script/dependency-source part of §9.7.
-fn corresponding_source(root: &Path) -> Result<(PathBuf, [u8; 32]), String> {
-    let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
-        .parse()
-        .map_err(|error| format!("parse engine.lock: {error}"))?;
-    let version = lock_str(&lock, "version")?;
-    let commit = lock_str(&lock, "upstream_commit")?;
-    let url = lock_str(&lock, "source_archive_url")?;
-    if !url.contains(commit) {
-        return Err("engine.lock source_archive_url does not contain upstream_commit".into());
-    }
-    let name = format!("sing-box-v{version}-source.tar.gz");
-    let cache = util::target_dir(root)?.join("xtask/source").join(&name);
-    if !cache.is_file() {
-        if let Some(parent) = cache.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
-        }
-        let partial = cache.with_extension("partial");
-        util::run(
-            Command::new("curl")
-                .arg("-fsSL")
-                .arg("--retry")
-                .arg("3")
-                .arg("-o")
-                .arg(&partial)
-                .arg(url),
-            "Corresponding Source download",
-        )?;
-        std::fs::rename(&partial, &cache)
-            .map_err(|error| format!("rename source download: {error}"))?;
-    }
-    let bytes = util::read_bytes(&cache)?;
-    check_pin(&lock, "source_archive", &bytes)?;
-    let destination = root.join("dist").join(&name);
-    util::write_bytes(&destination, &bytes)?;
-    let digest = sha256::digest(&bytes);
-    println!("release: sing-box {version} Corresponding Source verified at commit {commit}");
-    Ok((destination, digest))
 }
 
 /// The first `clang` on PATH that is not part of an NDK toolchain. NDK bin
@@ -591,8 +507,9 @@ fn validate_webroot_shape(root: &Path) -> Result<(), String> {
 fn collect_entries(
     root: &Path,
     module_prop: &str,
-    engine: &Engine,
+    engine: &engine_release::Artifact,
     fluxd: &Path,
+    build_info: &[u8],
 ) -> Result<Vec<zip::Entry>, String> {
     let text = |rel: &str| -> Result<Vec<u8>, String> {
         Ok(util::normalize_lf(&util::read_bytes(&root.join(rel))?))
@@ -627,7 +544,7 @@ fn collect_entries(
         0o644,
         text("module/template.json")?,
     );
-    push("engine.lock", 0o644, text("engine.lock")?);
+    push("build-info.toml", 0o644, build_info.to_vec());
     push("LICENSE", 0o644, text("LICENSE")?);
     push(
         "THIRD_PARTY_NOTICES.md",
@@ -651,8 +568,7 @@ fn collect_entries(
 /// `Cargo.lock` so it cannot drift from what was actually built. License
 /// terms are audited by `cargo deny` against `deny.toml` in CI.
 fn dependencies_md(root: &Path) -> Result<String, String> {
-    let lock: toml::Value = util::read_text(&root.join("Cargo.lock"))?
-        .parse()
+    let lock: toml::Value = toml::from_str(&util::read_text(&root.join("Cargo.lock"))?)
         .map_err(|e| format!("parse Cargo.lock: {e}"))?;
     let mut rows: Vec<(String, String)> = lock
         .get("package")
@@ -896,57 +812,16 @@ fn fakeip_sources(user: &flux_core::engine_config::Value) -> Vec<&flux_core::eng
 
 pub fn template_check() -> Result<(), String> {
     let root = util::repo_root();
-    let lock: toml::Value = util::read_text(&root.join("engine.lock"))?
-        .parse()
-        .map_err(|e| format!("parse engine.lock: {e}"))?;
-    let version = lock_str(&lock, "version")?;
-    let url = lock_str(&lock, "check_archive_url")?;
-    let binary_in_archive = lock_str(&lock, "check_binary_path_in_archive")?;
-    if !url.contains(version) || !binary_in_archive.contains(version) {
-        return Err("engine.lock host-check asset does not match engine version".into());
-    }
+    let release = engine_release::Release::resolve()?;
+    let cache = util::target_dir(&root)?
+        .join("xtask/engine")
+        .join(&release.tag);
+    let host = release.host.acquire(&cache)?;
+    check_template_with_binary(&root, &host.binary, &release.version)
+}
 
-    let cache = util::target_dir(&root)?.join("xtask/engine-check");
-    std::fs::create_dir_all(&cache).map_err(|e| format!("create {}: {e}", cache.display()))?;
-    let archive = cache.join(
-        url.rsplit('/')
-            .next()
-            .expect("URL has at least one path component"),
-    );
-    if !archive.is_file() {
-        let partial = cache.join("download.partial");
-        util::run(
-            Command::new("curl")
-                .arg("-fsSL")
-                .arg("--retry")
-                .arg("3")
-                .arg("-o")
-                .arg(&partial)
-                .arg(url),
-            "template-check engine download",
-        )?;
-        std::fs::rename(&partial, &archive).map_err(|e| format!("rename download: {e}"))?;
-    }
-    let archive_bytes = util::read_bytes(&archive)?;
-    check_pin(&lock, "check_archive", &archive_bytes)?;
-
-    let extract = cache.join("extract");
-    let binary = extract.join(binary_in_archive);
-    if !binary.is_file() {
-        std::fs::create_dir_all(&extract)
-            .map_err(|e| format!("create {}: {e}", extract.display()))?;
-        util::run(
-            Command::new("tar")
-                .arg("-xzf")
-                .arg(&archive)
-                .arg("-C")
-                .arg(&extract)
-                .arg(binary_in_archive),
-            "template-check engine extraction",
-        )?;
-    }
-    check_pin(&lock, "check_binary", &util::read_bytes(&binary)?)?;
-
+fn check_template_with_binary(root: &Path, binary: &Path, version: &str) -> Result<(), String> {
+    let cache = util::work_dir(&util::target_dir(root)?.join("xtask"), "template-check")?;
     let template = util::read_text(&root.join("module/template.json"))?;
     validate_default_template_shape(&template)?;
     let user = flux_core::engine_config::parse_jsonc(&template)
@@ -986,7 +861,7 @@ pub fn template_check() -> Result<(), String> {
         .map_err(|e| format!("build default effective config: {e:?}"))?;
     let config = cache.join("effective-default.json");
     util::write_bytes(&config, effective.to_string().as_bytes())?;
-    let output = Command::new(&binary)
+    let output = Command::new(binary)
         .arg("check")
         .arg("-c")
         .arg(&config)
@@ -1090,26 +965,11 @@ mod tests {
     }
 
     #[test]
-    fn source_lock_is_tied_to_the_pinned_upstream_commit() {
-        let root = util::repo_root();
-        let lock: toml::Value = util::read_text(&root.join("engine.lock"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        let commit = lock_str(&lock, "upstream_commit").unwrap();
-        let url = lock_str(&lock, "source_archive_url").unwrap();
-        let digest = lock_str(&lock, "source_archive_sha256").unwrap();
-        assert_eq!(commit.len(), 40);
-        assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(url.contains(commit));
-        assert_eq!(digest.len(), 64);
-        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(lock_int(&lock, "source_archive_size").unwrap() > 0);
-    }
-
-    #[test]
     fn release_refuses_a_tag_that_is_not_the_workspace_version() {
         let error = release("v999.0.0").unwrap_err();
-        assert!(error.contains("does not equal workspace version tag"));
+        assert!(
+            error.contains("does not equal workspace version tag"),
+            "{error}"
+        );
     }
 }

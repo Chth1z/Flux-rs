@@ -30,11 +30,7 @@
 
 ### 17.0.2 现行合同与当前实现的差距
 
-| 合同 | 当前实施项 | 验收证据 |
-|---|---|---|
-| §9.7、§13.4 | 解除依赖版本固定，构建记录替代 engine.lock | 最新稳定版解析、原始模板检查、两次干净打包 |
-
-节点输入已提交 `1022e63`，刷新计划与订阅模块职责修正见 §0.6.10；相关软件回归已通过。版本构建实现仍在进行。
+本轮确认的实现缺口已处理。节点输入已提交 `1022e63`，刷新计划与订阅模块职责修正见 §0.6.10；版本解析、构建记录和网络设计见 §0.6.11。剩余工作是候选的构建复验、所有者审核与设备验收，状态集中在下表。
 
 校园网当前只有所有者提供的现象：**关闭 Flux 可联网，开启 Flux 不可联网**。没有现场日志或可用测试环境，不能把协议限制、DNS、认证或接口接管中的任何一个写成已确认根因。当前只修复独立复现的缺陷、澄清机制边界并准备分层复验。
 
@@ -46,7 +42,7 @@
 |---|---|---|
 | 1、6：真实引擎原目的地址 | 旧构建有 Phase 0–6 记录 | 对候选 ZIP 重跑双栈 TCP/UDP 设备断言 |
 | 2：仓库结构 | 三个 crate；BPF loader、netlink、engine、reactor 各有明确所有权 | 审核本次模块调整 |
-| 3：官方引擎来源 | 前一批验证记录见 §0.6.8；本轮改为解析最新稳定版 | 版本策略实现后重新打包，验证实际资产和构建记录 |
+| 3：官方引擎来源 | 实际解析 1.14.1，官方 host 检查与 Android 单次打包通过，生成 build-info.toml | 从干净提交复验双构建与对应源码归档 |
 | 4：页大小 | 4 KiB 产品边界保留；fluxd 四个 LOAD 段要求 ≥ 0x4000 | 正式发布说明由所有者审核 |
 | 5：未选 UID 热路径 | BPF 源码未改；UID helper + HASH miss 先于解析和 control 读取 | 候选真机短时 sanity check |
 | 7：故障与已准入流 | Linux 引擎回滚/崩溃恢复场景通过；不替代 BPF 实测 | 重跑 Phase 6–7 |
@@ -56,7 +52,7 @@
 | 11：可复现打包 | `/tmp` 下两个独立目标目录完整构建，ZIP 字节一致 | 哈希与范围见 §0.6.8；提升版本后复跑 |
 | 12：DNS 精度 | 历史 Q9 记录可查 | 候选验证被选与未选应用的系统 DNS |
 | 13：用户边界说明 | 首次启用由现有事务完成验证，`check` 用于诊断；控制面板告警已与合同对齐 | 所有者审核对外表述 |
-| 14：实现差距 | 新要求正在实施，见 §17.0.2 | 清空已确认实现缺口后进入最终审核 |
+| 14：实现差距 | 本轮确认的实现缺口已处理，见 §17.0.2 | 所有者审核最终分支与验收范围 |
 
 其余软件门禁以 §0.6.8 记录的当次结果为准。**WSL 本地通过不等于远端 CI 已通过；旧设备记录不等于这个候选已通过。**
 
@@ -137,7 +133,7 @@
 | 工具 | 回答什么 | 何时重跑 |
 |---|---|---|
 | `q1-run-device.sh` | SK_STORAGE 首次决策语义 | 改 §7.3 算法后 |
-| `q2-run-device.sh` | listener 4 socket / lookup / **assign 成功** | **每次 engine 版本升级**（§9.2 要求） |
+| `q2-run-device.sh` | listener 4 socket / lookup / **assign 成功** | 候选发布验收；TProxy/listener 行为或设备环境改变后（§9.2） |
 | `q9-run-device.sh` | per-app DNS 归属（D18） | 换设备 / 换 Android 版本后 |
 | `q10-run.sh` | 厂商 filter 是否遮挡 | 换设备后 |
 | `q6-veth-observe.sh` | egress 基线 / OEM 链 / sysctl 起点 / veth 生命周期 | 换设备后，以及阶段 3 的 Q8 |
@@ -150,17 +146,17 @@
 
 ## 17.4 阶段 1 — `flux-core` 纯逻辑（**已完成**）
 
-**交付物**：`flux-core` 的全部纯逻辑 + 单测；`xtask`（`abi-check`、`package`）；module staging；版本与 engine pin 校验。
+**交付物**：`flux-core` 的全部纯逻辑 + 单测；`xtask`（`abi-check`、`package`）；module staging；官方资产来源校验与实际构建记录。
 
-**必读**：`../spec/blueprint.md` §5（crate 结构）、§6（BPF ABI）、§15.2（必须保留的八个逻辑测试）、`engine.lock`。
+**必读**：`../spec/blueprint.md` §5（crate 结构）、§6（BPF ABI）、§9.7（上游解析与构建证据）、§15.2（必须保留的八个逻辑测试）。
 
 **退出条件**：
 
 1. **在 Windows 上** `cargo test -p flux-core` 全绿。这条是硬要求：`flux-core` 不得有任何 I/O 或平台依赖，否则后面所有逻辑就只能在设备上调。
 2. §15.2 的八个逻辑测试全部存在且通过。
 3. `cargo xtask abi-check` **真正实现并通过**：用 clang 算出 `flux_abi.h` 各结构的偏移，与 `abi.rs` 的镜像逐字段比对。CI 里那行 `continue-on-error: true` **已按本条删除**，workflow 中不再有任何 `continue-on-error`。
-4. `cargo xtask package` 连续两次 clean build 产出的 hash 一致（可复现构建）。
-5. `xtask` 校验 `engine.lock` 的两个 sha256 与 size；任一不匹配就拒绝打包。**这条已经手工验证过一次**：2026-08-26 下载 v1.13.19 的 asset，archive 与 binary 两个 digest 与 `engine.lock` 逐字相符（§16.10）。`xtask` 要做的是把它自动化。
+4. `cargo xtask verify-package` 在一次上游解析和同一工具链下完成两次 clean build，产出的 ZIP hash 一致（可复现构建）。
+5. `xtask` 根据官方发布元数据验证实际下载的 archive size 与 SHA-256，原样提取引擎，并在 `build-info.toml` 记录版本、源码提交、archive/binary 摘要与工具链。该记录不决定下次构建使用什么版本。早期固定资产的验证保留在 §16.10。
 6. `cargo xtask doc-check` 实现并接入 CI，至少覆盖以下机械检查：`docs/index.md` 的章节映射指向的文件确实存在且真有那个标题；`docs/**` 内部的相对链接可解析；**每个被引用的标识符（`§N`、`PHIL-N`、`GOV-N`、`AUTH-N`）真实存在，且蓝图之外的文档不占用 `§`**；`flux_abi.h` 的 `FLUX_SEC_*` 与 `abi.rs` 的 `SEC_*` 一字不差且都在实测可用集内（§16.8.2）；`../history/review-log.md` 的推翻编号连续且与蓝图声称的总数一致。
 
    第六项：`DN` / `CN` 的状态登记与文档实际定义的集合**双向相等**，状态取自固定词表，`superseded` 必须写明取代者。

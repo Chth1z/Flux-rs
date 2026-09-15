@@ -19,16 +19,16 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@main
 
       # The toolchain, including its components and the aarch64-linux-android
-      # target, is pinned by rust-toolchain.toml.
+      # target, follows stable through rust-toolchain.toml.
       - name: Show toolchain
         run: |
           rustc --version
           cargo --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@master
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -46,6 +46,8 @@ jobs:
         run: cargo xtask doc-check
 
       - name: Official sing-box template check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: cargo xtask template-check
 
   # The host-safe half of the R091-15 gate matrix. flux-core is contractually
@@ -58,8 +60,8 @@ jobs:
     name: host-safe gate on Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@main
+      - uses: Swatinem/rust-cache@master
       - name: Test pure logic
         run: cargo test -p flux-core
       - name: Test packaging logic
@@ -73,7 +75,7 @@ jobs:
     name: bpf object
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@main
 
       - name: Install clang and BPF headers
         run: |
@@ -84,7 +86,7 @@ jobs:
           # the conventional compatibility link.
           sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@master
 
       # Compile the real embedded object and exercise its loader contract.
       # Kernel loading and attachment still require the verifier/device suites.
@@ -106,15 +108,18 @@ jobs:
         run: cargo xtask btf-check
 
       # Ubuntu's /usr/sbin/bpftool shim refuses to run when the hosted runner's
-      # Azure kernel is newer than the linux-tools archive. Build one pinned
-      # release instead. The shallow clone must include libbpf's submodule;
+      # Azure kernel is newer than the linux-tools archive. Resolve the current
+      # stable upstream release once for this job. The shallow clone must include libbpf's submodule;
       # omitting it was the reason the earlier phase-3 CI repair still failed.
       - name: Install bpftool
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           sudo apt-get install -y build-essential libelf-dev zlib1g-dev libcap-dev
           BPFTMP=$(mktemp -d)
-          git clone --depth 1 --branch v7.5.0 --recurse-submodules --shallow-submodules \
+          BPFTOOL_TAG=$(gh api repos/libbpf/bpftool/releases/latest --jq .tag_name)
+          git clone --depth 1 --branch "$BPFTOOL_TAG" --recurse-submodules --shallow-submodules \
             https://github.com/libbpf/bpftool.git "$BPFTMP/bpftool"
           make -C "$BPFTMP/bpftool/src" -j"$(nproc)"
           sudo install -m 0755 "$BPFTMP/bpftool/src/bpftool" /usr/local/bin/bpftool
@@ -153,14 +158,12 @@ jobs:
     name: aarch64-linux-android
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@main
+      - uses: Swatinem/rust-cache@master
 
       - name: Set up NDK
         id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27d
+        run: sh tools/ci/setup-ndk.sh
 
       # verify-package embeds the BPF object, so this job needs the same BPF
       # build inputs as the bpf job.
@@ -177,6 +180,7 @@ jobs:
       - name: Cross build
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           command -v aarch64-linux-android31-clang
@@ -184,16 +188,17 @@ jobs:
 
       # Blueprint 13.4 / implementation.md 17.4 exit criteria 4 and 5: two
       # clean packaging runs must produce byte-identical archives, with the
-      # engine pin verified against engine.lock on every run.
+      # one resolved upstream release shared by both builds and their host check.
       - name: Reproducible package
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          GH_TOKEN: ${{ github.token }}
         run: cargo xtask verify-package
 
       # A short-lived CI artifact is for device acceptance only. It is not a
       # release channel; signed v* tags are published by release.yml.
       - name: Upload device-acceptance package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@main
         with:
           name: flux-rs-module-${{ github.sha }}
           path: |
@@ -206,8 +211,8 @@ jobs:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@main
+      - uses: EmbarkStudios/cargo-deny-action@main
         with:
           command: check
 
@@ -215,13 +220,13 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@main
       - name: Check module scripts
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
           # Module scripts run under BusyBox ash, so target sh, not bash.
-          shellcheck --shell=sh --severity=warning module/*.sh
+          shellcheck --shell=sh --severity=warning module/*.sh tools/ci/*.sh
 
       - name: Module lifecycle contract
         run: sh tools/phase8/module_lifecycle_test.sh

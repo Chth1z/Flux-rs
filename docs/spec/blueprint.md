@@ -1007,10 +1007,47 @@ When an app binds explicitly to Wi-Fi or cellular through the Android API, its
 original packet may be captured on the corresponding underlay. But the sing-box
 outbound is a new socket in a root process and **does not inherit** the app's
 netId, VPN protection or per-flow network identity. Flux uses whatever network
-Android selects for that root socket. Users who need control have the official
-sing-box outbound options — `bind_interface`, `routing_mark`,
-`network_strategy` — and own the consequences. **Flux does not claim to preserve
+Android selects for that root socket. Users who need explicit control can use
+the official CLI's outbound `bind_interface` or `routing_mark` and own the
+consequences. `network_strategy` depends on the Android/Apple graphical
+client's platform interface; it is not an automatic network bridge for the
+bare CLI Flux runs. **Flux does not claim to preserve
 the app's Android network selection.**
+
+The platform dependency is explicit in the
+[`network_strategy` documentation](https://sing-box.sagernet.org/configuration/shared/dial/#network_strategy)
+and in official 1.14.1's
+[`common/dialer/default.go`](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/common/dialer/default.go#L99-L124).
+
+### 3.6.1 Campus and captive networks
+
+Admission readiness, Android network validation, and remote service
+reachability are separate facts. `Active` means Flux has established its local
+capture and listener path; it MUST NOT be described as proof that a proxy
+server, DNS server or Internet endpoint is reachable. A route event does not
+prove captive authentication has completed, nor does authentication guarantee
+a new route event (§29.4).
+
+Android's captive portal UI may bind itself to the network being authenticated.
+Capturing that app and replacing its connection with an engine outbound can
+change this identity as described above. When preserving the original Android
+network context is required, the user excludes that app from UID selection or
+uses the existing destination bypass. A sing-box `DIRECT` outbound still
+creates a new root-owned connection; it is not equivalent to leaving the
+original packet uncaptured.
+
+DNS and service routing remain the user's sing-box policy. A rule matching the
+original DNS server's destination can forward DNS before `hijack-dns`;
+matching the DNS question's domain belongs in `dns.rules` with an explicit
+resolver. For the Android bare CLI, `type: local` does not imply access to the
+network's Android DNS configuration. Private destinations already excluded by
+the fixed bypass never reach these engine rules.
+
+Flux adds no captive-network mode, gateway polling or automatic proxy bypass.
+The existing SSID pause expresses an explicit user policy, not a diagnosis or
+an automatic authentication detector. Protocol choice and upstream routing
+stay in the template. The source evidence and limits are collected in the
+[network reference research](../history/network-reference-research-2026-09-15.md).
 
 ## 3.7 GKI, OEM, SELinux and root managers
 
@@ -2485,6 +2522,15 @@ fixed bypass as `RESERVED` (D16, §6.1.1).
 **Verified:** before 6.5, `bpf_sk_assign()` returns `-ESOCKTNOSUPPORT` for a socket whose `sk->sk_reuseport` is set.
 
 - **`SO_REUSEPORT` has zero hits across the whole `SagerNet/sing-box@v1.13.19` tree**, re-checked with `rg` inside `clone/` (`../history/review-log.md` §0.5.1). The constraint holds.
+- **Official 1.14.1 listener-path review:** Flux's four injected fields leave
+  optional interface, mark and reuse settings absent. TCP and UDP both call
+  `redir.TProxy`; it sets `SO_REUSEADDR`, transparent socket options and, for
+  UDP, original-destination ancillary data. These reviewed paths do not set
+  `SO_REUSEPORT`. See
+  [`listener_tcp.go:22–74`](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/common/listener/listener_tcp.go#L22-L74),
+  [`listener_udp.go:23–54`](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/common/listener/listener_udp.go#L23-L54)
+  and [`tproxy_linux.go:14–30`](https://github.com/SagerNet/sing-box/blob/1ac1a339cb1223e9c70eae14c44411c75033c02d/common/redir/tproxy_linux.go#L14-L30).
+  This is a source review of the listener path, not an Android execution result.
 - The exact kernel boundary was checked: v6.1's `bpf_sk_assign()` contains `if (unlikely(sk_fullsock(sk) && sk->sk_reuseport)) return -ESOCKTNOSUPPORT;` (`net/core/filter.c:7167-7186`), and v6.6 and v6.12 replace that line with `if (sk_unhashed(sk)) return -EOPNOTSUPP;`. **GKI 5.10, 5.15 and 6.1 all fall on the older side.**
 - **Before 6.5 there is also no rejection of an unhashed socket**, so an assign
   landing in the instant a listener has just been unhashed **leaks a socket
@@ -2497,7 +2543,10 @@ fixed bypass as `RESERVED` (D16, §6.1.1).
   accepted**; no mechanism is added for it.
 - `redir.TProxy()` sets `SO_REUSEADDR` unconditionally (`common/redir/tproxy_linux.go:16`), which has nothing to do with `bpf_sk_assign`. Not injecting `reuse_addr` therefore keeps the generated JSON minimal without changing socket behaviour.
 - User JSON MUST NOT be allowed to influence these two internal inbounds.
-- Phase 0 still takes an actually successful assign as the final proof (§16, Q2), and **the zero-hit finding MUST be re-checked whenever the engine version is raised** — it is a property of a specific release, not of sing-box.
+- Phase 0 still takes an actually successful assign as the final proof (§16,
+  Q2). Every selected upstream release must satisfy these socket behaviour
+  requirements; source findings apply only to the revision reviewed. Version
+  numbers do not replace the real engine/device assertions.
 
 ## 9.3 Hard constraint: the listener carries no mark and no bind_interface
 
@@ -2603,13 +2652,14 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | Module | Input and ownership | Guarantee visible to its caller |
 |---|---|---|
 | `flux-core/config.rs`, `selector.rs`, `cidr.rs` | User configuration and package text become validated selections and prefix sets | Pure computation; root appId is excluded; the configured modes, shared UIDs and hard capacities retain the semantics of §1.4 and §11.2 |
-| `flux-core/subscription.rs`, `engine_config.rs` | Raw provider bytes and a user template become refined nodes and a generated candidate | No I/O; generation changes only the permitted fields (§28.2); inbound injection owns the two listener tuples (§9.1) |
+| `flux-core/subscription.rs`, `engine_config.rs` | Parsed manual nodes and optional provider bytes form one node pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); inbound injection owns the two listener tuples (§9.1) |
 | `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
 | `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness verifies all four sockets; child exit is confirmed before a replacement starts (§9.4) |
-| `fluxd/subscription.rs` | One immutable fetch request in a blocking worker; one result returned by channel/eventfd | The worker cannot mutate reactor state, cache files or a generation; the reactor validates the current authority when consuming completion (§28.6) |
+| `fluxd/subscription.rs` | One immutable worker request/result and selection of a pending response or accepted URL-bound snapshot | The worker cannot mutate reactor state, cache files or a generation; a matching pending response takes precedence over disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
 | `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
+| `fluxd/layout.rs` | State paths and bounded file operations | Callers share filesystem operations without depending on a diagnostic command |
 
 No module outside the reactor may write its mutable state. Immutable request
 and completion values cross the subscription seam; kernel and child resources
@@ -2709,7 +2759,7 @@ Why the window is safe: adding before subtracting means that during it the polic
 | Path | What it is authoritative for | On failure |
 |---|---|---|
 | `/data/adb/modules/flux_rs/disable` | The only persistent switch: **present means disabled, absent means enabled** (C9, §27.1.1). It lives in the **module** directory, owned by the manager, and is watched by the existing inotify source so a toggle takes effect during the current boot | Existence is the whole signal; the contents are never read |
-| `config/flux.toml` | app selection, CIDR policy, interface and SSID dimensions, subscription parameters | invalid at cold start means Direct; invalid on reload keeps the current policy |
+| `config/flux.toml` and its referenced list files | app selection, CIDR policy, interface and SSID dimensions, manual nodes and subscription parameters | invalid at cold start means Direct; invalid on reload keeps the current policy |
 | `config/template.json` | the user-owned engine template (§28.1) | invalid at cold start means Direct; invalid on reload keeps the current generation |
 | `run/sing-box.<generation>.json` | the immutable generated artifact for one child; at most current plus candidate exist during a transaction | Not authoritative for anything. A daemon restart deletes them precisely and rebuilds from the template |
 | `run/daemon.lock`, `run/control.sock` | single-instance enforcement and IPC | — |
@@ -3146,7 +3196,7 @@ Everything else is derived by xtask: `module.prop`'s version line, `versionCode 
 
 1. Start from an empty staging directory.
 2. Resolve dependencies without repository version pins. Rust follows `stable`; Cargo dependency requirements are open and its local `Cargo.lock` is generated, not committed. `cargo update` refreshes an existing development resolution. Use the configured NDK and a host LLVM/clang with the BPF backend, targeting `aarch64-linux-android` API 31. Keep the resolved dependencies and tools unchanged within a reproducibility run. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd. The ZIP ships one `fluxd` file and does not bundle a libc. Remap the workspace path to `/flux-rs`; embed no wall-clock value.
-3. Obtain the official engine resolved in §9.7, verify its archive and measure its ELF load alignment. Generate `build-info.toml` from these actual inputs; derive the dependency inventory from the local Cargo resolution.
+3. Obtain the official engine resolved in §9.7, verify its archive and measure its ELF load alignment. Check the generated default template with the host binary from that same resolved release. Generate `build-info.toml` from these actual inputs; derive the dependency inventory from the local Cargo resolution.
 4. Generate `module.prop`.
 5. Copy files by the allowlist, normalising line endings to LF and fixing modes.
 6. Build the ZIP with a fixed entry order, `SOURCE_DATE_EPOCH`, and no extra attributes.

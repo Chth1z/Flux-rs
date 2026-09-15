@@ -61,7 +61,7 @@ install_module() {
 	for payload in module.prop customize.sh service.sh uninstall.sh \
 		webroot/index.html \
 		bin/fluxd bin/sing-box etc/default-flux.toml \
-		etc/default-template.json engine.lock LICENSE \
+		etc/default-template.json build-info.toml LICENSE \
 		THIRD_PARTY_NOTICES.md licenses/sing-box-LICENSE \
 		licenses/DEPENDENCIES.md; do
 		echo payload >"$dest/$payload"

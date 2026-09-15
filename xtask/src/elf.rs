@@ -1,8 +1,8 @@
 //! Just enough ELF64 to read `PT_LOAD` alignments.
 //!
 //! Packaging needs two facts (blueprint §13.4): every `LOAD` segment of
-//! `fluxd` has `p_align >= 0x4000` (16 KiB base-page devices), and the pinned
-//! official sing-box is still exactly `0x1000` as recorded in `engine.lock`.
+//! `fluxd` has `p_align >= 0x4000` (16 KiB base-page devices), and the
+//! official sing-box load alignment is measured for generated build evidence.
 
 const PT_LOAD: u32 = 1;
 

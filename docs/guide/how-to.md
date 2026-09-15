@@ -99,7 +99,7 @@ interval = 86400
 
 只用手工节点时，省略 `[subscription]` 或保持 `url = ""`。`interval = 0` 关闭定时刷新；`fluxd subscribe` 仍可手动抓取，失败后的网络恢复事件也可触发重试。非零刷新计划不会因为一次失败而消失。
 
-**原来的 `outbounds` 菜单保持原样。** 节点名称匹配地区时会进入对应空分组，例如 `US-LA-hy2`。没有地区标识的名字照常保留；你可以在现有菜单里显式引用它，或者自行增加空 `AUTO` 分组接收全部节点。`nodes_unreferenced` 表示节点已加入配置，但没有分组引用它，不会替你改名或重排菜单。
+**原来的 `outbounds` 菜单保持原样。** 节点名称匹配地区时会进入对应空分组，例如 `US-LA-hy2`。只添加这个节点时，在面板的 `PROXY` 菜单选择 `US`；没有匹配节点的地区仍按现有规则显示 `DIRECT`。没有地区标识的名字照常保留；你可以在现有菜单里显式引用它，或者自行增加空 `AUTO` 分组接收全部节点。`nodes_unreferenced` 表示节点已加入配置，但没有分组引用它，不会替你改名或重排菜单。
 
 手工节点不会经过机场公告过滤、改名或截断。Hysteria2 的 userinfo 会完整解码，`hy2://` 也可用。转换器无法准确表达的参数会明确报错，例如当前未实现的 VLESS 非 `none` 加密、未知传输，以及 Hysteria2 的 `pinSHA256`、`mport`；不会静默删掉后继续。引擎新特性也可以直接使用原生 sing-box JSON 配置，最终由实际安装的官方引擎检查。
 
@@ -123,5 +123,7 @@ rename = [{ match = "旧名称", replace = "新名称" }]
 更新永远先过官方 `sing-box check` 才部署，不过就保留当前配置并报错——订阅更新不会把你的网络搞没。
 
 要用外部控制面板，就在模板里启用 `clash_api`。建议控制器监听回环且 secret 非空；Flux 会对不符合这两项的配置给出告警。管理器里那个按钮会跳过去，URL 自带 secret。
+
+开启后在校园网无法联网，或希望借鉴 Clash-Config 的 DNS、分流策略时，见 [`校园网排查与参考配置适配`](network-policy.md)。
 
 哪些能力现在还没有、计划在后续版本做，以 [`../history/rejected-and-deferred.md`](../history/rejected-and-deferred.md) §21.0 的状态登记为准。

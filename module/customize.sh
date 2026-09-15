@@ -32,7 +32,7 @@ for payload in \
 	bin/sing-box \
 	etc/default-flux.toml \
 	etc/default-template.json \
-	engine.lock \
+	build-info.toml \
 	LICENSE \
 	THIRD_PARTY_NOTICES.md \
 	licenses/sing-box-LICENSE \

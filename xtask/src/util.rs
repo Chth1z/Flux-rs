@@ -27,7 +27,6 @@ pub fn target_dir(root: &Path) -> Result<PathBuf, String> {
         "--no-deps",
         "--format-version",
         "1",
-        "--locked",
     ]))
 }
 

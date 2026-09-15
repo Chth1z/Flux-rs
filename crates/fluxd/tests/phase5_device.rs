@@ -358,10 +358,7 @@ fn run_host_rawip() {
 fn drive_liveness(manager: &mut dataplane::Manager) {
     let mut seen = BTreeSet::new();
     let mut progress = manager.begin_attachment().expect("begin TC attachment");
-    loop {
-        let dataplane::AttachmentProgress::Wait(delay) = progress else {
-            break;
-        };
+    while let dataplane::AttachmentProgress::Wait(delay) = progress {
         let ifname = current_verify_iface(manager).expect("one verification filter is attached");
         let before = manager
             .counter_for_test(Counter::SawPacket)

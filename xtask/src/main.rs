@@ -10,14 +10,15 @@
 //!   paths from the working tree.
 //! * Two consecutive packaging runs must produce byte-identical archives.
 //! * Every `LOAD` segment of `fluxd` must have `p_align >= 0x4000` so the
-//!   module works on 16 KiB base-page devices; the pinned official sing-box is
-//!   still `0x1000` and is checked against `engine.lock` rather than rebuilt.
+//!   module works on 16 KiB base-page devices; official sing-box alignment is
+//!   measured from the resolved official asset, which is never rebuilt.
 
 mod abi_check;
 mod btf_check;
 mod cdefs;
 mod doc_check;
 mod elf;
+mod engine_release;
 mod fidelity;
 mod package;
 mod sha256;
@@ -53,7 +54,7 @@ TASKS:
     ci             fmt --check, clippy -D warnings, test, deny, doc-check
     abi-check      clang-computed flux_abi.h layout vs the flux-core::abi mirror
     btf-check      clang .BTF flux_decision layout vs the hand-written blob
-    template-check pinned official sing-box validates the shipped default template
+    template-check latest official sing-box validates the shipped default template
     doc-check      the mechanical documentation checks (implementation.md \u{a7}17.4)
     fidelity A B   what a re-issue of a document dropped: citations, cross-refs,
                    identifiers, constants

@@ -48,7 +48,7 @@
 
 | crate | 内容 | 约束 |
 |---|---|---|
-| `flux-core` | 配置、selector、CIDR、ABI 镜像、wire 类型、版本算术、订阅解析与精修、SSID 判定 | 无 `libc`、无系统调用、`unsafe` 禁止。测试在任何主机上跑 |
+| `flux-core` | 配置、selector、CIDR、ABI 镜像、wire 类型、版本算术、节点解析/组装、订阅精修、SSID 判定 | 无 `libc`、无系统调用、`unsafe` 禁止。测试在任何主机上跑 |
 | `fluxd` | reactor、netlink、BPF 加载器、网络对象、引擎监督、监督进程 | 唯一碰内核的 crate |
 | `xtask` | 构建、打包、发布、文档机检 | 只在开发主机上跑，不发布 |
 
@@ -57,6 +57,26 @@
 两条内部边界是承重的，继承自旧仓库的过度设计审查：原始 netlink 报文的构造只在 `fluxd/src/netlink/`，原始 `bpf(2)` 只在 `fluxd/src/bpf/`。调用方看到的是 `create_veth`、`add_rule`、`attach_filter`、`publish_control`，从来不是 `nlmsghdr`。
 
 模块接口与状态归属见蓝图 §10.2；不为单一实现引入公开 trait。加载器自己执行内核前置检查，所以 `fluxd check`、守护进程和设备测试走同一条规则。时间格式化由日志和诊断共用的 `time` 模块提供，诊断代码不再反向依赖 reactor。
+
+## 节点来源共享一条生成路径
+
+```mermaid
+flowchart LR
+    M[手工 URI 解析并保留名称] --> P[节点池]
+    R[当前 URL 的可用订阅快照] --> F[订阅名称整理]
+    F --> P
+    T[用户原始模板] --> G[填充空组并追加节点]
+    P --> G
+    G --> C[官方引擎检查同一候选文件]
+    C --> E[引擎启动与监听就绪]
+    E --> A[现有换代事务]
+```
+
+手工节点不需要伪装成订阅；远端订阅缺失时，节点池可以只有手工输入。两种来源都没有自己的“备用启动流程”。模板的非空菜单不变，地区规则只填空组；无地区节点由用户决定怎样引用。
+
+`subscription` 负责数据来源和错误分类，`layout` 提供共享文件操作，`checks` 与 reactor 都调用这些能力。已到达的新响应先于旧缓存，旧文件读取失败不会挡住新输入；缓存仍只能归属当前 URL。
+
+抓取参数和名称整理分别位于 `[subscription]`、`[subscription.refine]`。这是两种职责，不是两档产品模式。配置文件引用复用已有 `@file`，保存事件复用 `config/` 的 inotify，没有新增 watcher。
 
 ## 两个进程
 
@@ -82,3 +102,5 @@ reactor 是单线程 epoll，没有周期性轮询。事件源：rtnetlink、ino
 三个顶层状态：`Disabled`、`Inactive`、`Active`。进入 `Active` 的唯一途径是在引擎就绪、且至少一个物理捕获接口完成存活验证之后，做一次 `control_root` map-in-map 的指针切换；离开它的第一个动作永远是发布 `active = 0`。连着 `[ssid]` 列出的 Wi-Fi 时，Flux 走的就是开关关掉时那一次转移——停引擎、留对象、等事件——只是状态报 `Inactive` 并说明原因（§29.5）。
 
 一个容易搞错、搞错代价很大的区分：**捕获侧漂移是日常，核心漂移不是。** netd 在接口离开网络时会删掉物理接口的 `clsact` qdisc，我们的 filter 随之消失。Flux 只把那个接口从覆盖里拿掉，等 netd 重建 `clsact`，然后重跑逐接口 admission。别的捕获接口还在时，全局 `active` 不动；最后一个活跃接口消失时才发布 inactive，就绪的引擎可以留着等。Flux 从不创建物理接口的 `clsact`。把每一次单接口漂移都升级成全局事务，会让每次 Wi-Fi 重连都让无关的代理流闪断一下。见 `../spec/blueprint.md` §8.5.1，以及 §8.5、§10.1。
+
+**定时计划也有唯一来源。** 用户配置派生出订阅刷新计划，timer 直接执行这份计划；抓取失败不取消计划，重设间隔不回读旧策略。路由恢复可额外触发一次抓取，但路由状态不等于校园认证或互联网可达性。`Active` 只描述本地机制就绪；网络策略与可达性证据见 [`network-policy.md`](network-policy.md)。

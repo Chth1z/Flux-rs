@@ -2,7 +2,6 @@
 name = "flux-core"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure logic for Flux-rs: config, selectors, CIDR, ABI mirror. No libc, no syscalls, testable on any host."

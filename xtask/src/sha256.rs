@@ -1,7 +1,7 @@
 //! SHA-256 (FIPS 180-4), implemented by hand.
 //!
 //! Hand-rolled on purpose: `xtask` needs exactly one digest primitive for the
-//! engine pin and the reproducibility hash, and pulling a crypto crate into
+//! engine asset verification and the reproducibility hash, and pulling a crypto crate into
 //! the workspace for that would be a dependency-list change (governance §1.2).
 //! Correctness is anchored by the standard test vectors below.
 
@@ -86,7 +86,7 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Lowercase hex rendering, the format used by `engine.lock` and `SHA256SUMS`.
+/// Lowercase hex rendering, the format used by build evidence and `SHA256SUMS`.
 pub fn hex(digest: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for b in digest {

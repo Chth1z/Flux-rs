@@ -1,7 +1,7 @@
 //! sing-box supervision: effective config, `check`, spawn, readiness, the
 //! §9.4 candidate switch and graceful stop.
 //!
-//! The engine is the **unmodified official asset** pinned by `engine.lock`;
+//! The engine is an **unmodified official release asset**, recorded in build-info.toml;
 //! Flux never patches it (blueprint §3.8, D19).
 //!
 //! Two ordering rules that are load-bearing, not style:

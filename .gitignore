@@ -1,6 +1,7 @@
 # Build output
 /target/
 /dist/
+/Cargo.lock
 
 # Local scratch. Nothing under docs/ is ignored: docs/blueprint.md is the
 # design contract and MUST be tracked. The previous repository ignored
