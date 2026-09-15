@@ -56,7 +56,7 @@
 
 两条内部边界是承重的，继承自旧仓库的过度设计审查：原始 netlink 报文的构造只在 `fluxd/src/netlink/`，原始 `bpf(2)` 只在 `fluxd/src/bpf/`。调用方看到的是 `create_veth`、`add_rule`、`attach_filter`、`publish_control`，从来不是 `nlmsghdr`。
 
-四个深模块是 policy、dataplane、engine、reactor，接口定义在蓝图 §5；不为单一实现引入公开 trait。
+模块接口与状态归属见蓝图 §10.2；不为单一实现引入公开 trait。加载器自己执行内核前置检查，所以 `fluxd check`、守护进程和设备测试走同一条规则。时间格式化由日志和诊断共用的 `time` 模块提供，诊断代码不再反向依赖 reactor。
 
 ## 两个进程
 

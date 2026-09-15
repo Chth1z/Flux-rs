@@ -532,3 +532,41 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **打包安装复验（`c6a3c6a`，同一台设备）。** `cargo xtask package` 产物 `Flux-rs-v0.9.0-arm64.zip`（sha256 `566f10c89de5…c58504fa`，provenance 干净、无 `-dirty`，`NEEDED`: `libdl.so`/`libc.so`）经 `ksud module install` 装入 `modules_update`、重启后落到 `modules/flux_rs`。`bin/fluxd` sha256 `1d99dec31946…25812c19` 与 ZIP 内一致。开机 Active；两轮 `svc wifi disable` 切回蜂窝：`Active` / `generation 1` / 引擎 pid 2766 全程不变，`admit_*` 与 `in_assign_*` 相等，`last_error` 空，日志里自本次开机起零条 `ESTALE` 与 `convergence blocked`（最后一条仍是修复前复现的 `04:08:23Z`）。
 
 **附带观察。** 卡死那四个小时里，日志被 652 条 `BPF fault: generation=6 … reason=1` 加同样多的 `ignored stale/repeated BPF fault` 刷到 600 KB。这不是第二个 bug：代 6 被冻结后，属于它的旧 TCP 流仍在发包，而 §7.4 规定旧代事件「只清 latch 然后忽略」，清掉的 latch 让下一个包再报一次。§7.4 承诺的是「稳态无事件风暴」，而这个状态本不该稳态存在——修复后 113 行日志里 `BPF fault` 为 0。
+
+### 0.6.8 1.0.0 候选设计与实现复核（2026-09-15，Windows / WSL）
+
+**范围与判断。** 从 `aa4715d09af0a45e68ce40123b54a6971f267ebf` 的干净工作树开始，在 `codex/v1.0.0-review` 准备本地审核改动。读取哲学、治理、作者规则、蓝图、交互合同、架构和使用指南、实施计划与历史记录，再核对纯逻辑、BPF loader、数据面收敛、引擎事务、订阅 worker、检查命令、打包和 CI 的对应实现。结论是保留 UID/TC + 官方引擎、一个 reactor 协调两个事务域的主路线；改进集中在减少重复真相和错误的职责归属。所有者在审阅过程中重申：**优雅、简洁高效，尽可能从根本上避免问题，不做层层兜底和门禁。** 这是本轮取舍依据，符合 PHIL-1、PHIL-2、PHIL-4、PHIL-6。
+
+**原说法 / 实际 / 处置。**
+
+| 项目 | 原说法或实现；实际证据 | 处置与根因 |
+|---|---|---|
+| 首次使用 | 指引要求先 `check` 通过再启用；但默认模板需要首次订阅才能填满，且 `check` 是只读命令。保存配置后要求手工 `check → reload` 也与现有 inotify 自动处理重复 | §27.5、README、指南和安装提示统一为填写配置 → 管理器启用并首次重启 → 查看状态。完整候选由已有启动事务验证；`check` 是诊断工具。消除人工前置条件，激活事务的失败语义保持不变 |
+| JSONC | 删除注释会把 `1/* comment */2` 拼成 `12`，接受 `{} /* unfinished`，并把跨行注释后的错误从第 4 行报成第 3 行；两个聚焦测试在旧实现上均失败 | 注释按原字节跨度替换为空白，保留 CR/LF 和字符串内容；未闭合块注释由 JSON 解析器拒绝。错误状态在词法转换处消除，§9.6 记录语义 |
+| 构建目录 | Cargo 按环境或配置选择输出目录，xtask 却从仓库 `target/` 取二进制并清理该目录；两次“干净构建”可能读取同一旧文件 | 由 `cargo metadata` 提供产物根，显式传给编译并从该目录读取；复现运行各用新建目录。删除旧的清理仓库交叉编译目录函数，避免猜路径和复用旧产物。真实 Cargo fixture 验证配置及环境变量两条路径；§13.4 对齐 |
+| 内核兼容性归属 | §1.6.3a 已要求避开 LPM 崩溃窗口，代码却只在 reactor 解析策略时检查；`check` 和直接调用 loader 的设备测试能绕过它。旧版本解析还会把 vendor 后缀中的数字当作补丁号 | 将既有排除规则收归 BPF loader，调用方无需记住先检查；解析版本主段，不增加型号列表或额外检查层。受影响 release 搭配空 ELF 的测试在解析/系统调用前返回原稳定错误 token；修复版本仍进入正常 ELF 解析 |
+| BPF 产物测试 | 开启 `FLUX_BUILD_BPF=1` 后，原测试断言 `flx_cap_l2` 为 992 条指令，实际为 1235；数字源自 `a648cd4` 的 Phase 4。普通测试用空占位物，BPF CI 又只 build，断言一直未执行 | 用程序名、段名、ABI 与 map 引用集合替换精确指令数；现有 BPF CI 编译步骤改为运行同一组真实产物测试。算法或编译器变化不再要求维护第二组数字；真实装载/挂载仍由相应验证器及设备测试证明 |
+| 架构文档和依赖 | §10.2 的伪 Rust 定义已经与实际字段、UID 范围和接口不同；§5 的依赖清单、单 `Runtime` 描述与订阅实现不符；bugreport 为格式化时间反向依赖 reactor | §10.2 改为模块输入、所有权和对调用方的保证，确切类型回到源文件。时间算法及原测试移到两方共用的 `time`；不引入公开 trait 或框架。§5、§14.2 按真实所有权和 worker 模型说明 |
+| 其它文档事实 | README 仍描述已不存在的 Action 开关；指南把 `clash_api` 告警写成硬要求；治理文档宣称 Windows fluxd 没有测试；§12.1 宣称 CI 锁定 clang 并比对独立 BPF 哈希，§13.4 又称不重映射路径 | 修正为实际 WebUI 跳转、告警和平台测试范围；复现限定于同一工具链，路径按既有仓库映射和新的目标映射处理。未增加跨编译器一致性承诺或测试层 |
+
+**PHIL-10 复核。** 机制仍由内部生成和拥有，用户只决定策略；新增逻辑处理外部文本和 Cargo 输出，没有把内部值交给用户维护。构建路径和类型定义各归唯一来源，日志与诊断没有反向依赖。生产侧没有新增预检阶段、周期探针或兜底重试；既有内核排除规则只有一处。清理只涉及本次独占创建的构建工作目录，内核对象删除仍依赖当前身份。没有新增运行期硬失败类别，也没有从参考项目搬入兼容层。xtask 复用工作区已有的 `serde_json`，锁文件只新增这一依赖边，没有引入新第三方包。BPF 源码与热路径未改，未把设计预算或指令数当作实测吞吐提升。
+
+**验证环境。** Windows 宿主；WSL 内核 `6.18.33.2-microsoft-standard-WSL2`，Rust/Cargo `1.93.0`，系统 clang `21.1.8`，NDK `27.3.13750724`。WSL 构建目录均在 `/tmp`；Android 构建使用 NDK linker，BPF 使用系统 clang。
+
+| 验证 | 当次结果与范围 |
+|---|---|
+| `cargo fmt --all -- --check`、`git diff --check`、UTF-8/LF/no BOM | 通过；仅规范化本轮改动文件 |
+| Windows `cargo test -p flux-core` / `-p xtask` / `-p fluxd --bin fluxd` | 104 / 34 / 8 项通过；只代表 host-safe 范围 |
+| WSL `cargo clippy --workspace --all-targets -- -D warnings` | 通过，嵌入真实 BPF 对象 |
+| WSL `cargo test --workspace` | 104 + 79 + 34 = 217 项单元测试通过；daemon_e2e 和 engine_lifecycle 全场景通过；Phase 3–7 设备用例按预期跳过 |
+| WSL `FLUX_BUILD_BPF=1 cargo test -p fluxd --bin fluxd bpf::` | 14 项通过，包含真实 ELF、map 重定位、内核排除规则与 ABI 拒绝路径 |
+| Android `cargo clippy -p fluxd --target aarch64-linux-android --all-targets -- -D warnings` | 通过，嵌入真实 BPF 对象；不是 Android 执行结果 |
+| `cargo xtask abi-check` / `btf-check` | 7 个结构、40 个字段偏移、34 个数值定义、28 个枚举成员、28 个字符串定义通过；`flux_decision` BTF size 16 与各字段偏移一致 |
+| `cargo xtask template-check` | 官方 sing-box 1.13.19 接受填充后的默认模板；未填充模板不进入引擎 |
+| shellcheck / `tools/phase8/module_lifecycle_test.sh` | 通过；以非 root WSL 用户执行时 fixture 的 `chown root` 报权限不足，因此不将此结果计作设备 root 权限或管理器安装验收 |
+| `cargo xtask doc-check` | 通过：章节、链接、引用、ABI section 名、历史编号、xtask 命令及文档路由检查 |
+| `cargo xtask verify-package` | 最终安装提示修改后重跑，两次独立完整交叉构建 ZIP 字节一致；15 个 allowlist 文件，包内安装脚本与默认配置逐字节匹配工作树 |
+
+**本地审核产物。** `dist/Flux-rs-v0.9.0-arm64.zip`，SHA-256 **`b6b1a50b29149b5d9a3c32a45d5fab5e8a32c5d11dbd14590eab16f95da4ded8`**，与 `dist/SHA256SUMS` 一致。最终两次构建目录为 `/tmp/flux-rs-v1-review/xtask/verify-package-533-0/run1` 和 `run2`，成功后由打包工具清理。官方 engine 的 archive/binary 大小和 SHA-256 均符合 `engine.lock`；4 个 LOAD 段为 `0x1000`；fluxd 的 4 个 LOAD 段均 ≥ `0x4000`。
+
+产物版本仍取现有 workspace 的 `0.9.0`；构建标识为 `aa4715d09af0a45e68ce40123b54a6971f267ebf-dirty`，代表本地待审工作树，**不是正式 1.0.0 发布物**。本轮没有运行远端 CI、设备装载/转发或三管理器真机验收，也没有重新生成对应源码发布物；旧设备记录不替代候选证据。审核与发布的剩余动作统一在 §17.0.3。

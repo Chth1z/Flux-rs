@@ -162,7 +162,7 @@ fn decision_layout(blob: &[u8]) -> Result<StructLayout, String> {
 
 pub fn run() -> Result<(), String> {
     crate::package::build_bpf()?;
-    let object_path = crate::util::repo_root().join("target/xtask/flux.bpf.o");
+    let object_path = crate::util::target_dir(&crate::util::repo_root())?.join("xtask/flux.bpf.o");
     let object =
         std::fs::read(&object_path).map_err(|e| format!("read {}: {e}", object_path.display()))?;
     let clang_btf = crate::elf::section(&object, ".BTF")?;

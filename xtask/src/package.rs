@@ -41,7 +41,8 @@ const ALLOWLIST: [&str; 15] = [
 ];
 
 pub fn run() -> Result<(), String> {
-    let (zip_path, digest) = package_once()?;
+    let target = util::target_dir(&util::repo_root())?;
+    let (zip_path, digest) = package_once(&target)?;
     println!("package: OK — {}", zip_path.display());
     println!("package: sha256 {}", sha256::hex(&digest));
     Ok(())
@@ -50,15 +51,15 @@ pub fn run() -> Result<(), String> {
 /// Two full runs from clean cross-build state must agree byte for byte.
 pub fn verify() -> Result<(), String> {
     let root = util::repo_root();
-
-    clean_cross_target(&root)?;
-    let (zip_path, first) = package_once()?;
+    let target = util::target_dir(&root)?;
+    let work = util::work_dir(&target.join("xtask"), "verify-package")?;
+    println!("verify-package: clean build roots under {}", work.display());
+    let (zip_path, first) = package_once(&work.join("run1"))?;
     let first_copy = zip_path.with_extension("zip.run1");
     std::fs::copy(&zip_path, &first_copy)
         .map_err(|e| format!("copy {}: {e}", zip_path.display()))?;
 
-    clean_cross_target(&root)?;
-    let (zip_path, second) = package_once()?;
+    let (zip_path, second) = package_once(&work.join("run2"))?;
 
     if first != second {
         return Err(format!(
@@ -69,6 +70,12 @@ pub fn verify() -> Result<(), String> {
         ));
     }
     std::fs::remove_file(&first_copy).map_err(|e| format!("remove run-1 copy: {e}"))?;
+    std::fs::remove_dir_all(&work).map_err(|e| {
+        format!(
+            "remove owned verification directory {}: {e}",
+            work.display()
+        )
+    })?;
     println!(
         "verify-package: OK — two clean builds of {} both hash {}",
         zip_path.display(),
@@ -111,19 +118,7 @@ pub fn release(tag: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn clean_cross_target(root: &Path) -> Result<(), String> {
-    let dir = root.join("target/aarch64-linux-android");
-    if dir.exists() {
-        println!(
-            "package: removing {} for a clean cross build",
-            dir.display()
-        );
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
-    }
-    Ok(())
-}
-
-fn package_once() -> Result<(PathBuf, [u8; 32]), String> {
+fn package_once(target: &Path) -> Result<(PathBuf, [u8; 32]), String> {
     let root = util::repo_root();
 
     // 1. Single version source.
@@ -146,13 +141,13 @@ fn package_once() -> Result<(PathBuf, [u8; 32]), String> {
     let engine = verify_engine(&root)?;
 
     // 3. Cross-built daemon.
-    let fluxd = build_fluxd(&root)?;
+    let fluxd = build_fluxd(&root, target)?;
 
     // 4 + 5. Stage the allowlist and write the archive.
     let entries = collect_entries(&root, &module_prop, &engine, &fluxd)?;
     debug_assert!(entries.iter().map(|e| e.name.as_str()).eq(ALLOWLIST));
 
-    let stage = root.join("target/xtask/stage");
+    let stage = target.join("xtask/stage");
     if stage.exists() {
         std::fs::remove_dir_all(&stage).map_err(|e| format!("clear staging: {e}"))?;
     }
@@ -241,7 +236,7 @@ fn verify_engine(root: &Path) -> Result<Engine, String> {
         ));
     }
 
-    let cache = root.join("target/xtask/engine");
+    let cache = util::target_dir(root)?.join("xtask/engine");
     let archive_name = url
         .rsplit('/')
         .next()
@@ -334,7 +329,7 @@ fn check_pin(lock: &toml::Value, what: &str, data: &[u8]) -> Result<(), String> 
 
 /// Cross-build `fluxd` with the embedded BPF object and the 16 KiB page-size
 /// link flags, then enforce `p_align >= 0x4000` on every LOAD segment.
-fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
+fn build_fluxd(root: &Path, target: &Path) -> Result<PathBuf, String> {
     let provenance = git_provenance(root)?;
     let mut cmd = Command::new(util::cargo());
     cmd.current_dir(root)
@@ -347,6 +342,8 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
             "--target",
             "aarch64-linux-android",
         ])
+        .arg("--target-dir")
+        .arg(target)
         .env("FLUX_BUILD_BPF", "1")
         .env("FLUX_COMMIT", &provenance)
         // RUSTFLAGS replaces the [target.aarch64-linux-android] rustflags from
@@ -357,8 +354,10 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
             format!(
                 "-C link-arg=-Wl,-z,max-page-size=16384 \
                  -C link-arg=-Wl,-z,common-page-size=16384 \
-                 --remap-path-prefix={}=/flux-rs",
-                root.display()
+                 --remap-path-prefix={}=/flux-rs \
+                 --remap-path-prefix={}=/flux-target",
+                root.display(),
+                target.display()
             ),
         );
 
@@ -393,7 +392,7 @@ fn build_fluxd(root: &Path) -> Result<PathBuf, String> {
     );
     util::run(&mut cmd, "fluxd cross build")?;
 
-    let fluxd = root.join("target/aarch64-linux-android/release/fluxd");
+    let fluxd = target.join("aarch64-linux-android/release/fluxd");
     let bytes = util::read_bytes(&fluxd)?;
     let aligns = elf::load_aligns(&bytes)?;
     for align in &aligns {
@@ -468,7 +467,7 @@ fn corresponding_source(root: &Path) -> Result<(PathBuf, [u8; 32]), String> {
         return Err("engine.lock source_archive_url does not contain upstream_commit".into());
     }
     let name = format!("sing-box-v{version}-source.tar.gz");
-    let cache = root.join("target/xtask/source").join(&name);
+    let cache = util::target_dir(root)?.join("xtask/source").join(&name);
     if !cache.is_file() {
         if let Some(parent) = cache.parent() {
             std::fs::create_dir_all(parent)
@@ -691,7 +690,7 @@ fn dependencies_md(root: &Path) -> Result<String, String> {
 /// script does when `FLUX_BUILD_BPF=1`.
 pub fn build_bpf() -> Result<(), String> {
     let root = util::repo_root();
-    let out = root.join("target/xtask/flux.bpf.o");
+    let out = util::target_dir(&root)?.join("xtask/flux.bpf.o");
     let prefix_map = format!("{}=.", root.display());
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -907,7 +906,7 @@ pub fn template_check() -> Result<(), String> {
         return Err("engine.lock host-check asset does not match engine version".into());
     }
 
-    let cache = root.join("target/xtask/engine-check");
+    let cache = util::target_dir(&root)?.join("xtask/engine-check");
     std::fs::create_dir_all(&cache).map_err(|e| format!("create {}: {e}", cache.display()))?;
     let archive = cache.join(
         url.rsplit('/')

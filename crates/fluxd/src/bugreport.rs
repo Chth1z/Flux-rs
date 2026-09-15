@@ -163,7 +163,7 @@ fn meta_text(commit: &str, now: SystemTime) -> String {
         flux_core::VERSION,
         flux_core::abi::FLUX_ABI_MAGIC,
         cfg!(debug_assertions),
-        crate::reactor::format_utc(now),
+        crate::time::format_utc(now),
     )
 }
 
@@ -657,7 +657,7 @@ fn dos_datetime(t: SystemTime) -> (u16, u16) {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let (year, month, day) = crate::reactor::civil_from_days(days);
+    let (year, month, day) = crate::time::civil_from_days(days);
     let year = year.clamp(1980, 2107) as u16;
     let time = ((h as u16) << 11) | ((m as u16) << 5) | ((s as u16) / 2);
     let date = ((year - 1980) << 9) | ((month as u16) << 5) | (day as u16);

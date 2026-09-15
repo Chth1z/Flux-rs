@@ -86,12 +86,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Proves bpf/flux.bpf.c still compiles for the bpf target. The loader
-      # itself is exercised on-device, not here.
-      - name: Compile data plane
+      # Compile the real embedded object and exercise its loader contract.
+      # Kernel loading and attachment still require the verifier/device suites.
+      - name: Compile data plane and test embedded object
         env:
           FLUX_BUILD_BPF: "1"
-        run: cargo build -p fluxd
+        run: cargo test -p fluxd --bin fluxd bpf::
 
       # flux_abi.h is the sole source of truth; flux-core/src/abi.rs mirrors it
       # by hand. This compares clang's offsets against the Rust mirror so the

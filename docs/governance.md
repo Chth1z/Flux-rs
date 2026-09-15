@@ -105,7 +105,7 @@ cargo test -p xtask
 cargo xtask doc-check
 ```
 
-加跑 `cargo test -p fluxd --bin fluxd`。它当前**不含测试用例**，作用是把 `fluxd` 的 host-safe 子集编一遍——在 Windows 上这是唯一能碰到那份代码的门禁，所以列在这里；不要把它的绿色当成 daemon 有测试覆盖。
+加跑 `cargo test -p fluxd --bin fluxd`。Windows 上它只编译和测试 host-safe 子集；Linux/Android 模块由条件编译排除，因此绿色不能替代 daemon 的 Linux 集成测试或设备验证。测试数量随实现变化，以当次输出为准。
 
 Linux CI 必须额外通过：
 

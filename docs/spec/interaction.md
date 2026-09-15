@@ -277,19 +277,26 @@ A fresh install follows this deterministic order:
 1. The installer creates the state root and the two missing bootstrap configuration files;
 2. It creates `disable` in the module directory, so **the module appears off in the manager immediately after installation**, and installation itself captures no traffic;
 3. The user edits `config/flux.toml` and `config/template.json`;
-4. Run `fluxd check`;
-5. After the check passes, enable the module in the manager (or run `fluxd enable`; both write the same file);
-6. Use `fluxd status` or the description in the manager's module list to confirm the engine and per-interface coverage.
+4. Enable the module in the manager (or run `fluxd enable`; both write the same file), then reboot once after the first installation;
+5. The daemon fetches the configured subscription and checks the complete generated candidate before activation (§28.6). A failed fetch or invalid candidate stays Inactive with its reason;
+6. Use `fluxd status` or the manager description to confirm the engine and per-interface coverage; use `fluxd check` for configuration and capability diagnostics.
+
+`check` is a diagnostic command, not a prerequisite for enabling: the activation
+transaction owns validation. It is read-only and cannot fetch a subscription.
+Before the initial fetch, the shipped template therefore reports
+`engine_config_unfilled`, naming its empty groups (§27.2.3); the user need not
+run and interpret that incomplete check as an installation step.
 
 The installer MUST explain step 2 clearly; otherwise users will mistake "shown as disabled after installation" for an installation failure. An upgrade does not recreate this file: an enabled module remains enabled.
 
 **The initial enablement in step 5 requires one reboot.** A disabled module does not execute `service.sh`, so no daemon is yet listening for the switch; immediate effect requires the daemon to already be running. Every subsequent toggle takes effect immediately.
 
+After enabling in the manager and completing the first reboot:
+
 ```sh
 FLUXD=/data/adb/modules/flux_rs/bin/fluxd
-$FLUXD check
-$FLUXD enable      # Equivalent to enabling the module in the manager
 $FLUXD status
+$FLUXD check       # Configuration and capability diagnostics, when needed
 ```
 
 If there are no selected apps, the configuration MAY still be valid, but status MUST explicitly show selected=0; it MUST NOT describe the state as "proxied."

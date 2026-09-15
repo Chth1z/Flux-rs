@@ -10,6 +10,8 @@
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod btf;
 #[cfg(any(target_os = "linux", target_os = "android"))]
+mod kernel;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod maps;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod object;
@@ -144,6 +146,15 @@ pub struct Runtime {
 impl Runtime {
     /// Parses and loads one embedded object. No program is attached.
     pub fn load(object_bytes: &[u8], expected_abi_magic: u32) -> Result<Self, LoadError> {
+        Self::load_on_kernel(object_bytes, expected_abi_magic, &kernel::release()?)
+    }
+
+    fn load_on_kernel(
+        object_bytes: &[u8],
+        expected_abi_magic: u32,
+        release: &str,
+    ) -> Result<Self, LoadError> {
+        kernel::validate(release)?;
         let object = object::Object::parse(object_bytes).map_err(LoadError::object)?;
         if object.abi_magic() != expected_abi_magic {
             return Err(LoadError {
@@ -530,6 +541,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn affected_kernels_are_rejected_before_object_parsing_or_syscalls() {
+        for release in ["6.6", "6.6-android99", "6.6.0-android15", "6.6.46-gki"] {
+            let error = Runtime::load_on_kernel(&[], FLUX_ABI_MAGIC, release)
+                .err()
+                .expect("affected kernels must fail before touching BPF");
+            assert_eq!(error.code, format!("unsupported_lpm_trie_kernel:{release}"));
+        }
+        for release in [
+            "5.15.211-android14",
+            "6.6.47-gki",
+            "6.6.100+vendor",
+            "6.12.0",
+        ] {
+            let error = Runtime::load_on_kernel(&[], FLUX_ABI_MAGIC, release)
+                .err()
+                .expect("an empty ELF must be rejected");
+            assert_eq!(error.code, "bpf_object_invalid", "{release}");
+        }
+    }
+
+    #[test]
     fn verifier_summary_is_bounded() {
         let input = (0..40)
             .map(|index| format!("line {index}"))
@@ -541,16 +573,27 @@ mod tests {
     }
 
     #[test]
-    fn embedded_artifact_matches_phase4_abi_and_program_table() {
+    fn embedded_artifact_matches_abi_programs_and_map_bindings() {
         if crate::BPF_OBJECT.is_empty() {
             return;
         }
         let object = object::Object::parse(crate::BPF_OBJECT).unwrap();
         assert_eq!(object.abi_magic(), FLUX_ABI_MAGIC);
-        let expected_counts = [992, 1087, 528, 13];
-        for ((name, section), expected_count) in PROG_SECTIONS.into_iter().zip(expected_counts) {
-            let image = object.program(name, section, |_| Some(42)).unwrap();
-            assert_eq!(image.insn_count, expected_count, "{name}/{section}");
+        for (name, section) in PROG_SECTIONS {
+            let mut referenced_maps = std::collections::BTreeSet::new();
+            // Instruction counts change with the compiler and program logic.
+            // The loader contract is the program identity and its map bindings.
+            object
+                .program(name, section, |symbol| {
+                    referenced_maps.insert(symbol.to_string());
+                    Some(42)
+                })
+                .unwrap();
+            assert_eq!(
+                referenced_maps.into_iter().collect::<Vec<_>>(),
+                expected_program_maps(name),
+                "{name}/{section}"
+            );
         }
     }
 
@@ -559,7 +602,7 @@ mod tests {
         if crate::BPF_OBJECT.is_empty() {
             return;
         }
-        let error = Runtime::load(crate::BPF_OBJECT, FLUX_ABI_MAGIC ^ 1)
+        let error = Runtime::load_on_kernel(crate::BPF_OBJECT, FLUX_ABI_MAGIC ^ 1, "5.15.211")
             .err()
             .expect("mismatched ABI must fail");
         assert_eq!(error.code, "abi_magic_mismatch");

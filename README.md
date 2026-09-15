@@ -99,8 +99,8 @@ captured traffic is routed.
 
 ## Install and first use
 
-Install `Flux-rs-v0.9.0-arm64.zip` from the Magisk, KernelSU, or APatch manager
-app, verify it against the adjacent `SHA256SUMS`, then reboot. **A fresh install
+Verify the release's `Flux-rs-v<version>-arm64.zip` against the adjacent `SHA256SUMS`, then install
+it from the Magisk, KernelSU, or APatch manager app. **A fresh install
 lands as a disabled module on purpose**, so installation alone does not capture
 traffic; upgrades preserve whatever you chose and never overwrite user configs.
 
@@ -145,17 +145,27 @@ for becomes `DIRECT`, so one unused group never takes the configuration down.
 overwrite it, and everything under `run/` can be deleted at any time and will be
 rebuilt.
 
+After editing the configuration, enable the module in the manager and reboot
+once. Flux fetches the subscription and validates the complete configuration
+before activation; the manager description reports the result. Later toggles
+and saved configuration edits take effect without rebooting.
+
+For details or diagnostics after that first reboot:
+
 ```sh
 FLUXD=/data/adb/modules/flux_rs/bin/fluxd
-$FLUXD check
-$FLUXD enable
 $FLUXD status
+$FLUXD check
 ```
 
-The manager's Action button performs one explicit operation: it reads current
-status, enables a disabled module or disables an enabled one, and updates the
-module description with state, generation, app count, and admitted TCP/UDP
-counts. It never reads stdin or hides a toggle state elsewhere.
+`check` is optional diagnostics, not an activation prerequisite. It does not
+fetch subscriptions, so a check before the initial fetch reports the empty
+groups as `engine_config_unfilled`.
+
+The manager's WebUI entry opens a redirect page for the external controller
+configured in the template's optional `clash_api` block. When no controller is
+configured, it explains how to enable one. The module toggle remains the only
+switch.
 
 `fluxd bugreport` creates a redacted diagnostic ZIP. Raw config files are never
 included and logcat is excluded by default; `--with-logcat` is explicit opt-in

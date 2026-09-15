@@ -564,6 +564,14 @@ Three consequences:
    NOT probe by performing a real LPM operation, because the probe itself can
    reboot the device.
 
+   The BPF loader MUST enforce this gate itself, before creating any kernel
+   object. The daemon, `fluxd check`, and device-test entry points all use the
+   same loader; a check in the reactor alone cannot protect those other callers.
+   Parse the leading release components only: a vendor suffix is not a patch
+   version. The affected `6.6` series without a patch component is not evidence
+   of the fix. The upstream change is
+   [896880ff3086, backported in 6.6.47](https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/stable-queue/+/refs/tags/v6.12.41/releases/6.6.47/bpf-replace-bpf_lpm_trie_key-0-length-array-with-fle.patch).
+
    **The gate cannot be conditional on the user configuring a large list.** Every
    valid policy uses the fixed bypass LPM, so gating only on `bypass.files` would
    leave the default configuration exposed. This is the **only** place in the
@@ -1127,15 +1135,17 @@ Flux-rs/
 └── xtask/                         # build, package, release; development host only
 ```
 
-Dependency direction: `flux-core` depends on no crate beyond serde, toml and
-serde_json; `fluxd → flux-core`; `xtask → flux-core`. `flux-core` MUST NOT
-depend on `fluxd`. No platform, testkit or backend-registry crate may be added,
+Dependency direction: `fluxd → flux-core`; `xtask → flux-core`. Pure parsing
+and text-processing dependencies are declared in `crates/flux-core/Cargo.toml`;
+`flux-core` MUST contain no I/O, syscalls or unsafe code and MUST NOT depend on
+`fluxd`. No platform, testkit or backend-registry crate may be added,
 and **no trait abstraction may be created for a single implementation.**
 
 Module dependencies inside `fluxd`:
 `main → reactor → {layout, control, packages, netlink, bpf, dataplane, engine}`,
-with no reverse edge back to `reactor`. All runtime state lives in one `Runtime`
-struct owned by `reactor`; there is no mutable global.
+with no reverse edge back to `reactor`. The `Reactor` owns mutable coordination
+state and module-owned resources; the subscription worker owns only its request
+and transport. There is no mutable global coordination state.
 
 **One boundary inherited from the previous repository.** The old over-design
 review found that writing raw rtnetlink messages directly in the daemon — the
@@ -2510,6 +2520,10 @@ A timerfd MAY re-check with a bounded backoff while the candidate starts — 10,
 
 ## 9.6 The boundary around the user's engine configuration
 
+The JSONC reader treats comments as whitespace, retaining line and byte
+positions for parser errors. It MUST reject an unterminated block comment and
+MUST NOT join tokens across a comment: `1/* note */2` is invalid, never `12`.
+
 At most 8 MiB, and a complete official configuration satisfying:
 
 - `inbounds` absent or an empty array, since the two tproxy inbounds are injected by fluxd alone;
@@ -2563,77 +2577,28 @@ There are exactly three top-level states:
 
 An invalid hot candidate **keeps the current `Active` generation** and attaches the candidate error to it. It MUST NOT create a fourth persistent state — a state that exists only to describe a failed attempt is a state every transition afterwards has to account for. A daemon restart re-evaluates from the authority files alone.
 
-## 10.2 Type skeletons
+## 10.2 Interfaces and state ownership
 
-```rust
-// ---------- flux-core/src/config.rs ----------
-pub struct FluxConfig {
-    pub apps: Vec<AppSelector>,     // canonical, deduplicated, <= 1024
-    pub bypass_v4: Vec<Ipv4Cidr>,   // user policy only; fixed RESERVED entries are separate
-    pub bypass_v6: Vec<Ipv6Cidr>,
-}
-pub struct AppSelector { pub user_id: u32, pub package: String }   // "10:com.x"
+The interface is the operation and its guarantees, not a second copy of Rust
+struct fields. Exact signatures live in the source files named below; changing
+a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 
-pub enum ConfigError {
-    TooLarge, TooManyApps, TooManyCidrs, NotCanonical, Duplicate,
-    AppIdOutOfRange { app_id: u32 },   // accepts 10000..=19999 only
-    Parse(String),
-}
-impl FluxConfig {
-    pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError>;             // <= 256 KiB
-    /// Fixed safety bypass plus listener prefixes, tagged RESERVED (§6.1.1).
-    pub fn fixed_bypass() -> (&'static [Ipv4Cidr], &'static [Ipv6Cidr]);
-}
+| Module | Input and ownership | Guarantee visible to its caller |
+|---|---|---|
+| `flux-core/config.rs`, `selector.rs`, `cidr.rs` | User configuration and package text become validated selections and prefix sets | Pure computation; root appId is excluded; the configured modes, shared UIDs and hard capacities retain the semantics of §1.4 and §11.2 |
+| `flux-core/subscription.rs`, `engine_config.rs` | Raw provider bytes and a user template become refined nodes and a generated candidate | No I/O; generation changes only the permitted fields (§28.2); inbound injection owns the two listener tuples (§9.1) |
+| `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
+| `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
+| `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness verifies all four sockets; child exit is confirmed before a replacement starts (§9.4) |
+| `fluxd/subscription.rs` | One immutable fetch request in a blocking worker; one result returned by channel/eventfd | The worker cannot mutate reactor state, cache files or a generation; the reactor validates the current authority when consuming completion (§28.6) |
+| `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
+| `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
 
-// ---------- flux-core/src/selector.rs ----------
-pub struct PackageIndex { /* parsed from /data/system/packages.list */ }
-impl PackageIndex {
-    pub fn parse(text: &str) -> Self;
-    pub fn app_id(&self, package: &str) -> Option<u32>;
-    pub fn shared_with(&self, app_id: u32) -> Vec<&str>;   // every package sharing the UID
-}
-pub fn uid_of(user_id: u32, app_id: u32) -> Result<u32, ConfigError>;   // user*100000 + app_id
-
-// ---------- flux-core/src/engine_config.rs ----------
-pub struct EngineParams { pub generation: u64, pub port_v4: u16, pub port_v6: u16 }
-pub fn build_effective(user: &serde_json::Value, p: &EngineParams)
-    -> Result<serde_json::Value, ConfigError>;   // pure; unit-testable on any host
-
-// ---------- fluxd/src/dataplane.rs ----------
-pub struct Dataplane {
-    objs: LoadedObjects,          // OwnedFds for the 12 maps and 4 programs
-    control_root: MapFd,
-    leaf: Option<OwnedFd>,        // the current frozen leaf
-    veth: VethOwned,              // both ifindexes and the alias; no MAC, see D17
-    rpdb: RpdbOwned,
-    tc: Vec<TcFilterOwned>,
-}
-pub struct ControlSnapshot { /* Rust mirror of flux_control */ }
-
-impl Dataplane {
-    /// §8.7 steps 2-5: clear residue, build veth and RPDB, load BPF, publish active=0
-    pub fn bring_up(layout: &Layout) -> Result<Self, DpError>;
-    pub fn publish(&mut self, s: &ControlSnapshot) -> Result<(), DpError>;  // §6.4
-    /// §10.5: additive then subtractive; never touches `active`
-    pub fn apply_policy(&mut self, desired: &DesiredPolicy) -> Result<(), DpError>;
-    pub fn attach_capture(&mut self, iface: &AdmittedIface) -> Result<(), DpError>;
-    pub fn detach_capture(&mut self, ifindex: u32) -> Result<(), DpError>;
-    pub fn drain_faults(&mut self) -> Vec<FaultEvent>;
-    pub fn read_counters(&self) -> Counters;
-    pub fn tear_down(self) -> Result<(), DpError>;    // deletes every owned object except clsact
-}
-
-// ---------- fluxd/src/engine.rs ----------
-pub struct EngineChild { pidfd: OwnedFd, pid: u32, params: EngineParams, effective: PathBuf }
-impl EngineChild {
-    pub fn write_effective(cfg: &serde_json::Value, p: &EngineParams, dir: &Path)
-        -> Result<PathBuf, EngineError>;                       // O_CREAT|O_EXCL|O_NOFOLLOW + fsync
-    pub fn check(bin: &Path, effective: &Path) -> Result<(), EngineError>;
-    pub fn spawn(bin: &Path, effective: &Path) -> Result<Self, EngineError>;   // PDEATHSIG
-    pub fn wait_ready(&self, deadline: Instant) -> Result<(), EngineError>;    // SOCK_DIAG × 4
-    pub fn terminate(self, grace: Duration) -> Result<(), EngineError>;
-}
-```
+No module outside the reactor may write its mutable state. Immutable request
+and completion values cross the subscription seam; kernel and child resources
+stay owned by their corresponding modules. A helper shared by diagnostics and
+the reactor belongs below both, not behind a reverse dependency into the event
+loop.
 
 ## 10.3 Single instance and the control protocol
 
@@ -2869,7 +2834,7 @@ clang -target bpf -O2 -g -Wall -Wextra -Werror \
 - `-g` is required: it produces the `.BTF` section, which is used **only** to cross-check the hand-written BTF blob (§12.3), never loaded.
 - No `vmlinux.h`, no access to private kernel structs, no CO-RE relocation. Only the `linux/bpf.h` UAPI and fixed helper prototypes.
 - The object is embedded with `include_bytes!(concat!(env!("OUT_DIR"), "/flux.bpf.o"))`. The shipped module contains **one** `fluxd` binary and no loose `.o` file.
-- CI rebuilds deterministically with a pinned clang version and compares the object's SHA-256.
+- CI compiles the real embedded object and tests its ABI, program sections and map references through the loader. Exact instruction counts are compiler output, not ABI. Package reproducibility is checked under the same toolchain (§13.4); the current workflow installs the runner's distro clang and does not pin a separate clang version or compare a standalone object hash.
 
 ## 12.2 Map creation
 
@@ -2923,7 +2888,7 @@ Every item below comes from a failure `clone/bpf2socks` hit on a real Android de
 | 7 | Treat a truncated enumeration as a failure, never as a shorter list: `ENOSPC` and `NLMSG_OVERRUN` on a TC dump abandon the round (§8.5), and any bounded query **re-checks `count > capacity`** after the call returns. bpf2socks needed this for `BPF_PROG_QUERY`; Flux attaches to no cgroup and makes that call nowhere, so its enumerations are the TC dumps | The kernel returns the true entry count when the buffer is too small; not re-checking truncates silently | `bpf_util.c:306-315` |
 | 8 | Identify our own objects by the **program name prefix** `flx_`, but **as a filter only, never as proof of ownership** — ownership still requires the id and tag of §8.5 | A prefix can be forged. Its job is to narrow the candidate set | `bpf_util.c:384-386` |
 | 9 | If pinning is ever used — it is not — `mkdir -p` the parent at mode `0700` and `unlink` any old pin before `BPF_OBJ_PIN` | — | `bpf_util.c:89-122` |
-| 10 | **Maintain no "known-broken kernel" table and admit nothing by version.** Every capability decision is "attempt the real operation, report the errno" | BPF feature switches in vendor Android kernels are highly scattered, and a version string has no predictive power. Same reasoning as §3.7 | `bpf2socks` has no version gate anywhere |
+| 10 | **Admit nothing by version.** Every capability decision is "attempt the real operation, report the errno"; the sole exclusion is the crash defect in §1.6.3a, for which a real probe is unsafe | BPF feature switches in vendor Android kernels are highly scattered, and a version string does not prove capability. Same reasoning as §3.7 | `bpf2socks` has no version gate anywhere; §1.6.3a records Flux's exception |
 
 **Item 11 is ours rather than inherited:** on a load failure the **first lines of the verifier log MUST reach `status` and the log** (§12.4 step 3). It is the only diagnosable artefact a device failure produces, and swallowing it discards the scene.
 
@@ -3159,12 +3124,21 @@ Everything else is derived by xtask: `module.prop`'s version line, `versionCode 
 `cargo xtask package` is the only packaging entry point, locally and in CI:
 
 1. Start from an empty staging directory.
-2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock`, the pinned NDK and the pinned LLVM/clang, targeting `aarch64-linux-android` API 31. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd — a fully static binary cannot resolve names on Android. The ZIP still ships one `fluxd` file; it does not bundle a libc. No build path is remapped and no wall-clock value is embedded.
+2. Cross-build `fluxd` and the BPF object per `rust-toolchain.toml`, `Cargo.lock` and the pinned NDK, using a host LLVM/clang with the BPF backend and targeting `aarch64-linux-android` API 31. Keep that toolchain unchanged between reproducibility runs; byte identity across different clang versions is not claimed. `fluxd` carries `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`, and every `PT_LOAD` is then statically checked for `p_align >= 0x4000`. It is dynamically linked against Bionic so `getaddrinfo` reaches netd — a fully static binary cannot resolve names on Android. The ZIP still ships one `fluxd` file; it does not bundle a libc. The workspace path is remapped to `/flux-rs` for reproducibility; no wall-clock value is embedded.
 3. Download and verify against `engine.lock`: size, SHA-256, and all four `PT_LOAD` alignments exactly `0x1000`.
 4. Generate `module.prop`.
 5. Copy files by the allowlist, normalising line endings to LF and fixing modes.
 6. Build the ZIP with a fixed entry order, `SOURCE_DATE_EPOCH`, and no extra attributes.
 7. Emit the ZIP and `SHA256SUMS`.
+
+Build, artifact reads, staging and clean-build verification MUST agree on
+Cargo's resolved target directory, including `CARGO_TARGET_DIR` and Cargo
+configuration. Resolve it through `cargo metadata` and pass it explicitly to
+the nested build. A binary left in the workspace's default `target/` is never
+a fallback. Each reproducibility run uses a fresh, exclusively created target
+directory; cleanup is confined to that run's directory. Cargo documents
+`target_directory` as an absolute output path in
+[`cargo metadata`](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html).
 
 No SBOM, signature, per-file hash or layered manifest is produced unless a real distribution channel actually requires one.
 
@@ -3190,9 +3164,9 @@ Against the two earlier blueprints, the L2 steady state for a captured TCP flow 
 
 ## 14.2 Userspace budget
 
-- `fluxd` is single-threaded with a steady-state target RSS of 8 MiB. **This is a target, not a measurement**, and must not be reported as one.
-- At idle there is no periodic timer: an epoll wait, plus the supervisor process blocked in `sigwaitinfo` (§13.2.2).
-- Only an interface, package, configuration, child or fault change wakes the control plane.
+- The reactor is single-threaded, with at most one blocking subscription worker and a steady-state target RSS of 8 MiB. **This is a target, not a measurement**, and must not be reported as one.
+- Without a configured subscription refresh there is no periodic idle action: an epoll wait, plus the supervisor process blocked in `sigwaitinfo` (§13.2.2). A configured refresh uses the one-shot deadline of §29.3.
+- Interface, package, configuration, child and fault events, control requests, and explicitly configured subscription deadlines/completions wake the control plane (§10.4).
 - Production carries no per-packet logging or telemetry. The one ringbuf wakes only on a deduplicated fault, and `counters` is read only when `status` asks.
 - sing-box's memory and CPU are dominated by the user's own configuration and MUST be reported separately. **`fluxd`'s small RSS MUST NOT be used to present the engine's cost as smaller than it is.**
 

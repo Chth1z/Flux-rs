@@ -42,6 +42,7 @@ use crate::control::{ControlConn, ControlServer};
 use crate::engine::{self, EngineChild, EngineError, EngineSpec};
 use crate::layout::{InstanceLock, Layout, LockError};
 use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
+use crate::time::format_utc;
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
 /// updates produce event bursts; one convergence per burst is enough.
@@ -3574,21 +3575,6 @@ impl Reactor {
     }
 
     fn read_policy_config(&self) -> Result<PolicyCandidate, (String, Option<String>)> {
-        let release = kernel_release().map_err(|error| {
-            (
-                "kernel_release_unreadable".to_string(),
-                Some(error.to_string()),
-            )
-        })?;
-        if !lpm_trie_kernel_safe(&release) {
-            return Err((
-                format!("unsupported_lpm_trie_kernel:{release}"),
-                Some(
-                    "Linux 6.6.0-6.6.46 has a known LPM trie UBSAN crash; upgrade to 6.6.47+"
-                        .to_string(),
-                ),
-            ));
-        }
         let flux = match checks::read_capped(
             &self.layout.flux_toml(),
             flux_core::config::MAX_CONFIG_BYTES + 1,
@@ -3955,34 +3941,6 @@ fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
     hints
 }
 
-fn kernel_release() -> io::Result<String> {
-    // SAFETY: uname writes one fixed-size utsname value into valid storage.
-    let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
-    // SAFETY: `uts` points to writable storage for one complete utsname.
-    let result = unsafe { libc::uname(&mut uts) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: uname guarantees NUL-terminated fields.
-    Ok(unsafe { std::ffi::CStr::from_ptr(uts.release.as_ptr()) }
-        .to_string_lossy()
-        .into_owned())
-}
-
-fn lpm_trie_kernel_safe(release: &str) -> bool {
-    let mut numbers = release
-        .split(|character: char| !character.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u64>().ok());
-    let (Some(major), Some(minor)) = (numbers.next(), numbers.next()) else {
-        return true;
-    };
-    if (major, minor) != (6, 6) {
-        return true;
-    }
-    numbers.next().is_some_and(|patch| patch >= 47)
-}
-
 /// Whether a failed cold start should be retried on the backoff timer.
 /// Deterministic config/binary failures wait for a config event instead.
 fn is_retryable(e: &EngineError) -> bool {
@@ -4317,44 +4275,9 @@ impl Logger {
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` without a date-time dependency (Howard Hinnant's
-/// civil-from-days algorithm).
-pub(crate) fn format_utc(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
-pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if month <= 2 { y + 1 } else { y }, month, day)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn civil_from_days_matches_known_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // leap year
-        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
-        assert_eq!(format_utc(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00Z");
-    }
 
     #[test]
     fn backoff_schedule_is_capped() {
@@ -4393,15 +4316,6 @@ mod tests {
             exit: "code=1".into(),
             output_head: String::new(),
         }));
-    }
-
-    #[test]
-    fn lpm_trie_kernel_gate_covers_the_known_crash_window_only() {
-        assert!(!lpm_trie_kernel_safe("6.6.0-android15"));
-        assert!(!lpm_trie_kernel_safe("6.6.46-gki"));
-        assert!(lpm_trie_kernel_safe("6.6.47-gki"));
-        assert!(lpm_trie_kernel_safe("5.15.211-android14"));
-        assert!(lpm_trie_kernel_safe("6.12.0"));
     }
 
     #[test]

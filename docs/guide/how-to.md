@@ -29,21 +29,15 @@
 
 这样订阅更新才不需要你手工合并——填空和追加节点是 Flux 的活。
 
-### 2. 自检
-
-```
-fluxd check
-```
-
-它会校验两份配置并报告这台设备能不能跑。有问题就在这一步说清楚，不用等打开之后猜。
-
-### 3. 在管理器里打开它
+### 2. 在管理器里打开它
 
 **开关就是你 root 管理器里那个模块开关**，Flux 不另做一个。管理器拨动开关时会写一个文件，Flux 直接盯着它，所以**关掉当场生效，不用重启**。管理器原本"下次启动不加载"的意思照旧成立，只是现在它同时也立刻停。
 
 因此没有额外的 Action 按钮要点。命令行 `fluxd enable` / `fluxd disable` 改的是同一个文件，不会出现命令行和管理器界面各说各话。
 
 > 首次安装后需要重启一次，模块才真正加载；之后的开关都是当场生效。
+
+首次启动会抓取订阅，并把完整配置交给官方 sing-box 检查，通过后才激活。下载失败或配置无效时会显示 `Inactive` 及具体原因；按提示修改后会自动重新处理。
 
 ## 看它有没有在工作
 
@@ -57,6 +51,8 @@ Per-app proxy: the apps you pick go through sing-box, everything else is left al
 出问题时它会说是哪一种问题，比如 `🤯 [Inactive] unsupported_lpm_trie_kernel:6.6.30`，或者 `😴 [Disabled] toggle this module on to enable Flux`。
 
 要更细的就跑 `fluxd status`。它逐接口报告，包括某个接口为什么被排除——完整示例与怎么读见 [`introduction.md`](introduction.md#状态会直接列出覆盖面)。
+
+需要诊断配置和设备能力时运行 `fluxd check`。它只检查、不下载订阅；首次抓取前的 `engine_config_unfilled` 表示分组还没有节点。启用前无需先跑这条命令，启动过程会验证完整配置。
 
 ## 出问题怎么自救
 
@@ -78,6 +74,6 @@ Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用�
 
 更新永远先过官方 `sing-box check` 才部署，不过就保留当前配置并报错——订阅更新不会把你的网络搞没。
 
-要用外部控制面板，就在模板里启用 `clash_api`——Flux 只要求控制器监听回环且 secret 非空。管理器里那个按钮会跳过去，URL 自带 secret。
+要用外部控制面板，就在模板里启用 `clash_api`。建议控制器监听回环且 secret 非空；Flux 会对不符合这两项的配置给出告警。管理器里那个按钮会跳过去，URL 自带 secret。
 
 哪些能力现在还没有、计划在后续版本做，以 [`../history/rejected-and-deferred.md`](../history/rejected-and-deferred.md) §21.0 的状态登记为准。

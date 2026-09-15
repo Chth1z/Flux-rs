@@ -112,7 +112,8 @@ ui_print "- Runtime files initialized."
 if [ "$FRESH_INSTALL" = 1 ]; then
 	ui_print "- Flux-rs is installed, but disabled; nothing is proxied yet."
 	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and /data/adb/flux-rs/config/template.json."
-	ui_print "- 2. Run /data/adb/modules/flux_rs/bin/fluxd check."
-	ui_print "- 3. Enable this module in your root manager."
+	ui_print "- 2. Enable this module in your root manager."
 	ui_print "- Reboot once after first enabling it; later toggles take effect immediately."
+	ui_print "- 3. Read the module status in your manager, or run /data/adb/modules/flux_rs/bin/fluxd status."
+	ui_print "- Flux validates the complete configuration before activation; use fluxd check for diagnostics."
 fi

@@ -302,55 +302,60 @@ fn rule_action_is(rule: &Value, action: &str) -> bool {
     rule.get("action").and_then(Value::as_str) == Some(action)
 }
 
-/// Removes `//` line comments and `/* */` block comments from a JSONC document,
-/// preserving comment-like sequences that appear inside string literals
-/// (the shipped template mixes `//` comments with `https://` URLs, so a naive
-/// strip would corrupt the URLs). Trailing commas are not handled: the shipped
-/// default has none, and full JSONC leniency is sing-box's own parser's job.
+/// Masks JSONC comments with whitespace, preserving token boundaries and error
+/// positions. String contents are untouched; an unterminated block comment is
+/// left for the JSON parser to reject (§9.6). Trailing commas are not accepted.
 pub fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let bytes = input.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut offset = 0;
     let mut in_string = false;
     let mut escaped = false;
-    while let Some(c) = chars.next() {
+    while offset < bytes.len() {
+        let byte = bytes[offset];
         if in_string {
-            out.push(c);
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if byte == b'\\' {
                 escaped = true;
-            } else if c == '"' {
+            } else if byte == b'"' {
                 in_string = false;
             }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' {
+            let end = match bytes.get(offset + 1) {
+                Some(b'/') => bytes[offset..]
+                    .iter()
+                    .position(|byte| matches!(byte, b'\r' | b'\n'))
+                    .map_or(bytes.len(), |length| offset + length),
+                Some(b'*') => {
+                    let Some(length) = bytes[offset + 2..]
+                        .windows(2)
+                        .position(|pair| pair == b"*/")
+                    else {
+                        break;
+                    };
+                    offset + 2 + length + 2
+                }
+                _ => {
+                    offset += 1;
+                    continue;
+                }
+            };
+            for byte in &mut out[offset..end] {
+                if !matches!(byte, b'\r' | b'\n') {
+                    *byte = b' ';
+                }
+            }
+            offset = end;
             continue;
         }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                for next in chars.by_ref() {
-                    if next == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = '\0';
-                for next in chars.by_ref() {
-                    if prev == '*' && next == '/' {
-                        break;
-                    }
-                    prev = next;
-                }
-            }
-            _ => out.push(c),
-        }
+        offset += 1;
     }
-    out
+    // Complete comment spans are replaced with ASCII; all other UTF-8 bytes
+    // retain their original sequence.
+    String::from_utf8(out).expect("masking complete comments preserves UTF-8")
 }
 
 /// Parses a JSONC document (comments allowed) into a value.
@@ -378,6 +383,31 @@ pub const DEFAULT_TEMPLATE_JSONC: &str = include_str!("../../../module/template.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonc_comments_do_not_join_tokens_or_hide_unterminated_input() {
+        for text in [
+            r#"{"n": 1/* comment */2}"#,
+            "tr/* comment */ue",
+            "{} /* unfinished",
+        ] {
+            assert!(parse_jsonc(text).is_err(), "accepted invalid JSONC: {text}");
+        }
+    }
+
+    #[test]
+    fn jsonc_comments_preserve_error_positions_and_string_content() {
+        let text = "{\n/* first\n second */\n\"n\": @\n}";
+        let error = parse_jsonc(text).unwrap_err();
+        assert_eq!((error.line(), error.column()), (4, 6));
+        let text = "{\"url\":\"https://example.invalid/a/*b*/\",/* \u{6ce8}\u{91ca} */\"n\":1}";
+        let masked = strip_jsonc_comments(text);
+        assert_eq!(masked.len(), text.len());
+        assert_eq!(
+            parse_jsonc(text).unwrap()["url"],
+            "https://example.invalid/a/*b*/"
+        );
+    }
 
     fn params() -> EngineParams {
         EngineParams {

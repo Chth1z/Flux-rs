@@ -354,7 +354,7 @@ pub fn run() -> Result<(), String> {
 
     // --- sizes, alignments, offsets and numeric values, computed by clang.
     let structs = struct_specs();
-    let work = root.join("target/xtask/abi-check");
+    let work = crate::util::target_dir(&root)?.join("xtask/abi-check");
     util::write_bytes(
         &work.join("include/linux/types.h"),
         LINUX_TYPES_STUB.as_bytes(),

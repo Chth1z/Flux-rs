@@ -679,6 +679,7 @@ name = "xtask"
 version = "0.9.0"
 dependencies = [
  "flux-core",
+ "serde_json",
  "toml",
 ]
 
