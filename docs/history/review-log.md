@@ -635,3 +635,28 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 依赖路径转译用实际 clang -MD 输出验证：在含空格、`#`、`$` 的目录和头文件上运行当前解析代码，确认路径正确还原且均真实存在。`$$` 按 Make 语法还原为 `$`；没有另增下载或版本兼容分支。
 
 上一提交 `7e79c379a0e70424dfcd867bcbeb27d6decc152a` 的主代理本地 `release v0.9.0` 已完成两次独立构建与对应源码获取，ZIP 摘要为 `36d34bc9d74acefb2cc15f81214baa0b2005ff67e24f08d3ae06f7725e7bda92`。此处仅记录先前验证范围；头文件来源调整后的候选将重新打包。
+
+### 0.6.13 1.0.0 待审候选的软件与整包复验（2026-09-15）
+
+**最终代码提交：`5fa639cf77cbf884d36e2115c7caa4b5dd260390`，构建时工作区干净。** workspace 仍为 0.9.0，等待所有者审核后再提升版本；本轮命令只在本地准备产物，没有创建 tag 或发布。
+
+| 检查 | 当次结果与范围 |
+|---|---|
+| Windows 主代理 | Rust stable 1.97.0；fmt、flux-core 109 / xtask 37 / fluxd bin 8、doc-check、diff-check 通过。首次因离线缓存缺少新依赖失败，补齐缓存后通过，没有回退依赖版本 |
+| Linux 与 Android | Astra low 的 workspace Clippy、Android all-targets Clippy、daemon_e2e、engine_lifecycle 与真实 BPF 14 项通过；头文件调整后的范围见 §0.6.12。主代理另行通过 ABI 7 structs / 40 offsets / 34 numeric / 28 enum / 28 string 与 BTF 核对 |
+| 脚本 | ShellCheck 覆盖 module 与 CI 脚本；宿主生命周期夹具通过。非 root chown 的证据限制见 §0.6.11 |
+| 官方配置检查 | 当次解析 sing-box 1.14.1；原始模板的未填充节点组被生成器拒绝，填充后由同版本官方 host 二进制 check 接受 |
+| 最终双构建 | 主代理执行本地 `cargo xtask release v0.9.0`，使用两个全新 Cargo 目标目录、同一次 engine 解析和同一组本地依赖。两次完整 Android release 构建的 ZIP SHA-256 一致 |
+| 整包核对 | 15 项顺序与 allowlist 一致，ZIP CRC 通过；默认模板与基准 aa4715d 逐字节相同；fluxd 内含上述干净 commit 标识；官方 engine 二进制 hash 与 build-info 相符；节点配置与 BSD 通知均在包内 |
+| 对应源码 | commit 根目录及 Makefile / go.mod / go.sum / LICENSE 均匹配同次解析；模块与源码两个 SHA256SUMS 条目经独立重新计算一致 |
+
+当次工具是 Rust/Cargo 1.97.0、host clang 21.1.8、NDK 27.3.13750724（Android clang 18.0.4）、API 31。fluxd 四个 LOAD 均 ≥ 0x4000，官方 Android sing-box 四个 LOAD 为 0x1000。版本与段数量是本次证据，不是下一次依赖选择条件。
+
+| 本地产物 | 字节数 | SHA-256 |
+|---|---:|---|
+| `dist/Flux-rs-v0.9.0-arm64.zip` | 85,040,020 | `de86f27e6017e20c57f346e9f3deb15502909e04175fa0b1a69711c89bb6661d` |
+| `dist/sing-box-v1.14.1-source.tar.gz` | 1,982,381 | `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537` |
+
+引擎上游提交为 `1ac1a339cb1223e9c70eae14c44411c75033c02d`；Android archive SHA-256 为 `34e2373cfcdd17ef3a0cac13d7f9f971e206257413a9f7b1da63ea02bcf88aab`，原样提取的 engine binary SHA-256 为 `0fa62ee4c9fd5c962952da6ca171d45771bdb376fcc03a092247e0684f7cbf38`。其余实际输入记录在包内 build-info.toml。
+
+**未覆盖的范围。** 没有远端 CI 执行、没有安装到测试设备，也没有校园网现场测试。1.14.1 TProxy 源码路径核对不替代 Android 的真实 socket assign 与原目的地址断言。正式发布剩余项集中在 §17.0.3，不能据本次宿主结果宣称校园网已修复或 1.0.0 已验收。
