@@ -40,7 +40,7 @@ pub struct BugreportOptions {
     pub with_logcat: bool,
     /// Disable redaction.
     pub raw: bool,
-    /// Output directory; the state root when `None` (§27.4).
+    /// Output directory; `run/` when `None` (§27.4).
     pub output_dir: Option<PathBuf>,
 }
 

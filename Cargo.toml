@@ -3,7 +3,7 @@ members = ["crates/flux-core", "crates/fluxd", "xtask"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/Chth1z/Flux-rs"

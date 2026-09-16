@@ -3816,7 +3816,8 @@ of §11.1. No separate URL binding file, refined cache or cache index is needed.
 Editing advanced refinement or group rules is local: a restart or reload can
 rebuild from the same raw content without fetching it again. Manual-only
 configuration creates no remote cache. Removed source caches are never inputs;
-cleanup is confined to exact owned cache names and must not delay activation.
+cleanup is confined to exact owned cache names, including abandoned atomic-write
+temporary files, and must not delay activation.
 
 A pending response has precedence over disk for the same source. It is written
 by one atomic file replacement only after the combined candidate has passed the

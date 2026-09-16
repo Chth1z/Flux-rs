@@ -694,3 +694,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **软件验证。** Windows 的 fmt、flux-core 121 项、xtask 35 项、fluxd bin 8 项和 doc-check 通过。WSL 的 workspace Clippy（warnings 为错误）及完整 workspace 测试通过：core 121、fluxd 89、xtask 35；daemon_e2e 与 engine_lifecycle 完整流程通过。新增真实本地 HTTP 多来源场景覆盖重名修复后再抓取、换序复用缓存、同结果不换代、坏响应保留已接受缓存、迟到结果不复活已删除来源和 interval=0 的普通 reload 行为。Android all-targets Clippy 使用现有 NDK 27.3 通过；shell 语法和 ShellCheck 通过。宿主生命周期脚本已用真实 ZIP 和 Rust 安装器复验：首次安装、升级字节保持、可选文件缺省、残留目录、迁移失败不发布、旧 Rust 身份退休及其重试、当前开关优先与错配身份不触碰均通过。
 
 版本仍未提升为正式 1.0.0。本条不包含新候选整包构建、远端 CI、校园网或设备运行的验收结论；后续证据单独追加，旧设备结果不替代当前候选。
+
+### 0.6.16 准备首个 1.0.0 RC（2026-09-16）
+
+主要实现已提交为 `baf15d8`。接口与产品范围收敛后，将 workspace 的唯一版本提升为 `1.0.0-rc.1`，用于所有者审核；没有创建正式 1.0.0 标签或公开发布。`versionCode`、模块元数据与文件名继续从该字段派生，正式版本排序在同版本 RC 之后。
+
+收尾复核补齐了来源缓存的中断写入清理：与删除来源缓存共用一处文件所有权判断，只删除当前用户拥有、名称准确匹配的普通文件；仍有效的原始缓存、符号链接、目录、锁和相似名称均保留。它在已有配置收敛中执行，不增加定时任务。
+
+本次版本及缓存改动之后，Windows fmt、core 121 / xtask 35 / fluxd bin 8 项测试和 doc-check 通过；WSL workspace Clippy 与完整测试通过，fluxd 单元测试增至 90 项，daemon_e2e 和 engine_lifecycle 完整流程通过。设备套件仍按预期跳过。整包复现及最终产物证据将在构建完成后追加。

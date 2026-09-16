@@ -62,7 +62,9 @@ pub fn source_snapshots<'a>(
     snapshots
 }
 
-/// Remove only private, source-shaped regular files that are no longer inputs.
+/// Remove only private, source-shaped regular files that are no longer inputs
+/// and interrupted atomic writes. The reactor alone writes this cache, so no
+/// writer is concurrent with pruning.
 /// Call after configuration activation; cleanup never decides activation.
 pub fn prune_cache(layout: &Layout, nodes: &NodeConfig) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -75,14 +77,17 @@ pub fn prune_cache(layout: &Layout, nodes: &NodeConfig) -> io::Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(id) = name.strip_suffix(".raw") else {
+        let interrupted = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".raw.write.tmp"));
+        let Some(id) = interrupted.or_else(|| name.strip_suffix(".raw")) else {
             continue;
         };
         if id.len() != 64
             || !id
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || nodes.remote_sources().any(|source| source.id() == id)
+            || (interrupted.is_none() && nodes.remote_sources().any(|source| source.id() == id))
         {
             continue;
         }
@@ -415,6 +420,51 @@ fn drain(fd: RawFd) {
 mod tests {
     use super::classify_io;
     use std::io::{self, ErrorKind};
+
+    #[test]
+    fn pruning_keeps_inputs_and_unrelated_files_but_removes_interrupted_writes() {
+        use flux_core::config::FluxConfig;
+        use std::{fs, os::unix::fs::symlink};
+
+        let root = std::env::temp_dir().join(format!("flux-source-pruning-{}", std::process::id()));
+        let layout = crate::layout::Layout::at(root.clone());
+        layout.ensure().unwrap();
+        layout.ensure_source_cache().unwrap();
+        let config =
+            FluxConfig::parse(b"[nodes]\nsources = ['https://example.invalid/sub']").unwrap();
+        let active = config.nodes.remote_sources().next().unwrap();
+        let cache = layout.source_cache_dir();
+        let active_name = format!("{}.raw", active.id());
+        let stale_name = format!("{}.raw", "a".repeat(64));
+        let interrupted = format!(".{}.raw.write.tmp", active.id());
+        let directory = format!("{}.raw", "b".repeat(64));
+        let link = format!("{}.raw", "c".repeat(64));
+        for name in [
+            &active_name,
+            &stale_name,
+            &interrupted,
+            "daemon.lock",
+            ".other.raw.write.tmp",
+        ] {
+            fs::write(cache.join(name), b"keep unless owned and obsolete").unwrap();
+        }
+        fs::create_dir(cache.join(&directory)).unwrap();
+        symlink(cache.join(&active_name), cache.join(&link)).unwrap();
+
+        super::prune_cache(&layout, &config.nodes).unwrap();
+        assert!(!cache.join(stale_name).exists());
+        assert!(!cache.join(interrupted).exists());
+        for name in [
+            &active_name,
+            &directory,
+            &link,
+            "daemon.lock",
+            ".other.raw.write.tmp",
+        ] {
+            assert!(cache.join(name).exists(), "{name} must survive");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn lookup_failures_are_dns() {
