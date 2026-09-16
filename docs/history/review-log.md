@@ -702,3 +702,26 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 收尾复核补齐了来源缓存的中断写入清理：与删除来源缓存共用一处文件所有权判断，只删除当前用户拥有、名称准确匹配的普通文件；仍有效的原始缓存、符号链接、目录、锁和相似名称均保留。它在已有配置收敛中执行，不增加定时任务。
 
 本次版本及缓存改动之后，Windows fmt、core 121 / xtask 35 / fluxd bin 8 项测试和 doc-check 通过；WSL workspace Clippy 与完整测试通过，fluxd 单元测试增至 90 项，daemon_e2e 和 engine_lifecycle 完整流程通过。设备套件仍按预期跳过。整包复现及最终产物证据将在构建完成后追加。
+
+### 0.6.17 首个 RC 的整包复现与产物核验（2026-09-16）
+
+**构建身份。** 干净提交 `160699aca2f8279204a85f3a68607b9c91cbd406`，workspace 版本 `1.0.0-rc.1`。本地执行 `cargo xtask release v1.0.0-rc.1` 完成双构建和对应源码准备；该命令没有创建 Git tag、推送或发布。随后只补充文档，因此本条记录的二进制仍明确属于这个构建提交。
+
+**两次完整构建。** 同一次操作解析官方最新稳定 sing-box 1.14.1，将该解析结果及本地 Cargo 解析复用于 `/tmp` 下两个独立构建目录。两次都从空的交叉编译目录构建 daemon 和真实 BPF 对象，最终 ZIP 逐字节一致。这证明本次固定输入下可复现，不保证未来重新解析上游后仍输出同一字节，也不构成任何仓库版本锁。
+
+| 本地产物 | 字节数 | SHA-256 |
+|---|---:|---|
+| `dist/Flux-rs-v1.0.0-rc.1-arm64.zip` | 85,235,158 | `13ee2d434f6a817aff12208d0f0d1e70375769420bedec857bd9aa7bfcbac836` |
+| `dist/sing-box-v1.14.1-source.tar.gz` | 1,982,381 | `8420c7723828a8d9d062c3fafee28c7b7e0d20a4c904fa7ff283f6e884edd537` |
+
+`dist/SHA256SUMS` 覆盖上述两个文件。原始构建日志保留在本地 `dist/rc1-build.log`，整包审计结果为 `dist/rc1-artifact-audit.json`；这些产物不提交到 Git，关键信息已记录于本条。
+
+- ZIP 恰有 §13.1 的 16 项，顺序、权限和 CRC 通过；没有 `scratch/`、开发目录或本地配置。
+- `module.prop` 为 `id=Flux-rs`、`version=v1.0.0-rc.1`、`versionCode=10000001`；二进制包含上述完整构建提交。
+- `fluxd` 为 AArch64 动态 ELF，2,594,216 字节，四个 LOAD 段均为 `0x4000`，包含一个 ELF BPF 对象；摘要为 `f2c92a479539df08acba0175b7bb5d07644d64d90b389d76c417e73d23c6918b`。
+- 官方 engine 未修改，Android 二进制摘要与下载验证记录一致；其四个 LOAD 段均为 `0x1000`。产品仍只支持 4 KiB 页，Flux 自身的较高对齐不扩大这个边界。
+- sing-box 源码归档根目录与解析出的上游提交 `1ac1a339cb1223e9c70eae14c44411c75033c02d` 一致；`build-info.toml` 记录资产、编译器、Rust/Cargo 和 NDK 的实际版本。
+- 包内三个默认配置与仓库文件逐字节一致；原 template 摘要仍为 `c930a02a3c23b747b92086545df74eb82cdc3e8049e48e6b6b4819106fe5d219`。官方 host 引擎接受填入合成节点后的生成配置，未填模板按设计拒绝。
+- 依赖许可证清单包含本次批准的 `toml_edit`；未将本地 Cargo.lock 提交到仓库。当前主机没有 `cargo-deny`，本轮未运行它，供应链 CI 结果仍待补齐。
+
+最终 RC 的 Android all-targets Clippy 也通过。此处没有真机安装、BPF 运行、校园网络连通或三管理器设备验收证据；所有者审核和设备验证仍按 §17.0.3 保留为发布前动作。

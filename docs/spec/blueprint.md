@@ -3297,10 +3297,8 @@ While the parent is alive, normal termination is `SIGTERM`, a short deadline, th
 
 ## 13.4 One version source, and reproducible packaging
 
-```toml
-[workspace.package]
-version = "0.9.0"
-```
+The workspace manifest's `[workspace.package].version` is the only version
+source. Read its current value from that file rather than copying it here.
 
 Everything else is derived by xtask: `module.prop`'s version line, monotonic
 `versionCode`, the ZIP name, and the CLI and build metadata. Version parsing and
