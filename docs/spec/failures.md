@@ -82,7 +82,7 @@ Every possible failure point specifies **how it is detected, what action is take
 | Scenario | Behavior | Residue |
 |---|---|---|
 | `fluxd stop` | publish `active=0` → `SIGTERM` engine → short deadline → `SIGKILL` → confirm via pidfd → exit normally (0) | veth/BPF/TC objects **remain** (deleted and recreated on the next start); service.sh does not restart after exit code 0 |
-| Disable the module in the manager | The manager creates `/data/adb/modules/flux_rs/disable`; inotify wakes the daemon, which then behaves as in the next row | Same as the next row; no reboot required |
+| Disable the module in the manager | The manager creates `/data/adb/modules/Flux-rs/disable`; inotify wakes the daemon, which then behaves as in the next row | Same as the next row; no reboot required |
 | `fluxd disable` | Create the same `disable`, publish `active=0`, and stop the engine; the daemon continues running and waiting for commands | Same as above; "disabled" does not mean network objects have been removed during the same boot |
 | `SIGTERM` / `SIGINT` | Same as `stop` | Same as above |
 | The reactor receives `SIGKILL` | The kernel terminates the engine because of `PDEATHSIG=SIGKILL` → listener disappears → **new flows are Direct because listener lookup misses**; admitted TCP packets are dropped at ingress after redirect | TC filters + veth + rule + route all remain. **This is the critical fail-open path**: the remaining capture program cannot form a black hole because it first looks up the listener on every invocation |
@@ -154,7 +154,7 @@ Every possible failure point specifies **how it is detected, what action is take
 }
 ```
 
-The presence of `/data/adb/modules/flux_rs/disable` means the desired state is disabled—that is the manager's own module switch, and `fluxd` watches it with inotify. While the engine is still terminating or convergence remains busy, the top-level state MAY briefly be `Inactive` with a pending warning; it becomes `Disabled` only after completion. None of these three states alone promises cleanup.
+The presence of `/data/adb/modules/Flux-rs/disable` means the desired state is disabled—that is the manager's own module switch, and `fluxd` watches it with inotify. While the engine is still terminating or convergence remains busy, the top-level state MAY briefly be `Inactive` with a pending warning; it becomes `Disabled` only after completion. None of these three states alone promises cleanup.
 
 `fluxd` also renders the same state as one line in `module.prop` under `description=` for display in the manager's module list; that is only a **projection**, and the JSON here remains authoritative.
 
@@ -204,4 +204,3 @@ The opposite of zero observability is not "print more numbers"; it is to **perfo
 | `in_pass_established` is much greater than `in_assign_tcp` | Normal (one assign and many passes per connection). **Produce no hint**; this row exists only to prevent a false positive |
 
 ---
-

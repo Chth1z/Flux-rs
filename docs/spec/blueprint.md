@@ -90,7 +90,7 @@ does not (`../governance.md` GOV-6.2).
 |---|---|
 | Product / repository | `Flux-rs` |
 | Version | the workspace manifest is the only source; `versionCode` and the module artifact name are derived from it (§13.4). Never restate a literal version here |
-| root module id | `flux_rs`, installed by the manager to `/data/adb/modules/flux_rs` |
+| root module id | `Flux-rs`, installed by the manager to `/data/adb/modules/Flux-rs` |
 | Product state root | `/data/adb/flux-rs`, `root:root 0700` |
 | ABI / target | `arm64-v8a` / `aarch64-linux-android`, API 31 |
 | Build API level | `aarch64-linux-android` API 31 — a compile target, not a runtime gate |
@@ -2580,7 +2580,7 @@ At most 8 MiB, and a complete official configuration satisfying:
 
 - `inbounds` absent or an empty array, since the two tproxy inbounds are injected by fluxd alone;
 - no tag equal to either injected inbound's tag, `flux-in-v4` or `flux-in-v6`. Only those two are reserved: the mechanism needs its inbounds to be unambiguous and nothing wider. An earlier draft reserved the whole `flux-` prefix, which let a provider naming a node `flux-hk` invalidate the entire generated configuration — external data deciding whether the user's proxy runs (PHIL-1);
-- Flux MUST NOT modify the user's `dns`, `outbounds`, `route`, `log` or `experimental`;
+- Flux MUST NOT overwrite the user's `dns`, `outbounds`, `route`, `log` or `experimental`. Node filling/appending is specified in §28.2. If `experimental.cache_file.enabled` is true and its `path` is absent or empty, the generated runtime configuration supplies an absolute path under `run/cache/`; this is the only additional completion of an engine output path. An explicit non-empty path retains its native meaning. The source template is never rewritten;
 - the Android consequences of a user's own outbound `routing_mark` or `bind_interface` are the user's to own. Flux warns in `status` and does not build a large, brittle policy validator (PHIL-6).
 
 The shipped default template carries the official direct outbound and a `final`,
@@ -2652,11 +2652,11 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | Module | Input and ownership | Guarantee visible to its caller |
 |---|---|---|
 | `flux-core/config.rs`, `selector.rs`, `cidr.rs` | User configuration and package text become validated selections and prefix sets | Pure computation; root appId is excluded; the configured modes, shared UIDs and hard capacities retain the semantics of §1.4 and §11.2 |
-| `flux-core/subscription.rs`, `engine_config.rs` | Parsed manual nodes and optional provider bytes form one node pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); inbound injection owns the two listener tuples (§9.1) |
+| `flux-core/subscription.rs`, `engine_config.rs` | Typed node sources and available provider responses form one ordered pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); runtime completion owns the two listener tuples and default cache path (§9.1, §9.6) |
 | `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
 | `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness verifies all four sockets; child exit is confirmed before a replacement starts (§9.4) |
-| `fluxd/subscription.rs` | One immutable worker request/result and selection of a pending response or accepted URL-bound snapshot | The worker cannot mutate reactor state, cache files or a generation; a matching pending response takes precedence over disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
+| `fluxd/subscription.rs` | One immutable fetch batch/result and selection of pending or accepted source-addressed responses | At most one blocking worker; it cannot mutate reactor state, cache files or a generation. A matching pending response takes precedence over that source's disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
 | `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
 | `fluxd/layout.rs` | State paths and bounded file operations | Callers share filesystem operations without depending on a diagnostic command |
@@ -2758,13 +2758,21 @@ Why the window is safe: adding before subtracting means that during it the polic
 
 | Path | What it is authoritative for | On failure |
 |---|---|---|
-| `/data/adb/modules/flux_rs/disable` | The only persistent switch: **present means disabled, absent means enabled** (C9, §27.1.1). It lives in the **module** directory, owned by the manager, and is watched by the existing inotify source so a toggle takes effect during the current boot | Existence is the whole signal; the contents are never read |
-| `config/flux.toml` and its referenced list files | app selection, CIDR policy, interface and SSID dimensions, manual nodes and subscription parameters | invalid at cold start means Direct; invalid on reload keeps the current policy |
+| `/data/adb/modules/Flux-rs/disable` | The only persistent switch: **present means disabled, absent means enabled** (C9, §27.1.1). It lives in the **module** directory, owned by the manager, and is watched by the existing inotify source so a toggle takes effect during the current boot | Existence is the whole signal; the contents are never read |
+| `config/flux.toml` and its referenced list files | app selection, CIDR policy, interface and SSID dimensions, and node sources | invalid at cold start means Direct; invalid on reload keeps the current policy |
+| `config/advanced.toml` | optional fetch, refinement, grouping and log-retention policy (§11.2.4) | absent uses defaults; invalid rejects the whole candidate |
 | `config/template.json` | the user-owned engine template (§28.1) | invalid at cold start means Direct; invalid on reload keeps the current generation |
 | `run/sing-box.<generation>.json` | the immutable generated artifact for one child; at most current plus candidate exist during a transaction | Not authoritative for anything. A daemon restart deletes them precisely and rebuilds from the template |
 | `run/daemon.lock`, `run/control.sock` | single-instance enforcement and IPC | — |
 
-**No last-known-good persistent copy is kept**, `enabled` is not duplicated into the TOML, and runtime state is never inferred from `module.prop` — that file is an output of the daemon, not an input to it (§27.1.3). **Flux never writes back to a user-owned file.** A fresh install is disabled by default, with the installer creating the `disable` file (§13.2).
+**No last-known-good persistent configuration is kept**, `enabled` is not duplicated into the TOML, and runtime state is never inferred from `module.prop` — that file is an output of the daemon, not an input to it (§27.1.3). **The running daemon never writes back to a user-owned file.** Installation alone may perform the one-time migration of §13.2.3. A fresh install is disabled by default, with the installer creating the `disable` file (§13.2).
+
+Flux-managed logs, diagnostic bundles, generated configurations and caches live
+under `run/`. This is persistent machine-managed data, not a directory cleared
+on every boot or upgrade. A live daemon's lock or socket MUST NOT be unlinked
+as cache cleanup. The engine retains the data root as its working directory so
+existing explicit relative template paths keep their meaning; its default
+cache path is completed under `run/cache/` as specified in §9.6.
 
 After a cold start confirms it has no surviving child of its own, the daemon enumerates and deletes only the regular, root-owned files in `run/` matching exactly the `sing-box.<u64>.json` form. Anything else in that directory is left alone, because a pattern loose enough to catch a stranger's file is loose enough to delete one.
 
@@ -2772,13 +2780,15 @@ Permissions: the state root and its subdirectories are `root:root 0700`; user co
 
 ## 11.2 The `flux.toml` schema
 
-Three dimensions, **one idiom**: a mode and a list.
+Traffic-selection dimensions share **one idiom**: a mode and a list. Each
+defaults to `blacklist` with an empty list. The shipped main file contains no
+fetch interval or refinement settings.
 
 ```toml
 [apps]
 # whitelist = proxy only what is listed; blacklist = proxy everything except
-mode = "whitelist"
-list = ["0:com.twitter.android", "@apps.txt"]
+mode = "blacklist"
+list = []
 
 [cidr]
 # blacklist = listed destinations go direct (the ordinary use)
@@ -2794,9 +2804,16 @@ list = []
 
 §29.1 adds `[ssid]` as a fourth dimension in the same shape.
 
-Node inputs use `[nodes] list` (§28.2.2), without a mode: the list contributes
-nodes rather than matching traffic. `[subscription]` controls remote acquisition;
-`[subscription.refine]` controls provider-name cleanup (§28.2.1).
+Node inputs use `[nodes] sources` (§28.2.2), without a mode: sources contribute
+nodes rather than matching traffic. Remote subscriptions, inline sharing URIs
+and local node files share this one entry point. The main file has no
+`[subscription]` table. Fetching and provider cleanup belong exclusively to the
+optional advanced file (§11.2.4).
+
+A missing main file is a configuration error, not an empty configuration:
+changing the default app mode MUST NOT make deleting a file silently widen
+traffic selection. An explicitly empty, valid main file uses the documented
+defaults. Installation supplies the initial file; runtime never recreates it.
 
 ### 11.2.1 Why one idiom rather than several switches
 
@@ -2845,7 +2862,7 @@ into two knobs and gave the CIDR dimension a capability the others lacked.
 
 ### 11.2.3 Limits
 
-The file is at most 256 KiB. At most 1024 apps may be simultaneously selected;
+Each TOML file and each referenced list file is at most 256 KiB. At most 1024 apps may be simultaneously selected;
 total UID entries after resolution are at most 4096; each of the IPv4 and IPv6
 LPM tries holds at most 65536 (**local addresses do not consume LPM capacity**,
 D20). Package strings and CIDRs MUST be canonical and free of duplicates.
@@ -2865,6 +2882,37 @@ Two notes:
 - **RFC 1918 and ULA are bypassed unconditionally.** They are private addresses, proxying them is meaningless, and an `ip_is_private` rule on the sing-box side would judge them direct anyway — releasing them in the kernel saves a userspace round trip already known to be useless (§1.6.2).
 
 **Dynamic local-address bypass:** the reactor injects every live local unicast address into the dedicated `self_addr_v4` and `self_addr_v6` HASH maps, never into the LPM (D20). A local address is always a full-length prefix, so a trie would be waste; a HASH deletes cleanly, which matters for IPv6 privacy rotation; and it avoids the 6.6.0–6.6.46 LPM trie crash entirely (§1.6.3a). Capacity is 256 per family, filtered by `IFA_FLAGS` with least-recently-seen eviction for IPv6 privacy addresses (§1.6.4).
+
+### 11.2.4 Optional advanced policy
+
+`config/advanced.toml` is optional and has a disjoint schema from `flux.toml`.
+There is no include chain, generic overlay, profile switch or precedence order.
+Both files are parsed into one immutable candidate, using the same pure parser
+from activation, reload and diagnostics. Existing configuration-directory
+inotify events cover both files and node lists.
+
+| Table | Keys and defaults | Effect |
+|---|---|---|
+| `nodes.fetch` | `interval = 86400`, `timeout = 10`, `retries = 2`, `user_agent = ""` | Seconds; interval zero disables scheduled refresh. Timeout must be positive. Retries counts additional attempts in one bounded fetch. Empty user agent selects the existing versioned Flux/sing-box user agent; a custom value selects a provider response format |
+| `nodes.refine` | `exclude_pattern`, ordered `rename`, `strip_emoji`, `max_tag_length` | Existing provider-cleanup defaults and order (§28.4); exact default expressions have one home in `flux-core` |
+| `nodes.groups` | selector tag → matching expression; absent entries use the built-in regional expressions | Replace the expression for that tag or add a custom tag. Case-insensitive matching follows refinement for provider nodes and observes the unchanged name of manual nodes. It only fills an existing empty template selector/urltest; it never creates or edits menus |
+| `log` | `max_size_mib = 4`, `retain = 1` | Flux log rotation threshold and number of rotated files retained; zero retain keeps only the current file. The size threshold is positive |
+
+`PROXY`, `GLOBAL` and `AUTO` continue to mean every available node (§28.2), so
+they are not expression-driven groups. Invalid expressions are rejected during
+configuration parsing even when no remote response is available. Expressions
+are compiled once per candidate rather than once per node.
+
+Log rotation happens on writes, not on a timer or only on startup. The logger
+owns the file, byte count and retention policy; a record may cross the threshold
+once, and the next write rotates it. Existing bounded diagnostic records remain
+bounded. Logger failure is reported through stderr and never changes packet
+admission. New settings take effect with the accepted configuration candidate.
+
+These are user trade-offs, not mechanism parameters (PHIL-1). Listener
+addresses/ports, BPF capacities, mark values, self-capture exclusions, activation
+ordering and failure guarantees remain internal. DNS, route, TLS, outbound and
+engine-log settings use native `template.json` fields without Flux aliases.
 
 ## 11.3 Resolving packages without binder
 
@@ -3013,6 +3061,7 @@ webroot/index.html          # the redirect shell of §28.8, not a WebUI
 bin/fluxd
 bin/sing-box
 etc/default-flux.toml
+etc/default-advanced.toml   # optional policy reference; omitted keys use defaults
 etc/default-template.json
 build-info.toml             # generated evidence of this build's inputs
 LICENSE
@@ -3031,7 +3080,7 @@ asserted.
 toggle, so a second button would be a second way to express one state — and it
 would additionally impose a Magisk v28+ floor for no gain.
 
-`module.prop` is generated by xtask: `id=flux_rs`, `name=Flux-rs`,
+`module.prop` is generated by xtask: `id=Flux-rs`, `name=Flux-rs`,
 `author=Flux-rs contributors`, with the version and `versionCode` derived from
 the single version source (§13.4). Its `description` is one sentence that **MUST
 NOT overstate the failure semantics** — §2.2 is the contract it has to be
@@ -3044,6 +3093,15 @@ installation hash manifest.
 
 Since libbpf, libelf and zlib were removed (D10), `licenses/` needs only the
 sing-box licence and the Rust dependency licences.
+
+The archive inventory and the installed payload have different purposes.
+`customize.sh` uses selective extraction: binaries, lifecycle scripts, module
+metadata, the redirect page and `build-info.toml` remain in the module directory;
+default files supply configuration only as specified in §13.2.3. Required
+licences and notices accompany the ZIP but need not be extracted to the device
+or checked as runtime prerequisites. The engine source archive remains a
+separate release artifact (§9.7). No files from the working tree are included
+by recursive packaging.
 
 ## 13.2 Scripts stay thin
 
@@ -3171,6 +3229,45 @@ In `ps`, both processes read `fluxd daemon`; the parent is the supervisor.
   path, and MUST NOT flush network objects: the manager requires a reboot, after
   which non-persistent kernel objects are gone by themselves (§8.8).
 
+### 13.2.3 Configuration-preserving upgrades
+
+Installation owns a one-shot Rust configuration migration; the daemon remains
+read-only with respect to configuration. This operation has no network access,
+does not start an engine and never edits the user's template. The shell locates
+the payload, invokes that operation and sets permissions.
+
+An ordinary upgrade preserves explicit values and uses runtime defaults for
+new optional fields. It MUST NOT reformat or rewrite an already-current file
+merely to insert defaults. Structural migration moves old `nodes.list` and a
+non-empty `subscription.url` into `nodes.sources`; old interval/timeout/retries
+and nested or previously flat refinement settings move to `advanced.toml`.
+Existing explicit app selection is preserved, including the old implicit
+whitelist default: migration materialises that mode before the new blacklist
+default could broaden selection.
+
+Migration prepares and validates both output documents before publishing
+either. Existing destination values may be reused when equal; conflicting
+explicit values produce a field-specific error and leave both inputs intact.
+Preserve comments and unrelated content where the TOML editing representation
+permits it. Before changing either input, preserve its exact prior bytes under
+the private `run/migrations/` directory. Publish the advanced file first and the
+main file last, using same-directory atomic replacement. The main-file schema
+is the completion marker; no second persistent schema-version file is added.
+Retrying after interruption must reuse matching migrated values without
+duplicating sources or replacing the original backups.
+
+Migration is an installation operation performed with this Flux-rs daemon
+stopped; manager staging remains the binary-installation mechanism. Retain the
+manager's enabled/disabled choice on upgrade, and disable a fresh installation.
+This contract does not migrate or manage the retired shell Flux project.
+
+Existing default log and engine-cache files may be moved to their exact new
+owned paths while the daemon is stopped. An old subscription response is
+adopted only when its accompanying URL exactly identifies a configured source;
+remove the old pair only after its new source cache has been written. User
+templates and unrelated relative-path assets are left in place. Never clear
+the whole `run/` tree as an upgrade step.
+
 ## 13.3 The child process and orphan prevention
 
 `fluxd` `fork`s and `exec`s the official sing-box directly, never daemonized. The pre-`exec` order is fixed (compare `clone/asteriskd/asteriskd_process.c:332-344`): restore signal dispositions, skipping `SIGKILL` and `SIGSTOP`; `setsid()`; clear supplementary groups; `PR_SET_PDEATHSIG`; **re-check the parent PID**, closing the window where the parent died before PDEATHSIG took effect; prepare fds; `execve`. `setsid()` makes the child a process group leader so the whole group can be signalled.
@@ -3190,7 +3287,19 @@ While the parent is alive, normal termination is `SIGTERM`, a short deadline, th
 version = "0.9.0"
 ```
 
-Everything else is derived by xtask: `module.prop`'s version line, `versionCode = major*1_000_000 + minor*1_000 + patch`, the ZIP name, and the CLI and build metadata. The VCS revision hash is provenance only and never enters `versionCode`. Only a signed `v*` tag triggers the release workflow, which verifies that the tag with its `v` removed equals the workspace version. **No second version file is maintained** — a version in two places is a version that disagrees with itself at exactly the wrong moment (PHIL-4).
+Everything else is derived by xtask: `module.prop`'s version line, monotonic
+`versionCode`, the ZIP name, and the CLI and build metadata. Version parsing and
+arithmetic have one home in `flux-core::version`, with checked arithmetic.
+Candidate versions use `major.minor.patch-rc.N`; their module ordering MUST
+increase with N, place them below the corresponding final version, and preserve
+ordering across patch/minor/major releases. The VCS revision is provenance and
+never enters `versionCode`. Development artifact names include the revision,
+with a dirty marker when applicable; two different development commits do not
+silently produce the same named package. A release uses the versioned artifact
+name and a clean source tree. Only a signed `v*` tag triggers the release
+workflow, which verifies that the tag with its `v` removed equals the workspace
+version. Released tags and artifact identities are immutable; a correction
+receives a new version. **No second version file is maintained** (PHIL-4).
 
 `cargo xtask package` is the only packaging entry point, locally and in CI:
 
@@ -3455,14 +3564,16 @@ changes.
 
 | Path | Owner | Notes |
 |---|---|---|
-| `config/flux.toml` | user | Flux's own behaviour: who is selected, what bypasses, which interfaces, subscription parameters |
+| `config/flux.toml` | user | traffic-selection dimensions and node sources |
+| `config/advanced.toml` | user | optional fetch, refinement, group-matching and log-retention policy |
 | `config/template.json` | user | sing-box config template: DNS, route rules, selector skeleton |
 | `config/*.txt` | user | list files referenced by `@` (§11.2) |
-| `run/subscription.raw` | machine | the **raw** subscription response, the only network artifact |
+| `run/cache/sources/<source-id>.raw` | machine | one accepted raw response per remote source; no separate URL marker |
 | `run/sing-box.<gen>.json` | machine | one per generation, read-only, deleted on rotation |
 
-Flux MUST NOT write to any user-owned path. It MUST NOT edit `template.json` in
-place, and it MUST NOT treat a generated file as an input on the next run.
+The running daemon MUST NOT write to any user-owned path. Installation may
+perform only the migration of §13.2.3. Neither operation edits `template.json`
+in place or treats a generated engine file as an input on the next run.
 
 `config/template.json` carries the same name and meaning as `Flux-original`'s
 `conf/template.json`, so a cross-reference between the two projects needs no
@@ -3491,16 +3602,22 @@ nodes, and writes the runtime config. The user edits only the template.
 ## 28.2 Generation is a pure function
 
 ```
-template.json + configured manual nodes + available subscription snapshot
+template.json + ordered node sources + advanced policy + available raw responses
   → sing-box.<gen>.json
 ```
 
-Manual nodes and a remote subscription are independent inputs to one node pool.
-Either may be absent. The cached remote response contributes only when it is
-bound to the currently configured URL. A missing response contributes no nodes;
-it does not prevent a valid configuration built from manual nodes from running.
+Each configured source contributes to one node pool in configuration order;
+local files and provider responses retain their own node order. A cached remote
+response contributes only to the source whose exact URL determines its identity.
+A missing response contributes no nodes and a source-specific diagnostic; it
+does not prevent independently available sources from forming a valid candidate.
 All inputs converge through this same generation function and the existing
 engine transaction, without a separate manual-node activation path.
+
+Names authored in manual inputs and the template remain unchanged. Conflicting
+tags are reported with their source positions rather than silently overwritten,
+deduplicated or renamed. There is no first-provider-wins rule. The actual engine
+validates the combined candidate before a running generation changes.
 
 Generation MUST do exactly two things, matching `updater.sh` Phase C:
 
@@ -3523,7 +3640,7 @@ the group.
   implementation can leave its regional groups empty because `updater.sh` fills
   them before the engine ever sees the file; Flux reaches the same place by
   refusing to hand sing-box a file it will reject, and saying which groups are
-  waiting and that `[subscription] url` or the user's own nodes fill them.
+  waiting and that `nodes.sources` supplies the missing nodes.
   Cold start therefore stays `Inactive` and Direct, with the reason stated,
   rather than entering a crash-restart loop (§23.1).
 
@@ -3543,54 +3660,48 @@ comment-stripped field, or normalises a number fails it. This test is required
 
 ### 28.2.1 Subscription parameters
 
-These live in `flux.toml` and belong to its schema (§11.2); their meaning is
-defined here, where it is used, so that neither section restates the other.
+Fetch policy belongs to `advanced.toml`'s `nodes.fetch`; its schema and defaults
+are defined once in §11.2.4. It applies to every remote source. No remote source
+means no fetch, no subscription timer and no remote-response cache. This is the
+shipped default. `interval = 0` disables scheduled refresh, while explicit
+refresh and the existing route-recovery event retain their meanings (§29.4).
 
-```toml
-[subscription]
-url = ""
-interval = 86400          # seconds; 0 = manual refresh only
-timeout = 10
-retries = 2
+One worker handles a finite batch of the configured remote sources. Each request
+has its configured deadline and retry count. Results carry source identity and
+are returned to the reactor; network I/O never blocks its event loop. A failure
+at one source does not prevent attempting the others, and remains visible even
+when the available pool forms a valid candidate. There is no independent worker,
+timer or retry loop for every source.
 
-[subscription.refine]
-exclude_pattern = "(expire|traffic|官网|到期|流量|剩余|套餐|重置|联系|群组|通知|平台|网站|时间|建议|反馈|版本|更新)"
-rename = [
-  { match = "【(亚洲|北美洲|欧洲|南美洲|非洲|大洋洲|南极洲)】", replace = "" },
-]
-strip_emoji = true
-max_tag_length = 32
-```
-
-An empty `url` disables subscription entirely: no fetch, no timer, and
-`run/subscription.raw` is never created. That is the default, so a fresh install
-makes no network request of its own.
-
-Acquisition settings belong to `[subscription]`; provider-specific name cleanup
-belongs to `[subscription.refine]`. These are responsibilities, not beginner
-and expert modes. Both tables have defaults and may be omitted. The former
-flat refinement keys move into the nested table for the 1.0.0 candidate schema;
-Flux never rewrites an existing user configuration to migrate it.
-
-### 28.2.2 Manual node inputs
+### 28.2.2 One node-source list
 
 ```toml
 [nodes]
-list = ["@nodes.txt"]
+sources = ["https://provider.example.invalid/sub", "@nodes.txt"]
 ```
 
-Each list entry is a sharing URI or an `@file` reference using the existing
-direct-child, non-recursive list-file rules of §11.2.2. A file contains one URI
-per line; only whole lines starting with `#` are comments, because a URI's
-fragment is its node name. Inline URIs and list files may be mixed without a
-second configuration format. An empty or absent list means no manual nodes.
+The parser constructs a typed source from each entry, without network or
+filesystem I/O. Strings beginning with `@` name local node lists using the
+direct-child, non-recursive rules of §11.2.2. HTTP(S) strings name remote
+subscriptions. Other supported URI schemes name one manual node. Since HTTP
+also names a proxy protocol, `{ node = "http://user:password@proxy.example.invalid:8080#HTTP" }`
+explicitly identifies a manual URI; this single-key table is accepted for any
+supported manual protocol. No parser fallback guesses which kind was intended.
+
+A local node file contains one manual URI per line, including HTTP proxy URIs;
+it does not recursively introduce remote subscriptions. Only whole lines
+starting with `#` are comments because a URI fragment is its node name. An empty
+or absent source list means no externally supplied nodes. Multiple distinct
+remote URLs are supported; a repeated exact URL is fetched and contributed once,
+at its first occurrence. Diagnostics identify entry/line positions without
+printing credentials, URLs or complete input lines.
 
 The parser preserves the manual node's name and protocol settings. Provider
 announcement filters, renaming and truncation MUST NOT alter a node the user
 entered explicitly. Region membership may be derived from its name for an
 optional regional selector, but no region match is required to use the node.
-Manual nodes appear first in the pool, followed by the accepted remote nodes.
-Neither source silently replaces nodes from the other. The complete candidate
+Sources retain their configured order (§28.2).
+No source silently replaces nodes from another. The complete candidate
 still goes through official engine validation, including tag collisions.
 
 The original outbound menus remain intact. A matching name places a manual
@@ -3649,7 +3760,7 @@ hand-rolled version of them is a source of defects.
 
 ## 28.4 Node refinement
 
-This pipeline handles provider output only, using `[subscription.refine]`.
+This pipeline handles provider output only, using `advanced.toml`'s `nodes.refine`.
 Manual nodes preserve their user-authored names (§28.2.2). Fixed order,
 matching `updater.sh` Phase A/B:
 
@@ -3660,7 +3771,7 @@ matching `updater.sh` Phase A/B:
 5. normalise multiplier notation (`$2.0`, `2.0倍率`, `2.0X` all become `2.0x`)
    and collapse runs of whitespace;
 6. truncate to `max_tag_length`;
-7. group by region regex, for the fill step of §28.2.
+7. group by the configured matching expressions (§11.2.4), for the fill step of §28.2.
 
 **Step 2 is the one that earns its place.** Providers put announcements —
 expiry dates, traffic quotas, contact links — into the node list as fake
@@ -3674,16 +3785,24 @@ what distinguishes the two.
 
 ## 28.5 The cache holds the raw response
 
-`run/subscription.raw` stores the response exactly as received, **before**
-refinement.
+`run/cache/sources/<source-id>.raw` stores one accepted response exactly as
+received, **before** refinement. The source ID is the lowercase SHA-256 of the
+exact configured URL bytes; source-list reordering does not change it, and
+changing a URL cannot bind old bytes to a new source. This is an identity key,
+not encryption. The cache directory and files retain the private permissions
+of §11.1. No separate URL binding file, refined cache or cache index is needed.
 
-The refinement rules (`exclude_pattern`, `rename`, `strip_emoji`,
-`max_tag_length`) live in `flux.toml` under `[subscription.refine]`, so editing them is a purely local
-operation. Caching the refined output would force a network round trip to see
-the effect of a local edit, which fails offline and is slow when it does not.
-Keeping the raw copy also keeps the network artifact single-purpose: exactly one
-file in the tree came from the network, which matters for both diagnosis and
-trust.
+Editing advanced refinement or group rules is local: a restart or reload can
+rebuild from the same raw content without fetching it again. Manual-only
+configuration creates no remote cache. Removed source caches are never inputs;
+cleanup is confined to exact owned cache names and must not delay activation.
+
+A pending response has precedence over disk for the same source. It is written
+by one atomic file replacement only after the combined candidate has passed the
+normal validation/activation transaction. An invalid response never replaces
+that source's accepted bytes. Cache persistence failure is a diagnostic failure,
+not a reason to undo an already committed data plane. The old two-file cache
+can be adopted by the installer as specified in §13.2.3.
 
 ## 28.6 A subscription update must never take the network down
 
@@ -3692,7 +3811,7 @@ existing engine candidate switch (§9.4):
 
 1. the merged result MUST pass the official `sing-box check` before anything is
    deployed; on failure the current generation is kept and the error reported;
-2. deployment is a backup plus an atomic `rename`;
+2. engine activation uses the existing commit point (§9.4); each accepted source cache uses one atomic replacement (§28.5);
 3. if the new content is identical to the current generation, skip the rotation
    entirely rather than restarting the engine for no reason.
 
@@ -3702,7 +3821,9 @@ being given a path of its own.
 
 ## 28.7 `fluxd subscribe`
 
-Triggers one fetch and, if it produces a different result, one rotation.
+Triggers one refresh batch over the configured remote sources and, if the
+combined validated configuration changes, one rotation. A source-specific
+failure remains visible alongside any usable unchanged cache for that source.
 
 It is the first CLI command added since R091-11 froze the set, and it is added
 for the reason that freeze allowed: there is now an implementation behind it.
@@ -3830,7 +3951,7 @@ already be stale.
 ## 29.3 A one-shot timer is not polling
 
 §10.1 forbids periodic polling. Subscription refresh (§28.7) arms a timerfd for
-`interval` seconds and re-arms it on expiry, which needs to be reconciled with
+`nodes.fetch.interval` seconds (from the optional advanced file) and re-arms it after a refresh attempt, which needs to be reconciled with
 that rule explicitly rather than left to the reader.
 
 The prohibition targets health probes: waking every N seconds to ask whether

@@ -195,7 +195,7 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 | 实践 | 当前做法 | 为什么 |
 |---|---|---|
-| **精确归档 allowlist** | `xtask/src/package.rs` 只允许 §13.1 规定的 15 个文件，意外文件使打包失败 | 供应链边界可枚举、可测试 |
+| **精确归档 allowlist** | `xtask/src/package.rs` 从 §13.1 的发行清单构造归档；安装按职责选择提取的文件 | 避免工作区文件意外进入发行包；发行材料不自动成为设备运行依赖 |
 | **归档级 SHA-256** | 发布物生成 `SHA256SUMS`；engine 资产核对上游发布的 size + SHA-256，实际版本与摘要写入 `build-info.toml` | 校验本次输入，不限制下次解析的依赖版本；不生成包内逐文件 sidecar |
 | **最小安装检查** | `customize.sh` 检查 payload、arm64、5.15 courtesy floor，并识别 Magisk/KernelSU/APatch；真实能力留给 activation 操作验证 | 避免用管理器版本字符串猜测内核能力 |
 | **构建标识进入诊断面** | `fluxd version`、`bugreport` 与模块元数据提供版本、ABI 与构建信息 | 用户改名后仍能从运行产物确认身份 |
@@ -209,7 +209,7 @@ Phase 0 的目的就是**证伪**。断言失败是它在工作，不是事故�
 
 | 不采纳 | 理由 |
 |---|---|
-| **不固定的 Rust nightly** | NeoZygisk CI 用未固定的 nightly（`ci.yml:36`），可复现性风险。我们固定 stable + `Cargo.lock` |
+| **无需求地引入 Rust nightly** | 当前工程使用稳定通道。遵守所有者的不锁版本要求，依赖选择与实际构建记录见 §9.7、§13.4；不把本次可复现验证写成未来版本约束 |
 | **安装时禁用竞争模块** | Vector 会去 `touch` LSPosed 的 `disable`（`customize.sh`）。太激进。冲突应当**检测并报告**，不替用户处置 |
 | **只用 Actions artifact 分发正式版本** | 正式发布物必须有公开、可校验的归档与 `SHA256SUMS`；canary 分发策略仍是延期项 |
 | **仅接受英文 issue** | Vector 的政策（README:71-75）适合它的社区规模，不适合现在 |
@@ -226,6 +226,7 @@ Vector 的 `FileSystem.getLogs`（`Vector/daemon/.../FileSystem.kt:524-625`）�
 - Conventional Commits：`feat` / `fix` / `docs` / `build` / `refactor` / `test` / `chore`。
 - commit message 的正文写**为什么**，不复述 diff 写了什么。推翻旧结论时写明推翻了什么、依据是什么。
 - 不 amend 已存在的 commit，除非所有者明确要求。
+- 按完整、已验证的改动分批提交；相关合同、实现与使用说明一起收敛。设计先行时在 §17.0 明确未实现范围，不把设计提交记为功能交付。
 - 不 push，除非所有者说过可以（当前状态：所有者已授权，推送时机由他决定）。
 - `clone/` 与 `tools/phase0/results/` 之外的第三方源码**不进仓库**。
 

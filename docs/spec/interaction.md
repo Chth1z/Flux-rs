@@ -9,7 +9,7 @@
 ### 27.1.1 One source of truth
 
 ```text
-/data/adb/modules/flux_rs/disable
+/data/adb/modules/Flux-rs/disable
 present = desired disabled (MAY briefly be Inactive during convergence; Disabled on completion)
 absent = desired enabled (then MAY be Inactive or Active)
 ```
@@ -38,19 +38,28 @@ There is no `action.sh`—the switch is the manager's own switch, so there is no
 In exchange, `fluxd` writes the current state to `description=` in `module.prop`, turning the manager's module list into a status panel:
 
 ```text
-description=Per-app proxy: the apps you pick go through sing-box, everything else is left alone.\n🥰 [Active] gen 7 · 3 apps · rmnet_data0
+description=Seamlessly redirect your network Flux.\n🥰 [RUNNING] PID: 1234 · 黑名单 · 排除清单 3 项 · wlan0
 ```
 
 `\n` is the literal two-character escape, which the manager renders as a line break; the first line is always the original description. That first line is written for the person reading a module list, not for a reviewer: it says what the module does for them and MUST NOT carry a positioning statement ("unmodified", "official", "eBPF") or overstate the failure semantics of §2.2. Rules:
 
 | State | Display |
 |---|---|
-| Active | `🥰 [Active] gen N · X apps · <active interfaces>` |
-| Inactive, with a concrete error | `🤯 [Inactive] <stable error token>` |
-| Inactive, converging | `🤔 [Inactive] converging` |
-| Inactive, paused by `[ssid]` on the current Wi-Fi network (§29.5) | `😴 [Inactive] paused on this Wi-Fi network` — never the network's name |
-| Disabled, engine stopped | `😴 [Disabled] toggle this module on to enable Flux` |
-| Disabled, engine still terminating | `😴 [Disabled] stopping` |
+| Active | `🥰 [RUNNING] PID: N · <app mode and list meaning> · <active interfaces>` |
+| Inactive, with a concrete error | `🤯 [FAILED] <stable error token>` |
+| Inactive, converging | `🤔 [STARTING] 正在应用配置` |
+| Inactive, paused by `[ssid]` on the current Wi-Fi network (§29.5) | `😴 [PAUSED] 当前 Wi-Fi 不符合启用条件` — never the network's name |
+| Disabled, engine stopped | `😴 [STOPPED] 已停用` |
+| Disabled, engine still terminating | `🤔 [STOPPING] 正在停止` |
+
+These labels project the existing three-state model; they do not create another
+state machine. RUNNING requires the Active evidence of §10.1, not merely a live
+PID, and makes no claim about Internet reachability. Whitelist mode renders
+`白名单 · 选择清单 N 项`; blacklist renders `黑名单 · 排除清单 N 项`. N counts
+expanded configuration entries, not selected UIDs or every package sharing a
+UID. Actual selection and draining counts remain available from `status`.
+An Active generation with a rejected update keeps RUNNING and adds the update's
+stable error token. Generation identifiers belong in detailed diagnostics.
 
 Three implementation constraints: compare before writing and do not write when the state is unchanged; atomically replace the file using a temporary file in the same directory plus `rename`, so the manager always reads a complete file; rewriting MUST be idempotent, so repeated writes never cause `description=` to grow without bound. A write failure only removes the status display and MUST NOT affect the daemon—`module.prop` belongs to the manager.
 
@@ -61,20 +70,24 @@ Three implementation constraints: compare before writing and do not write when t
 ### 27.2.1 Paths and ownership
 
 ```text
-/data/adb/modules/flux_rs/
+/data/adb/modules/Flux-rs/
 ├── disable                          Manager-owned; the only switch (§27.1.1)
 └── webroot/index.html               Redirect shell for the manager's button (§28.8)
 
 /data/adb/flux-rs/
-├── config/                          User authority; Flux MUST NOT write back to it
+├── config/                          User authority; the running daemon is read-only
 │   ├── flux.toml
+│   ├── advanced.toml                 Optional; absent means built-in defaults
 │   ├── template.json
 │   └── *.txt                        List files referenced with @ (§27.2.2)
-├── fluxd.log
-└── run/                             Machine output; MAY be deleted and rebuilt at any time
+└── run/                             Persistent machine-managed data
+    ├── fluxd.log                     Current log; numbered retained files beside it
     ├── daemon.lock
     ├── control.sock
-    ├── subscription.raw
+    ├── cache/
+    │   ├── sing-box.db               Default engine cache
+    │   └── sources/<source-id>.raw   Accepted remote responses
+    ├── migrations/                  Exact input backups when an upgrade changes schema
     └── sing-box.<generation>.json
 ```
 
@@ -82,48 +95,37 @@ Three implementation constraints: compare before writing and do not write when t
 
 **Everything under `config/` is yours; nothing under `run/` is.** This boundary is the entire configuration model:
 
-- `config/flux.toml`: which apps are selected, which destinations are Direct, which interfaces are used, and subscription parameters;
+- `config/flux.toml`: which apps are selected, which destinations are Direct, which interfaces are used, and where nodes come from;
+- `config/advanced.toml`: fetch, refinement, group matching and log retention (§11.2.4), with no duplicate fields or override order between files;
 - `config/template.json`: the sing-box configuration template—the DNS, routing rules, and selector skeleton. **This is what you edit**, not the file the engine actually runs;
 - `run/sing-box.<gen>.json`: generated from the template + raw subscription, one read-only file per generation, deleted when the generation changes.
 
-Flux MUST NOT write any file under `config/`. Installation or upgrade copies `etc/default-flux.toml` and `etc/default-template.json` only when the corresponding file is missing.
+The running daemon MUST NOT write any file under `config/`. Installation copies
+missing bootstrap files and performs only the explicit schema migration of
+§13.2.3. The template is always preserved. An absent advanced file uses built-in
+defaults; the packaged advanced example documents optional settings. Missing
+main configuration is an error, distinct from an explicitly empty valid file.
+
+`run/` is not wiped at boot or upgrade. Its caches support offline reconstruction;
+its socket and lock must remain intact while the daemon is alive. Explicit
+user-supplied engine paths retain their native meaning (§9.6); Flux-managed
+default outputs stay under `run/`.
 
 See §28 for generation rules, the subscription pipeline, and failure handling; **this section describes only the boundary and does not repeat that algorithm**.
 
 ### 27.2.2 The only `flux.toml` schema
 
-Every dimension has the same shape: a mode and a list. The full schema and the
-reasoning behind it are §11.2; this section states the user-visible contract.
+Every traffic-selection dimension has the same shape: a mode and a list. The
+full main and advanced schemas are §11.2 and §11.2.4; this section states the
+user-visible contract. The minimal main configuration is:
 
 ```toml
 [apps]
-# whitelist = proxy only what is listed; blacklist = proxy everything except
-# Format: userId:packageName. A shared UID also captures packages with that UID.
-mode = "whitelist"
-list = ["0:com.example.browser", "@apps.txt"]
-
-[cidr]
-# blacklist = listed destinations go Direct (the ordinary use)
-# whitelist = capture only the listed destinations
-mode = "blacklist"
-list = ["192.168.0.0/16", "@chnroute.txt"]
-
-[interfaces]
-# blacklist with an empty list = take over every supported physical interface
 mode = "blacklist"
 list = []
-
-[ssid]
-# blacklist = do not activate on a listed Wi-Fi network
-mode = "blacklist"
-list = []
-
-[subscription]
-url = ""            # empty disables subscription entirely; no fetch, no timer
-interval = 86400    # seconds; 0 = manual only
 
 [nodes]
-list = []           # sharing URIs and/or @nodes.txt; subscription is optional
+sources = []        # HTTP(S) subscriptions, sharing URIs and/or @nodes.txt
 ```
 
 Rules:
@@ -210,7 +212,7 @@ make Flux the arbiter of a decision inside sing-box's own authority (§9.6).
 | `fluxd stop` | Publish inactive, stop the child, and exit the daemon |
 | `fluxd bugreport` | Generate a diagnostic ZIP |
 | `fluxd version` | Version, ABI magic, and build information |
-| `fluxd subscribe` | Fetch the subscription once and rotate if the result differs (§28.7) |
+| `fluxd subscribe` | Refresh the configured remote sources once and rotate if the combined result differs (§28.7) |
 
 There is no `explain` and no `watch`: `status` is made complete and honest first, and an explainer built on an incomplete status would explain the wrong thing. **Documentation MUST NOT show a command that does not exist.**
 
@@ -266,11 +268,11 @@ earlier field name asserted that it did.
 By default, `fluxd bugreport` generates a redacted ZIP:
 
 - Includes status, version/ABI, root manager, a limited log tail, network/BPF enumeration, and configuration shape;
-- Does not include raw `flux.toml`, `template.json`, or generated `sing-box.<gen>.json`;
+- Does not include raw `flux.toml`, `advanced.toml`, node-list files, source caches, migration backups, `template.json`, or generated `sing-box.<gen>.json`;
 - Applies stable redaction to sensitive address and interface values by default;
 - Excludes logcat by default; only `--with-logcat` explicitly includes it and emits a warning;
 - `--raw` disables address redaction and emits a warning;
-- Writes under the state root (`/data/adb/flux-rs`) unless `-o <dir>` says otherwise. The default is not the process working directory: a root shell's cwd is `/`, which is read-only.
+- Writes under `/data/adb/flux-rs/run/` unless `-o <dir>` says otherwise. The default is not the process working directory: a root shell's cwd is `/`, which is read-only.
 
 The diagnostic bundle MUST NOT claim "cleaned" unless a fresh actual enumeration proves that the objects are absent.
 
@@ -300,7 +302,7 @@ The installer MUST explain step 2 clearly; otherwise users will mistake "shown a
 After enabling in the manager and completing the first reboot:
 
 ```sh
-FLUXD=/data/adb/modules/flux_rs/bin/fluxd
+FLUXD=/data/adb/modules/Flux-rs/bin/fluxd
 $FLUXD status
 $FLUXD check       # Configuration and capability diagnostics, when needed
 ```
