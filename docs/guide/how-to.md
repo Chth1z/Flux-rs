@@ -16,16 +16,19 @@
 
 **装完是关着的，这是故意的。** 管理器里模块显示为已禁用不是装失败，是在等你填配置。
 
-### 1. 填两个文件
+### 1. 填好主配置和模板
 
 都在 `/data/adb/flux-rs/config/`：
 
 | 文件 | 干什么 |
 |---|---|
-| `flux.toml` | 挑哪些应用走代理，配置手工节点和可选订阅 |
+| `flux.toml` | 应用、地址、接口、Wi-Fi 选择，以及统一的节点来源 |
+| `advanced.toml` | 可选的抓取、名称整理、分组和日志保留策略 |
 | `template.json` | 代理配置的**模板**：DNS、路由规则、节点分组的骨架 |
 
-**你编辑模板，不编辑引擎实际跑的那份。** Flux 拿模板加上手工节点和可用订阅内容，生成 `run/sing-box.<代数>.json` 交给 sing-box。`config/` 下的都是你的，Flux 永不改写；`run/` 下的都是机器产物，随时可以删掉重建。
+**你编辑模板，不编辑引擎实际跑的那份。** Flux 拿模板加上手工节点和可用订阅内容，生成 `run/sing-box.<代数>.json` 交给 sing-box。运行中的 daemon 只读取 `config/`；安装升级时可进行一次结构迁移并保留原件。日志、缓存、生成配置和默认诊断包归 `run/`。它跨重启保留；不要删除运行中 daemon 的锁和 socket。
+
+此前 Rust 版本若使用 `flux_rs` 模块 id，本次安装会迁移到 `Flux-rs`，保留配置和管理器开关，并把旧 Rust 模块交给管理器在重启时移除。旧模块的启动、卸载入口会先退出，避免再次运行旧程序或删除已经移交的配置。旧版 shell Flux 不参与这次迁移。
 
 这样订阅更新才不需要你手工合并——填空和追加节点是 Flux 的活。
 
@@ -44,11 +47,13 @@
 不用开终端：管理器里这个模块的描述就是实时状态。
 
 ```
-Per-app proxy: the apps you pick go through sing-box, everything else is left alone.
-🥰 [Active] gen 7 · 3 apps · rmnet_data0
+Seamlessly redirect your network Flux.
+🥰 [RUNNING] PID: 1234 · 黑名单 · 排除清单 3 项 · rmnet_data0
 ```
 
-出问题时它会说是哪一种问题，比如 `🤯 [Inactive] unsupported_lpm_trie_kernel:6.6.30`，或者 `😴 [Disabled] toggle this module on to enable Flux`。
+出问题时它会说是哪一种问题，比如 `🤯 [FAILED] unsupported_lpm_trie_kernel:6.6.30`，或者 `😴 [STOPPED] 已停止`。
+
+`RUNNING` 表示本地接管已就绪，不证明节点或互联网可达。配置更新被拒绝时，正在运行的旧代可继续显示 `RUNNING` 并附上更新错误。
 
 要更细的就跑 `fluxd status`。它逐接口报告，包括某个接口为什么被排除——完整示例与怎么读见 [`introduction.md`](introduction.md#状态会直接列出覆盖面)。
 
@@ -70,57 +75,89 @@ Per-app proxy: the apps you pick go through sing-box, everything else is left al
 
 Flux 只负责"挑出哪些应用的流量"。挑出来之后怎么走——用哪个服务器、按什么规则——由 [sing-box](https://github.com/SagerNet/sing-box) 负责，Flux **原封不动**用官方版本，不打补丁。
 
-### 手工节点、订阅可以任选或混用
+### 一个节点来源列表
 
-只用手工节点时，在 `flux.toml` 加上：
+`flux.toml` 的 `[nodes]` 同时接收订阅和手工节点：
 
 ```toml
 [nodes]
-list = ["@nodes.txt"]
+sources = [
+  "https://provider.example.invalid/subscription",
+  "@nodes.txt",
+]
 ```
 
-在同目录的 `nodes.txt` 中每行放一条完整分享链接。以下只示意格式，替换成自己的原始链接：
+只用手工节点就删除订阅项；只用订阅就删除本地文件项。也可以直接放完整的 `hysteria2://…`、`vless://…` 等分享链接。多个订阅按来源顺序合并，相同 URL 只取第一次；手工节点保持名称，不经过机场公告过滤或改名。来源间重名会报告冲突位置，不自动覆盖或重命名。
+
+`nodes.txt` 在同一个目录，每行一条手工 URI：
 
 ```text
-# 整行注释；链接内部的 # 后面是节点名
+# 只有整行注释；链接内部 # 后面是节点名
 hysteria2://user%3Apassword@proxy.example.invalid:443?sni=front.example.invalid#US-LA-hy2
 ```
 
-也可以直接写 `list = ["hysteria2://…", "vless://…"]`，或与 `@nodes.txt` 混写。
-列表文件只能是 `config/` 的直接子文件，不能继续引用另一个文件。粘贴原始 URI，不带聊天消息中的花括号或 Markdown 链接包装。
+文件只能是 `config/` 的直接子文件，不能递归引用。粘贴原始 URI，不要连同 Markdown 链接包装一起复制。
 
-订阅在同一份 `flux.toml` 中按需增加；已有这个表时只改值，不重复声明：
+HTTP(S) 字符串代表订阅。手工 HTTP 代理用明确的对象写法：
 
 ```toml
-[subscription]
-url = "https://provider.example.invalid/subscription"
-interval = 86400
+[nodes]
+sources = [{ node = "http://user:password@proxy.example.invalid:8080#HTTP" }]
 ```
 
-只用手工节点时，省略 `[subscription]` 或保持 `url = ""`。`interval = 0` 关闭定时刷新；`fluxd subscribe` 仍可手动抓取，失败后的网络恢复事件也可触发重试。非零刷新计划不会因为一次失败而消失。
+本地节点文件里的 HTTP URI 本来就是手工节点，无需额外包装。
 
-**原来的 `outbounds` 菜单保持原样。** 节点名称匹配地区时会进入对应空分组，例如 `US-LA-hy2`。只添加这个节点时，在面板的 `PROXY` 菜单选择 `US`；没有匹配节点的地区仍按现有规则显示 `DIRECT`。没有地区标识的名字照常保留；你可以在现有菜单里显式引用它，或者自行增加空 `AUTO` 分组接收全部节点。`nodes_unreferenced` 表示节点已加入配置，但没有分组引用它，不会替你改名或重排菜单。
+**原有出站菜单保留。** 自带模板的 `PROXY` 指向地区组。例如节点名含 `US`，便可在原有菜单里选择 `US`。没有匹配节点的空地区组填为 `DIRECT`。未被菜单引用的节点会显示 `nodes_unreferenced`；可以自行引用其名称或添加空 `AUTO` 分组。
 
-手工节点不会经过机场公告过滤、改名或截断。Hysteria2 的 userinfo 会完整解码，`hy2://` 也可用。转换器无法准确表达的参数会明确报错，例如当前未实现的 VLESS 非 `none` 加密、未知传输，以及 Hysteria2 的 `pinSHA256`、`mport`；不会静默删掉后继续。引擎新特性也可以直接使用原生 sing-box JSON 配置，最终由实际安装的官方引擎检查。
+分享 URI 无法准确转换的字段会报错，例如尚未支持的 VLESS 非 `none` 加密、未知传输或 Hysteria2 的 `pinSHA256`、`mport`。不会删除字段后冒充支持。原生 sing-box JSON 则由实际安装的官方引擎校验。
 
-### 抓取和名称整理按职责分开
+### 常用选择与进阶策略分开
 
-普通使用只需订阅 URL 和刷新间隔。`timeout`、`retries` 可在 `[subscription]` 中按需填写；排除公告、改名、去 emoji 和截断名称属于 `[subscription.refine]`：
+四个流量选择维度默认都是 `blacklist`、空清单。`apps` 空黑名单会选择已安装的普通应用；系统 UID 和 root 的边界不变。需要只选少量应用时，显式填写：
 
 ```toml
-[subscription.refine]
+[apps]
+mode = "whitelist"
+list = ["0:com.example.browser"]
+```
+
+缺失 `flux.toml` 是配置错误；删除文件不会让默认黑名单扩大接管。
+
+`advanced.toml` 可省略。首装提供带注释的参考文件，常见自定义如下：
+
+```toml
+[nodes.fetch]
+interval = 0       # 关闭定时刷新，仍可手动刷新或在网络恢复时重试
+timeout = 10
+retries = 2
+user_agent = ""    # 空值使用内置 UA
+
+[nodes.refine]
 strip_emoji = false
 max_tag_length = 64
 rename = [{ match = "旧名称", replace = "新名称" }]
+
+[nodes.groups]
+HK = "香港|Hong Kong|HK"
+
+[log]
+max_size_mib = 4
+retain = 1
 ```
 
-省略的项使用内置默认值。无需增加“普通/极客模式”，也无需为这几项再建配置文件。只有长列表用 `@file` 拆出，常用的 `flux.toml` 保持简短。
+省略项使用内置默认值。分组正则匹配节点的最终名称，不区分大小写；写了某个地区就替换该地区规则，其余内置规则保留。只填现有空分组，不创建菜单。`PROXY`、`GLOBAL`、`AUTO` 始终收全部节点。日志在实际写入时轮转，`retain = 0` 仅留当前文件。
 
-**旧配置迁移一次：** 把原先 `[subscription]` 中的 `exclude_pattern`、`rename`、`strip_emoji`、`max_tag_length` 移到 `[subscription.refine]` 下；`url`、`interval`、`timeout`、`retries` 留在原表。旧平铺键会报未知配置项；Flux 不会改写你的文件。
+两份 TOML 没有重叠字段和覆盖优先级。DNS、路由、TLS、出站和引擎日志直接使用 `template.json` 的原生字段；不在进阶文件里重复包装。
 
-抓回来的原始响应保存在 `run/subscription.raw`，只用于当前配置的 URL；换订阅不会混入旧来源。**修改名称整理规则无需重新联网。**
+### 升级与运行文件
 
-更新永远先过官方 `sing-box check` 才部署，不过就保留当前配置并报错——订阅更新不会把你的网络搞没。
+安装器保留当前配置和模板。旧 Rust 配置的 `nodes.list`、`subscription.url` 合并进 `nodes.sources`，抓取和名称整理移到进阶文件；旧的隐式 whitelist 在可识别的旧安装上被显式保留。迁移前的原件在 `run/migrations/`，失败时提示冲突字段。已经使用新结构的配置保持字节不变。模板始终原样保留。
+
+每个远端来源只有一个 `run/cache/sources/<来源标识>.raw`，没有配套 URL 文件或清洗结果缓存。来源换序可复用缓存，换 URL 不会串用旧响应。名称整理和分组修改可以离线重建。只有通过正常验证和激活的响应才替换缓存；某个来源失败仍会尝试其余来源，错误会继续显示。
+
+`fluxd subscribe` 手动刷新所有远端来源；默认每天刷新一次。失败不会取消非零刷新计划。生成结果相同则不重启引擎，候选检查不通过则保留当前代。
+
+模块 ID 为 `Flux-rs`，命令位于 `/data/adb/modules/Flux-rs/bin/fluxd`。许可证和构建说明随发行 ZIP 提供，设备只安装运行所需文件及配置参考；运行日志是 `run/fluxd.log`，默认引擎缓存是 `run/cache/sing-box.db`。模板里显式指定的非空缓存路径及其它相对路径保持原有含义。
 
 要用外部控制面板，就在模板里启用 `clash_api`。建议控制器监听回环且 secret 非空；Flux 会对不符合这两项的配置给出告警。管理器里那个按钮会跳过去，URL 自带 secret。
 

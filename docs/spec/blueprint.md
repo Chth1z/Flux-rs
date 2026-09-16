@@ -3245,6 +3245,13 @@ Existing explicit app selection is preserved, including the old implicit
 whitelist default: migration materialises that mode before the new blacklist
 default could broaden selection.
 
+An apps-only or empty document does not identify its own historical default.
+For that case, installation uses positive previous-module identity evidence
+(`id=flux_rs`, `name=Flux-rs`, with no current `Flux-rs` installation) to request
+legacy-default migration. It never guesses from the absence of an apps table.
+Writing `nodes.sources` completes that structural migration; retries recognise
+the completed main document. Current unmarked documents keep current semantics.
+
 Migration prepares and validates both output documents before publishing
 either. Existing destination values may be reused when equal; conflicting
 explicit values produce a field-specific error and leave both inputs intact.
@@ -3259,6 +3266,14 @@ duplicating sources or replacing the original backups.
 Migration is an installation operation performed with this Flux-rs daemon
 stopped; manager staging remains the binary-installation mechanism. Retain the
 manager's enabled/disabled choice on upgrade, and disable a fresh installation.
+When replacing the positively identified previous Rust module `flux_rs`, the
+current `Flux-rs` identity takes precedence for the switch, including an absent
+`disable` file. After successful migration and switch transfer, remove only the
+previous Rust module's `service.sh` and `uninstall.sh`, then set its manager
+`remove` flag. This transfers ownership of the shared data root: the old launch
+entry must not compete for its lock and the old uninstaller must not delete its
+data. Preserve the previous switch until retirement so retries inherit the same
+choice. The manager removes the old envelope at reboot.
 This contract does not migrate or manage the retired shell Flux project.
 
 Existing default log and engine-cache files may be moved to their exact new
@@ -3672,6 +3687,12 @@ are returned to the reactor; network I/O never blocks its event loop. A failure
 at one source does not prevent attempting the others, and remains visible even
 when the available pool forms a valid candidate. There is no independent worker,
 timer or retry loop for every source.
+
+Introducing a remote source triggers its initial acquisition when no usable
+snapshot is available. Ordinary convergence, source reordering and unrelated
+network events do not repeat that initial acquisition. Subsequent refreshes
+come from the configured cadence, an explicit request or the existing
+route-recovery event. An unaccepted response never prevents a new refresh.
 
 ### 28.2.2 One node-source list
 

@@ -1,0 +1,26 @@
+# Flux-rs 可选进阶策略：省略本文件或任意字段时，使用内置默认值。
+# 与 flux.toml 字段互斥；没有覆盖顺序。保存后整份候选通过验证才生效。
+# DNS、路由、TLS、出站与 sing-box 日志请直接使用 template.json 原生字段。
+
+[nodes.fetch]
+interval = 86400         # 秒；0 关闭定时刷新，仍可手动或由网络恢复触发
+timeout = 10            # 每次请求的超时秒数，必须大于 0
+retries = 2             # 首次失败后的额外尝试次数
+user_agent = ""         # 空值使用内置 Flux/sing-box UA，可按订阅服务要求自定义
+
+[nodes.refine]
+# 只处理远端节点。省略字段沿用内置规则；下面是可选的自定义写法：
+# exclude_pattern = "announcement|expire"  # 正则匹配原始名，不区分大小写
+# rename = [{ match = "旧名", replace = "新名" }]  # 按数组顺序替换
+# strip_emoji = true
+# max_tag_length = 32
+
+[nodes.groups]
+# 现有空 selector/urltest 的 tag = 匹配节点名的正则，不区分大小写。
+# 同名项替换对应内置地域规则；其它内置规则保留。不会创建或修改菜单。
+# HK = "香港|Hong Kong|HK"
+# PROXY / GLOBAL / AUTO 始终包含全部节点，不在这里重新定义。
+
+[log]
+max_size_mib = 4         # daemon 日志写入时轮转，必须大于 0
+retain = 1              # 保留多少个旧文件；0 仅保留当前文件

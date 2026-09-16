@@ -11,14 +11,15 @@
 
 use std::io;
 
+use crate::configuration::{describe_flux_error, describe_selector_error};
 use flux_core::cidr::{Ipv4Cidr, Ipv6Cidr};
-use flux_core::config::{ConfigError, FluxConfig, MAX_CONFIG_BYTES};
+use flux_core::config::FluxConfig;
 use flux_core::engine_config::{self, EngineParams, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::{PackageIndex, SelectorError};
 
 use crate::engine::{self, EngineSpec};
 use crate::layout::{read_capped, Layout};
-use crate::subscription::{subscription_error_status, subscription_snapshot};
+use crate::subscription::{source_snapshots, subscription_error_status};
 
 /// The findings of one check pass. `errors` non-empty means the check failed
 /// (CLI exit code non-zero, `ok=false` on the wire); `warnings` never fail it.
@@ -32,17 +33,6 @@ impl CheckReport {
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
     }
-}
-
-/// Parses flux.toml with @file names confined to this layout's config directory.
-/// The core validates each name before invoking the reader, so join cannot
-/// escape the watched directory (§11.2.2, §29.6).
-pub(crate) fn parse_flux_config(layout: &Layout, bytes: &[u8]) -> Result<FluxConfig, ConfigError> {
-    FluxConfig::parse_with_list_files(bytes, |name| {
-        let path = layout.config_dir().join(name);
-        read_capped(&path, MAX_CONFIG_BYTES + 1)
-            .map_err(|error| format!("{error} ({})", path.display()))
-    })
 }
 
 /// The full check: everything [`quick_check`] covers plus an unattached BPF
@@ -113,28 +103,12 @@ fn quick_check_inner(
 }
 
 fn check_flux_toml(layout: &Layout, report: &mut CheckReport) -> Option<FluxConfig> {
-    let path = layout.flux_toml();
-    let bytes = match read_capped(&path, MAX_CONFIG_BYTES + 1) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            report.warnings.push(
-                "config/flux.toml missing: no apps selected, nothing will be proxied".to_string(),
-            );
-            return Some(FluxConfig::default());
-        }
-        Err(e) => {
-            report
-                .errors
-                .push(format!("flux.toml unreadable: {e} ({})", path.display()));
-            return None;
-        }
-    };
-    let config = match parse_flux_config(layout, &bytes) {
+    let config = match crate::configuration::load(layout) {
         Ok(config) => config,
-        Err(e) => {
+        Err((token, detail)) => {
             report
                 .errors
-                .push(format!("flux.toml: {}", describe_flux_error(&e)));
+                .push(format!("{token}: {}", detail.unwrap_or_default()));
             return None;
         }
     };
@@ -296,31 +270,23 @@ fn check_template_json(
     };
 
     let nodes = match flux {
-        Some(flux) => match subscription_snapshot(layout, flux, None, true) {
-            Ok(raw) => {
-                if raw.is_none() && !flux.subscription.url.is_empty() {
-                    report.warnings.push(
-                    "subscription cache is missing: checking the available manual and template inputs; remote nodes will be checked after fetching"
-                        .to_string(),
-                );
-                }
-                match flux_core::subscription::assemble_nodes(flux, raw.as_deref()) {
-                    Ok(nodes) => nodes,
-                    Err(error) => {
-                        let (token, detail) = subscription_error_status(&error);
-                        report.errors.push(format!("{token}: {detail}"));
-                        return None;
-                    }
+        Some(flux) => {
+            let snapshots = source_snapshots(layout, &flux.nodes, None);
+            report.warnings.extend(snapshots.warnings);
+            match flux_core::subscription::assemble_nodes(&flux.nodes, |source| {
+                snapshots.raw.get(source).map(|raw| raw.as_ref())
+            }) {
+                Ok(nodes) => nodes,
+                Err(error) => {
+                    let (token, detail) = subscription_error_status(&error);
+                    report.errors.push(format!("{token}: {detail}"));
+                    return None;
                 }
             }
-            Err((token, detail)) => {
-                report.errors.push(format!("{token}: {detail}"));
-                return None;
-            }
-        },
+        }
         None => Vec::new(),
     };
-    let generated = match engine_config::generate_from_template(&user, &nodes) {
+    let mut generated = match engine_config::generate_from_template(&user, &nodes) {
         Ok(generated) => generated,
         Err(error) => {
             let token = match error {
@@ -334,6 +300,7 @@ fn check_template_json(
             return None;
         }
     };
+    engine_config::complete_cache_path(&mut generated, &layout.engine_cache().to_string_lossy());
 
     // The §9.1/§9.6 structural constraints, via the same builder the daemon
     // uses. Dummy params: the ports only shape the injected inbounds.
@@ -633,80 +600,6 @@ fn write_check_config(effective: &serde_json::Value) -> io::Result<std::path::Pa
     ))
 }
 
-/// Human-readable rendering of [`ConfigError`]. Lives here, not in flux-core:
-/// the core keeps structured errors, presentation is the daemon's job.
-pub fn describe_flux_error(e: &ConfigError) -> String {
-    match e {
-        ConfigError::TooLarge(size) => {
-            format!("file is {size} bytes, the limit is {MAX_CONFIG_BYTES}")
-        }
-        ConfigError::Syntax(detail) => format!("TOML syntax: {detail}"),
-        ConfigError::UnknownKey { key, closest } => match closest {
-            Some(hint) => format!("unknown key `{key}` (did you mean `{hint}`?)"),
-            None => format!("unknown key `{key}`"),
-        },
-        ConfigError::WrongType(detail) => detail.clone(),
-        ConfigError::InvalidValue(detail) => detail.clone(),
-        ConfigError::TooManyApps(n) => format!("{n} apps exceed the selection limit"),
-        ConfigError::TooManyBypassV4(n) => format!("{n} IPv4 bypass prefixes exceed the limit"),
-        ConfigError::TooManyBypassV6(n) => format!("{n} IPv6 bypass prefixes exceed the limit"),
-        ConfigError::DuplicateApp(app) => format!("app `{app}` is listed twice"),
-        ConfigError::DuplicateBypass(prefix) => format!("CIDR `{prefix}` is listed twice"),
-        ConfigError::DuplicateInterface(name) => {
-            format!("interface `{name}` is listed twice")
-        }
-        ConfigError::DuplicateSsid(_) => "an SSID entry is listed twice".to_string(),
-        ConfigError::Selector(e) => describe_selector_error(e),
-        ConfigError::Cidr(e) => describe_cidr_error(e),
-        ConfigError::InvalidListPath(path) => {
-            format!("list reference `@{path}` must name one file inside config/")
-        }
-        ConfigError::ListFileUnreadable { path, detail } => {
-            format!("list file `config/{path}` is unreadable: {detail}")
-        }
-        ConfigError::ListFileTooLarge { path, size } => {
-            format!("list file `config/{path}` is {size} bytes, the limit is {MAX_CONFIG_BYTES}")
-        }
-        ConfigError::ListFileNotUtf8(path) => {
-            format!("list file `config/{path}` is not valid UTF-8")
-        }
-        ConfigError::RecursiveListReference { path, line } => format!(
-            "list file `config/{path}` line {line} starts with @; references cannot recurse"
-        ),
-    }
-}
-
-fn describe_selector_error(e: &SelectorError) -> String {
-    match e {
-        SelectorError::Malformed(text) => {
-            format!("selector `{text}` is not `packageName` or `userId:packageName`")
-        }
-        SelectorError::UserIdOutOfRange(id) => {
-            format!("user id {id} is above {}", flux_core::abi::USER_ID_MAX)
-        }
-        SelectorError::AppIdOutOfRange(0) => "it runs as root, the same user the proxy engine \
-             runs as; capturing it would feed the engine's own traffic back into itself, so no \
-             spelling of this entry can work"
-            .to_string(),
-        SelectorError::AppIdOutOfRange(id) => {
-            format!("uid {id} does not fit one Android user's range")
-        }
-        SelectorError::UnknownPackage(package) => format!("package `{package}` is not installed"),
-    }
-}
-
-fn describe_cidr_error(e: &flux_core::cidr::CidrError) -> String {
-    use flux_core::cidr::CidrError;
-    match e {
-        CidrError::Malformed(text) => format!("`{text}` is not a canonical CIDR"),
-        CidrError::PrefixTooLong(len) => format!("prefix length {len} exceeds the family width"),
-        CidrError::HostBitsSet(text) => {
-            format!("`{text}` has host bits set below the prefix length")
-        }
-        CidrError::CapacityExceeded => "bypass capacity exceeded".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_configs_are_error_and_warning_respectively() {
+    fn missing_configs_are_errors() {
         let layout = tmp_layout("missing");
         let spec = loopback_spec(layout.root().join("no-engine"));
         let report = quick_check(&layout, &spec);
@@ -747,11 +640,10 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.starts_with("engine_binary_missing")));
-        // flux.toml missing is a warning, not an error: unconfigured != broken.
         assert!(report
-            .warnings
+            .errors
             .iter()
-            .any(|w| w.contains("flux.toml missing")));
+            .any(|error| error.starts_with("flux_config_unreadable")));
         std::fs::remove_dir_all(layout.root()).unwrap();
     }
 
@@ -763,7 +655,7 @@ mod tests {
             r#"{"outbounds":[{"type":"selector","tag":"PROXY","outbounds":[]}]}"#,
         )
         .unwrap();
-        let flux = FluxConfig::parse(b"[nodes]\nlist = ['trojan://placeholder@example.invalid:443#manual']\n[subscription]\nurl = 'https://example.invalid/sub'\n").unwrap();
+        let flux = FluxConfig::parse(b"[nodes]\nsources = ['trojan://placeholder@example.invalid:443#manual', 'https://example.invalid/sub']\n").unwrap();
         let mut report = CheckReport::default();
         let generated = check_template_json(&layout, Some(&flux), &mut report).unwrap();
         assert!(report.errors.is_empty());
@@ -771,12 +663,13 @@ mod tests {
             generated["outbounds"][0]["outbounds"],
             serde_json::json!(["manual"])
         );
-        std::fs::write(layout.subscription_raw(), br#"{"outbounds":[{"type":"trojan","tag":"remote","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#).unwrap();
-        for (binding, expected) in [
+        layout.ensure_source_cache().unwrap();
+        for (url, expected) in [
             ("https://example.invalid/old", vec!["manual"]),
             ("https://example.invalid/sub", vec!["manual", "remote"]),
         ] {
-            std::fs::write(layout.subscription_url_binding(), binding).unwrap();
+            let source = flux_core::subscription::RemoteSource::parse(url).unwrap();
+            std::fs::write(layout.source_cache(&source), br#"{"outbounds":[{"type":"trojan","tag":"remote","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#).unwrap();
             let generated =
                 check_template_json(&layout, Some(&flux), &mut CheckReport::default()).unwrap();
             assert_eq!(
@@ -791,35 +684,29 @@ mod tests {
     fn pending_response_bypasses_broken_old_cache_and_cache_errors_keep_their_token() {
         let layout = tmp_layout("pending-cache");
         let flux =
-            FluxConfig::parse(b"[subscription]\nurl = 'https://example.invalid/sub'\n").unwrap();
-        std::fs::create_dir(layout.subscription_url_binding()).unwrap();
-        assert_eq!(
-            subscription_snapshot(&layout, &flux, None, true)
-                .unwrap_err()
-                .0,
-            "subscription_fetch_failed:cache_read"
-        );
-        let pending = br#"{"outbounds":[{"type":"trojan","tag":"JP node","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#;
-        let raw = subscription_snapshot(&layout, &flux, Some(pending), true).unwrap();
-        let pool = flux_core::subscription::assemble_nodes(&flux, raw.as_deref()).unwrap();
-        let template = engine_config::parse_jsonc(engine_config::DEFAULT_TEMPLATE_JSONC).unwrap();
-        let generated = engine_config::generate_from_template(&template, &pool).unwrap();
-        assert_eq!(
-            generated["outbounds"].as_array().unwrap().last().unwrap()["tag"],
-            "JP node"
-        );
-        std::fs::remove_dir(layout.subscription_url_binding()).unwrap();
+            FluxConfig::parse(b"[nodes]\nsources = ['https://example.invalid/sub']\n").unwrap();
+        layout.ensure_source_cache().unwrap();
+        let source = flux.nodes.remote_sources().next().unwrap().clone();
+        let path = layout.source_cache(&source);
+        std::fs::create_dir(&path).unwrap();
+        assert!(source_snapshots(&layout, &flux.nodes, None).warnings[0]
+            .contains("subscription_fetch_failed:cache_read"));
+        let pending = std::collections::BTreeMap::from([(source, br#"{"outbounds":[{"type":"trojan","tag":"JP node","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#.to_vec())]);
+        let snapshots = source_snapshots(&layout, &flux.nodes, Some(&pending));
+        assert!(snapshots.warnings.is_empty());
+        let pool = flux_core::subscription::assemble_nodes(&flux.nodes, |source| {
+            snapshots.raw.get(source).map(|raw| raw.as_ref())
+        })
+        .unwrap();
+        assert_eq!(pool[0].outbound["tag"], "JP node");
+        std::fs::remove_dir(&path).unwrap();
         std::fs::write(
-            layout.subscription_url_binding(),
-            vec![b'x'; flux_core::config::MAX_CONFIG_BYTES + 1],
+            &path,
+            vec![b'x'; crate::subscription::MAX_SUBSCRIPTION_BYTES + 1],
         )
         .unwrap();
-        assert_eq!(
-            subscription_snapshot(&layout, &flux, None, true)
-                .unwrap_err()
-                .0,
-            "subscription_fetch_failed:too_large"
-        );
+        assert!(source_snapshots(&layout, &flux.nodes, None).warnings[0]
+            .contains("subscription_fetch_failed:too_large"));
         std::fs::remove_dir_all(layout.root()).unwrap();
     }
 

@@ -15,82 +15,99 @@ use std::time::Duration;
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 use crate::layout::{read_capped, Layout};
-use flux_core::config::FluxConfig;
+use flux_core::config::{FetchConfig, NodeConfig};
+use flux_core::subscription::{NodeSource, RemoteSource};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 
-/// Selects current pending input before consulting the accepted URL-bound cache.
-/// A replacement response must remain usable even when old disk state is unreadable.
-pub fn subscription_snapshot<'a>(
+/// Accepted input snapshots for one immutable candidate. Missing/unreadable
+/// sources are visible while independently available sources remain usable.
+pub struct Snapshots<'a> {
+    pub raw: BTreeMap<RemoteSource, Cow<'a, [u8]>>,
+    pub warnings: Vec<String>,
+}
+
+pub fn source_snapshots<'a>(
     layout: &Layout,
-    flux: &FluxConfig,
-    pending: Option<&'a [u8]>,
-    use_cache: bool,
-) -> Result<Option<std::borrow::Cow<'a, [u8]>>, (String, String)> {
-    if flux.subscription.url.is_empty() {
-        return Ok(None);
-    }
-    if let Some(raw) = pending {
-        return Ok(Some(std::borrow::Cow::Borrowed(raw)));
-    }
-    if !use_cache {
-        return Ok(None);
-    }
-    let binding_path = layout.subscription_url_binding();
-    let binding = match read_capped(
-        &binding_path,
-        flux_core::config::MAX_CONFIG_BYTES.saturating_add(1),
-    ) {
-        Ok(binding) => binding,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err((
-                "subscription_fetch_failed:cache_read".to_string(),
-                format!("{}: {error}", binding_path.display()),
-            ));
-        }
+    nodes: &NodeConfig,
+    pending: Option<&'a BTreeMap<RemoteSource, Vec<u8>>>,
+) -> Snapshots<'a> {
+    let mut snapshots = Snapshots {
+        raw: BTreeMap::new(),
+        warnings: Vec::new(),
     };
-    if binding.len() > flux_core::config::MAX_CONFIG_BYTES {
-        return Err((
-            "subscription_fetch_failed:too_large".to_string(),
-            format!("{} exceeds the Flux config limit", binding_path.display()),
-        ));
-    }
-    if binding != flux.subscription.url.as_bytes() {
-        return Ok(None);
-    }
-    let path = layout.subscription_raw();
-    let raw = match read_capped(&path, crate::subscription::MAX_SUBSCRIPTION_BYTES + 1) {
-        Ok(raw) => raw,
-        // A first-use check is read-only and may precede the initial fetch.
-        // The daemon will fetch before it creates an enabled generation.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err((
-                "subscription_fetch_failed:cache_read".to_string(),
-                format!("{}: {error}", path.display()),
-            ));
+    for input in &nodes.sources {
+        let NodeSource::Remote { source, position } = input else {
+            continue;
+        };
+        if let Some(raw) = pending.and_then(|pending| pending.get(source)) {
+            snapshots.raw.insert(source.clone(), Cow::Borrowed(raw));
+            continue;
         }
-    };
-    if raw.len() > crate::subscription::MAX_SUBSCRIPTION_BYTES {
-        return Err((
-            "subscription_fetch_failed:too_large".to_string(),
-            format!(
-                "{} exceeds the {}-byte limit",
-                path.display(),
-                crate::subscription::MAX_SUBSCRIPTION_BYTES
-            ),
-        ));
+        match read_capped(&layout.source_cache(source), MAX_SUBSCRIPTION_BYTES + 1) {
+            Ok(raw) if raw.len() <= MAX_SUBSCRIPTION_BYTES => {
+                snapshots.raw.insert(source.clone(), Cow::Owned(raw));
+            }
+            Ok(_) => snapshots
+                .warnings
+                .push(format!("{position}: subscription_fetch_failed:too_large")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => snapshots
+                .warnings
+                .push(format!("{position}: subscription_cache_missing")),
+            Err(error) => snapshots.warnings.push(format!(
+                "{position}: subscription_fetch_failed:cache_read ({error})"
+            )),
+        }
     }
-    Ok(Some(std::borrow::Cow::Owned(raw)))
+    snapshots
+}
+
+/// Remove only private, source-shaped regular files that are no longer inputs.
+/// Call after configuration activation; cleanup never decides activation.
+pub fn prune_cache(layout: &Layout, nodes: &NodeConfig) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let entries = match fs::read_dir(layout.source_cache_dir()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(id) = name.strip_suffix(".raw") else {
+            continue;
+        };
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || nodes.remote_sources().any(|source| source.id() == id)
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let own_uid = unsafe { libc::geteuid() };
+        if metadata.is_file() && metadata.uid() == own_uid {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 pub fn subscription_error_status(
     error: &flux_core::subscription::SubscriptionError,
 ) -> (String, String) {
     use flux_core::subscription::SubscriptionError;
+    if let SubscriptionError::Source { error: inner, .. } = error {
+        return (subscription_error_status(inner).0, error.to_string());
+    }
     let token = match error {
         SubscriptionError::ZeroNodes => "subscription_empty",
         SubscriptionError::InvalidExcludePattern(_)
-        | SubscriptionError::InvalidRenamePattern { .. } => "flux_config_invalid",
+        | SubscriptionError::InvalidRenamePattern { .. }
+        | SubscriptionError::InvalidGroupPattern(_) => "flux_config_invalid",
         _ => "subscription_fetch_failed:invalid_content",
     };
     (token.to_string(), error.to_string())
@@ -110,9 +127,8 @@ pub const MAX_SUBSCRIPTION_BYTES: usize = 8 * 1024 * 1024;
 /// Immutable request handed to a blocking worker thread.
 #[derive(Debug, Clone)]
 pub struct FetchRequest {
-    pub url: String,
-    pub timeout: Duration,
-    pub retries: u32,
+    pub sources: Vec<RemoteSource>,
+    pub policy: FetchConfig,
 }
 
 /// Stable fetch failure exposed through daemon status.
@@ -125,8 +141,7 @@ pub struct FetchError {
 /// One completed request, including the URL whose result it represents.
 #[derive(Debug)]
 pub struct FetchResult {
-    pub url: String,
-    pub result: Result<Vec<u8>, FetchError>,
+    pub sources: Vec<(RemoteSource, Result<Vec<u8>, FetchError>)>,
 }
 
 /// At most one blocking fetch in flight, with eventfd completion notification.
@@ -175,9 +190,8 @@ impl Worker {
         std::thread::Builder::new()
             .name("flux-subscription".to_string())
             .spawn(move || {
-                let url = request.url.clone();
                 let result = fetch(request);
-                if sender.send(FetchResult { url, result }).is_ok() {
+                if sender.send(result).is_ok() {
                     signal(&event);
                 }
             })?;
@@ -207,35 +221,71 @@ fn ensure_crypto_provider() {
     });
 }
 
-fn fetch(request: FetchRequest) -> Result<Vec<u8>, FetchError> {
+fn fetch(request: FetchRequest) -> FetchResult {
+    let roots = load_android_roots();
+    let agent = fetch_agent(
+        &request.policy,
+        roots.as_ref().map(Vec::as_slice).unwrap_or(&[]),
+    );
+    let sources = request
+        .sources
+        .into_iter()
+        .map(|source| {
+            let result = match &roots {
+                Err(error)
+                    if source
+                        .url()
+                        .split_once(':')
+                        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")) =>
+                {
+                    Err(error.clone())
+                }
+                _ => fetch_source(&agent, &source, request.policy.retries),
+            };
+            (source, result)
+        })
+        .collect();
+    FetchResult { sources }
+}
+
+fn fetch_agent(policy: &FetchConfig, certs: &[Certificate<'static>]) -> ureq::Agent {
     ensure_crypto_provider();
-    let certs = load_android_roots()?;
     let tls = TlsConfig::builder()
-        .root_certs(RootCerts::new_with_certs(&certs))
+        .root_certs(RootCerts::new_with_certs(certs))
         .build();
-    let agent = ureq::Agent::config_builder()
+    let user_agent = if policy.user_agent.is_empty() {
+        format!("Flux/{} (sing-box; Android)", flux_core::VERSION)
+    } else {
+        policy.user_agent.clone()
+    };
+    ureq::Agent::config_builder()
         .proxy(None)
-        .timeout_global(Some(request.timeout))
-        .user_agent(format!("Flux/{} (sing-box; Android)", flux_core::VERSION))
+        .timeout_global(Some(Duration::from_secs(policy.timeout)))
+        .user_agent(user_agent)
         .tls_config(tls)
         .build()
-        .new_agent();
+        .new_agent()
+}
 
-    let attempts = request.retries.saturating_add(1);
-    let mut last = None;
+fn fetch_source(
+    agent: &ureq::Agent,
+    source: &RemoteSource,
+    retries: u32,
+) -> Result<Vec<u8>, FetchError> {
+    let attempts = u64::from(retries) + 1;
     for attempt in 1..=attempts {
-        match fetch_once(&agent, &request.url) {
+        match fetch_once(agent, source.url()) {
             Ok(bytes) => return Ok(bytes),
-            Err((reason, detail)) => {
-                last = Some((reason, format!("attempt {attempt}/{attempts}: {detail}")));
+            Err((reason, detail)) if attempt == attempts => {
+                return Err(FetchError {
+                    token: format!("subscription_fetch_failed:{reason}"),
+                    detail: format!("attempt {attempt}/{attempts}: {detail}"),
+                })
             }
+            Err(_) => {}
         }
     }
-    let (reason, detail) = last.unwrap_or(("request", "subscription request failed".to_string()));
-    Err(FetchError {
-        token: format!("subscription_fetch_failed:{reason}"),
-        detail,
-    })
+    unreachable!("there is always at least one attempt")
 }
 
 /// Names the cause of a failed request (§23.1: `subscription_fetch_failed:<reason>`

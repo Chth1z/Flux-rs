@@ -18,7 +18,7 @@
 # whitelist：只代理清单里的应用；blacklist：代理清单之外的所有应用。
 # 格式为 "userId:packageName"；单用户设备 userId 为 0，可省略 `0:`。
 # `@apps.txt` 会读取同目录列表文件；每行一项，`#` 开头为注释。
-mode = "whitelist"
+mode = "blacklist"
 list = []
 
 [cidr]
@@ -38,18 +38,9 @@ mode = "blacklist"
 list = []
 
 [nodes]
-# 手工节点：可直接写分享链接，也可用 ["@nodes.txt"]，文件每行一条链接。
-# 节点名来自链接的 #片段；只有整行以 # 开头才是注释。
-# 手工节点保留你写的名字，不经过机场公告过滤或名称清洗。
-list = []
-
-[subscription]
-# 可选。只用手工节点时保持空 URL；手工节点和订阅也可以同时使用。
-# 空 URL 不抓取、不启用订阅定时器、不创建 subscription.raw。
-url = ""
-interval = 86400          # 秒；0 关闭定时刷新，仍可手动或由网络恢复触发
-
-# 按需添加 timeout / retries 调整抓取参数。
-# 远端节点名称整理属于 [subscription.refine]：
-# exclude_pattern、rename、strip_emoji、max_tag_length。
-# 省略时使用内置默认值；这些设置只影响远端订阅，不改变手工节点。
+# 订阅 URL、手工节点 URI、@本地文件可混合填写，按顺序合并。
+# 例如 sources = ["https://provider.example.invalid/sub", "@nodes.txt"]
+# 本地文件每行一条手工节点 URI；只有整行以 # 开头才是注释。
+# HTTP(S) 字符串表示订阅；手工 HTTP 代理使用 { node = "http://..." }。
+# 手工节点名保持原样。抓取、清洗、分组与日志策略见 advanced.toml。
+sources = []

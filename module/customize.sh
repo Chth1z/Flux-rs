@@ -9,14 +9,12 @@
 
 # Read by the manager's installer after it sources this script, not by us.
 # shellcheck disable=SC2034
-SKIPUNZIP=0
+SKIPUNZIP=1
 
 # No system/ overlay, so skip the mount entirely. Belt and braces with the
 # skip_mount file the ZIP ships (blueprint §13.1).
 # shellcheck disable=SC2034
 SKIPMOUNT=true
-
-ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 
 # The archive is built from an allowlist, but interrupted extraction or a
 # third-party repack can still leave a partial module. Refuse before touching
@@ -30,20 +28,17 @@ for payload in \
 	webroot/index.html \
 	bin/fluxd \
 	bin/sing-box \
-	etc/default-flux.toml \
-	etc/default-template.json \
-	build-info.toml \
-	LICENSE \
-	THIRD_PARTY_NOTICES.md \
-	licenses/sing-box-LICENSE \
-	licenses/DEPENDENCIES.md; do
+	build-info.toml; do
+	unzip -o "$ZIPFILE" "$payload" -d "$MODPATH" >/dev/null || abort "! Cannot extract $payload."
 	if [ ! -s "$MODPATH/$payload" ]; then
 		abort "! Incomplete module payload: $payload is missing or empty."
 	fi
 done
+unzip -o "$ZIPFILE" skip_mount -d "$MODPATH" >/dev/null || abort "! Cannot extract skip_mount."
 if [ ! -e "$MODPATH/skip_mount" ]; then
 	abort "! Incomplete module payload: skip_mount is missing."
 fi
+ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 
 # Architecture. The data plane is aarch64-only.
 if [ "$ARCH" != "arm64" ]; then
@@ -80,25 +75,43 @@ set_perm_recursive "$MODPATH" 0 0 0755 0644
 # FLUX_RUNTIME_ROOT is the same test seam service.sh uses. Root managers never
 # set it, so production always installs to the fixed path.
 RUNTIME_ROOT=${FLUX_RUNTIME_ROOT:-/data/adb/flux-rs}
-FRESH_INSTALL=0
-[ -d "$RUNTIME_ROOT" ] || FRESH_INSTALL=1
-
-mkdir -p "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
-chown 0:0 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
-chmod 0700 "$RUNTIME_ROOT" "$RUNTIME_ROOT/run" "$RUNTIME_ROOT/config"
-
-# Defaults are bootstrap inputs only. Reinstalling/upgrading must never replace
-# either user authority file.
-if [ ! -e "$RUNTIME_ROOT/config/flux.toml" ]; then
-	cp "$MODPATH/etc/default-flux.toml" "$RUNTIME_ROOT/config/flux.toml"
-	chown 0:0 "$RUNTIME_ROOT/config/flux.toml"
-	chmod 0600 "$RUNTIME_ROOT/config/flux.toml"
+MODULES_ROOT=${FLUX_MODULES_ROOT:-/data/adb/modules}
+CURRENT_MODULE="$MODULES_ROOT/Flux-rs"
+PREVIOUS_MODULE="$MODULES_ROOT/flux_rs"
+FRESH_INSTALL=1
+[ -f "$RUNTIME_ROOT/config/flux.toml" ] && FRESH_INSTALL=0
+CURRENT_RUST=false
+PREVIOUS_RUST=false
+if [ "$(grep_prop id "$CURRENT_MODULE/module.prop")" = Flux-rs ] && \
+    [ "$(grep_prop name "$CURRENT_MODULE/module.prop")" = Flux-rs ]; then
+	CURRENT_RUST=true
 fi
-if [ ! -e "$RUNTIME_ROOT/config/template.json" ]; then
-	cp "$MODPATH/etc/default-template.json" "$RUNTIME_ROOT/config/template.json"
-	chown 0:0 "$RUNTIME_ROOT/config/template.json"
-	chmod 0600 "$RUNTIME_ROOT/config/template.json"
+if [ "$(grep_prop id "$PREVIOUS_MODULE/module.prop")" = flux_rs ] && \
+    [ "$(grep_prop name "$PREVIOUS_MODULE/module.prop")" = Flux-rs ]; then
+	PREVIOUS_RUST=true
 fi
+
+# The Rust installer stops this Flux-rs daemon, prepares and validates the
+# migration, and preserves existing user files before atomic publication.
+DEFAULTS="$MODPATH/.install-defaults"
+mkdir -p "$DEFAULTS" || abort "! Cannot prepare installation defaults."
+for payload in default-flux.toml default-advanced.toml default-template.json; do
+	unzip -jo "$ZIPFILE" "etc/$payload" -d "$DEFAULTS" >/dev/null || abort "! Cannot extract $payload."
+	[ -s "$DEFAULTS/$payload" ] || abort "! Missing installation default: $payload."
+done
+# Only the positively identified previous Rust module establishes the old
+# implicit app default. The current identity wins on upgrade/retry.
+LEGACY_CONFIG=false
+if [ "$PREVIOUS_RUST" = true ] && [ "$CURRENT_RUST" = false ]; then
+	LEGACY_CONFIG=true
+fi
+if [ "$LEGACY_CONFIG" = true ]; then
+	"$MODPATH/bin/fluxd" install --root "$RUNTIME_ROOT" --defaults "$DEFAULTS" --legacy-config || abort "! Configuration installation failed."
+else
+	"$MODPATH/bin/fluxd" install --root "$RUNTIME_ROOT" --defaults "$DEFAULTS" || abort "! Configuration installation failed."
+fi
+rm -f "$DEFAULTS/default-flux.toml" "$DEFAULTS/default-advanced.toml" "$DEFAULTS/default-template.json"
+rmdir "$DEFAULTS"
 
 # Installation itself must never start capturing traffic. The switch is the
 # manager's own module toggle, so a fresh install lands as a disabled module and
@@ -106,6 +119,19 @@ fi
 # touch it: whatever the user chose stays chosen.
 if [ "$FRESH_INSTALL" = 1 ]; then
 	: >"$MODPATH/disable"
+elif [ "$CURRENT_RUST" = true ]; then
+	[ ! -e "$CURRENT_MODULE/disable" ] || : >"$MODPATH/disable"
+elif [ "$PREVIOUS_RUST" = true ]; then
+	[ ! -e "$PREVIOUS_MODULE/disable" ] || : >"$MODPATH/disable"
+fi
+
+# Changing the Rust module id transfers ownership of the same state root.
+# Retire the old launch and uninstall entries before asking the manager to
+# remove that envelope; its old uninstaller would delete the transferred data.
+# Keep its switch unchanged so an interrupted installation can retry faithfully.
+if [ "$PREVIOUS_RUST" = true ]; then
+	rm -f "$PREVIOUS_MODULE/uninstall.sh" "$PREVIOUS_MODULE/service.sh" || abort "! Cannot retire the previous Rust module scripts."
+	: >"$PREVIOUS_MODULE/remove" || abort "! Cannot mark the previous Rust module for removal."
 fi
 
 ui_print "- Runtime files initialized."
@@ -114,6 +140,6 @@ if [ "$FRESH_INSTALL" = 1 ]; then
 	ui_print "- 1. Edit /data/adb/flux-rs/config/flux.toml and /data/adb/flux-rs/config/template.json."
 	ui_print "- 2. Enable this module in your root manager."
 	ui_print "- Reboot once after first enabling it; later toggles take effect immediately."
-	ui_print "- 3. Read the module status in your manager, or run /data/adb/modules/flux_rs/bin/fluxd status."
+	ui_print "- 3. Read the module status in your manager, or run /data/adb/modules/Flux-rs/bin/fluxd status."
 	ui_print "- Flux validates the complete configuration before activation; use fluxd check for diagnostics."
 fi

@@ -34,11 +34,17 @@ mod bugreport;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod checks;
 #[cfg(any(target_os = "linux", target_os = "android"))]
+mod configuration;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod control;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod engine;
 #[cfg(any(target_os = "linux", target_os = "android"))]
+mod install;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod layout;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod logger;
 #[cfg(any(target_os = "linux", target_os = "android", test))]
 mod netlink;
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -253,6 +259,40 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
 
     let layout = Layout::product();
     match command {
+        "install" => {
+            let mut root = None;
+            let mut defaults = None;
+            let mut legacy = false;
+            let mut args = rest.iter();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--root" => root = args.next().map(std::path::PathBuf::from),
+                    "--defaults" => defaults = args.next().map(std::path::PathBuf::from),
+                    "--legacy-config" => legacy = true,
+                    _ => {
+                        eprintln!(
+                            "fluxd install: expected --root PATH --defaults PATH [--legacy-config]"
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            let (Some(root), Some(defaults)) = (root, defaults) else {
+                eprintln!("fluxd install: --root and --defaults are required");
+                return ExitCode::from(2);
+            };
+            if !root.is_absolute() || !defaults.is_absolute() {
+                eprintln!("fluxd install: paths must be absolute");
+                return ExitCode::from(2);
+            }
+            match install::run(&Layout::at(root), &defaults, legacy) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("fluxd install: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         // Internal plumbing for the read-only Phase 0 probe. Keeping the
         // redactor here gives bugreport and observe.sh exactly one masking
         // implementation without adding a packaged helper script.

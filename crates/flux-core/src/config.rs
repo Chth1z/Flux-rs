@@ -8,7 +8,9 @@
 //! Unknown keys, non-canonical values, duplicates and capacity overruns reject
 //! the whole candidate. Nothing is truncated or partially applied (§11.2.3).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::subscription::{NodePolicy, NodeSource, RemoteSource};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,16 +21,9 @@ use crate::selector::{compose_uid, AppSelector, PackageIndex, SelectorError};
 /// Largest accepted flux.toml or referenced list file, in bytes (§11.2.3).
 pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
-const TOP_LEVEL_KEYS: &[&str] = &[
-    "apps",
-    "cidr",
-    "interfaces",
-    "ssid",
-    "nodes",
-    "subscription",
-];
+const TOP_LEVEL_KEYS: &[&str] = &["apps", "cidr", "interfaces", "ssid", "nodes"];
 const DIMENSION_KEYS: &[&str] = &["mode", "list"];
-const SUBSCRIPTION_KEYS: &[&str] = &["url", "interval", "timeout", "retries", "refine"];
+const FETCH_KEYS: &[&str] = &["interval", "timeout", "retries", "user_agent"];
 const REFINEMENT_KEYS: &[&str] = &["exclude_pattern", "rename", "strip_emoji", "max_tag_length"];
 const RENAME_KEYS: &[&str] = &["match", "replace"];
 
@@ -69,29 +64,65 @@ pub struct RenameRule {
     pub replace: String,
 }
 
-/// Parsed subscription parameters. Fetching is implemented by Batch C.
+/// Shared acquisition policy for remote node sources (§11.2.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubscriptionConfig {
-    /// Empty disables subscription completely.
-    pub url: String,
-    /// Refresh interval in seconds; zero means manual refresh only.
+pub struct FetchConfig {
+    /// Seconds between refreshes; zero disables scheduled refresh.
     pub interval: u64,
-    /// Per-attempt timeout in seconds.
+    /// Per-attempt deadline in seconds.
     pub timeout: u64,
-    /// Retry count for one refresh request.
+    /// Additional attempts after an unsuccessful request.
     pub retries: u32,
-    /// Provider-only cleanup; never applied to manual nodes.
-    pub refine: RefinementConfig,
+    /// Empty selects the built-in versioned user agent.
+    pub user_agent: String,
 }
 
-impl Default for SubscriptionConfig {
+impl Default for FetchConfig {
     fn default() -> Self {
         Self {
-            url: String::new(),
             interval: 86_400,
             timeout: 10,
             retries: 2,
-            refine: RefinementConfig::default(),
+            user_agent: String::new(),
+        }
+    }
+}
+
+/// One immutable, ordered node-source candidate (§28.2).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NodeConfig {
+    /// Sources in configuration order; repeated remote URLs occur only once.
+    pub sources: Vec<NodeSource>,
+    /// Acquisition policy shared by all remote sources.
+    pub fetch: FetchConfig,
+    /// Compiled provider refinement and group membership policy.
+    pub policy: NodePolicy,
+}
+
+impl NodeConfig {
+    /// Distinct remote sources, preserving configured order.
+    pub fn remote_sources(&self) -> impl Iterator<Item = &RemoteSource> {
+        self.sources.iter().filter_map(|source| match source {
+            NodeSource::Remote { source, .. } => Some(source),
+            NodeSource::Manual { .. } => None,
+        })
+    }
+}
+
+/// Daemon log retention, owned and applied by the logger (§11.2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogConfig {
+    /// Rotation threshold in bytes.
+    pub max_bytes: u64,
+    /// Number of closed files retained in addition to the current log.
+    pub retain: u32,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 4 * 1024 * 1024,
+            retain: 1,
         }
     }
 }
@@ -231,16 +262,16 @@ pub struct FluxConfig {
     pub ssid_mode: ListMode,
     /// Exact SSIDs compared byte-for-byte by the daemon (§29.1).
     pub ssids: Vec<String>,
-    /// Subscription parameters. Batch C consumes them.
-    pub subscription: SubscriptionConfig,
-    /// Parsed manual nodes, kept in user order and without provider cleanup.
-    pub nodes: Vec<crate::engine_config::RefinedNode>,
+    /// Ordered sources with compiled advanced policy.
+    pub nodes: NodeConfig,
+    /// Daemon log retention.
+    pub log: LogConfig,
 }
 
 impl Default for FluxConfig {
     fn default() -> Self {
         Self {
-            apps_mode: ListMode::Whitelist,
+            apps_mode: ListMode::Blacklist,
             apps: Vec::new(),
             cidr_mode: ListMode::Blacklist,
             bypass_v4: Vec::new(),
@@ -249,8 +280,8 @@ impl Default for FluxConfig {
             interfaces: Vec::new(),
             ssid_mode: ListMode::Blacklist,
             ssids: Vec::new(),
-            subscription: SubscriptionConfig::default(),
-            nodes: Vec::new(),
+            nodes: NodeConfig::default(),
+            log: LogConfig::default(),
         }
     }
 }
@@ -271,40 +302,29 @@ impl FluxConfig {
         bytes: &[u8],
         mut read_file: impl FnMut(&str) -> Result<Vec<u8>, String>,
     ) -> Result<Self, ConfigError> {
-        if bytes.len() > MAX_CONFIG_BYTES {
-            return Err(ConfigError::TooLarge(bytes.len()));
-        }
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| ConfigError::Syntax("configuration is not valid UTF-8".to_string()))?;
-        let value: toml::Value = toml::from_str(text).map_err(|error: toml::de::Error| {
-            // TOML's Display includes the source line, which may be a complete
-            // node URI or subscription credential. Diagnose at this boundary.
-            let location = error
-                .span()
-                .map(|span| {
-                    let before = &text.as_bytes()[..span.start.min(text.len())];
-                    let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
-                    let column = before
-                        .iter()
-                        .rposition(|byte| *byte == b'\n')
-                        .map_or(before.len() + 1, |newline| before.len() - newline);
-                    format!(" at line {line}, column {column}")
-                })
-                .unwrap_or_default();
-            ConfigError::Syntax(format!("invalid TOML syntax{location}"))
-        })?;
-        let table = value
-            .as_table()
-            .ok_or_else(|| ConfigError::Syntax("top level must be a table".to_string()))?;
+        Self::parse_files(bytes, None, &mut read_file)
+    }
+
+    /// Parses the disjoint main/advanced documents and expands local lists.
+    /// Both documents become one candidate; there is no overlay precedence.
+    pub fn parse_files(
+        bytes: &[u8],
+        advanced: Option<&[u8]>,
+        mut read_file: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    ) -> Result<Self, ConfigError> {
+        let value = parse_document(bytes)?;
+        let table = value.as_table().expect("TOML document is a table");
         reject_unknown_keys(table, "", TOP_LEVEL_KEYS)?;
 
-        let (apps_mode, raw_apps) = dimension(table, "apps", ListMode::Whitelist, &mut read_file)?;
+        let (apps_mode, raw_apps) = dimension(table, "apps", ListMode::Blacklist, &mut read_file)?;
         let (cidr_mode, raw_cidrs) = dimension(table, "cidr", ListMode::Blacklist, &mut read_file)?;
         let (interfaces_mode, raw_interfaces) =
             dimension(table, "interfaces", ListMode::Blacklist, &mut read_file)?;
         let (ssid_mode, raw_ssids) = dimension(table, "ssid", ListMode::Blacklist, &mut read_file)?;
         let (bypass_v4, bypass_v6) = parse_cidrs(&raw_cidrs)?;
 
+        let (mut nodes, log) = parse_advanced(advanced)?;
+        nodes.sources = parse_nodes(table, &nodes.policy, &mut read_file)?;
         Ok(Self {
             apps_mode,
             apps: parse_apps(&raw_apps)?,
@@ -315,8 +335,8 @@ impl FluxConfig {
             interfaces: parse_interfaces(&raw_interfaces)?,
             ssid_mode,
             ssids: deduplicate_strings(&raw_ssids, true)?,
-            subscription: parse_subscription(table)?,
-            nodes: parse_nodes(table, &mut read_file)?,
+            nodes,
+            log,
         })
     }
 
@@ -545,73 +565,226 @@ fn deduplicate_strings(raw: &[String], ssid: bool) -> Result<Vec<String>, Config
     Ok(raw.to_vec())
 }
 
-fn parse_nodes(
-    top: &toml::value::Table,
-    read_file: &mut impl FnMut(&str) -> Result<Vec<u8>, String>,
-) -> Result<Vec<crate::engine_config::RefinedNode>, ConfigError> {
-    let Some(value) = top.get("nodes") else {
-        return Ok(Vec::new());
-    };
-    let table = value
-        .as_table()
-        .ok_or_else(|| ConfigError::WrongType("nodes must be a table".to_string()))?;
-    reject_unknown_keys(table, "nodes", &["list"])?;
-    let raw = match table.get("list") {
-        None => Vec::new(),
-        Some(toml::Value::Array(entries)) => entries
-            .iter()
-            .map(|entry| {
-                entry.as_str().map(str::to_string).ok_or_else(|| {
-                    ConfigError::WrongType("nodes.list must be an array of strings".to_string())
-                })
+/// Parses TOML without returning source lines or embedded credentials in errors.
+pub(crate) fn parse_document(bytes: &[u8]) -> Result<toml::Value, ConfigError> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(ConfigError::TooLarge(bytes.len()));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ConfigError::Syntax("configuration is not valid UTF-8".to_string()))?;
+    let value: toml::Value = toml::from_str(text).map_err(|error: toml::de::Error| {
+        // TOML's Display includes the source line, which may be a complete
+        // node URI or subscription credential. Diagnose at this boundary.
+        let location = error
+            .span()
+            .map(|span| {
+                let before = &text.as_bytes()[..span.start.min(text.len())];
+                let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
+                let column = before
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(before.len() + 1, |newline| before.len() - newline);
+                format!(" at line {line}, column {column}")
             })
-            .collect::<Result<Vec<_>, _>>()?,
-        Some(_) => {
-            return Err(ConfigError::WrongType(
-                "nodes.list must be an array".to_string(),
-            ))
-        }
-    };
-    expand_list(raw, read_file)?
-        .iter()
-        .enumerate()
-        .map(|(index, uri)| {
-            crate::subscription::parse_manual_node(uri).map_err(|reason| {
-                ConfigError::InvalidValue(format!("nodes.list entry {}: {reason}", index + 1))
-            })
-        })
-        .collect()
+            .unwrap_or_default();
+        ConfigError::Syntax(format!("invalid TOML syntax{location}"))
+    })?;
+    Ok(value)
 }
 
-fn parse_subscription(top: &toml::value::Table) -> Result<SubscriptionConfig, ConfigError> {
-    let Some(value) = top.get("subscription") else {
-        return Ok(SubscriptionConfig::default());
+fn optional_table<'a>(
+    top: &'a toml::value::Table,
+    name: &str,
+    prefix: &str,
+) -> Result<Option<&'a toml::value::Table>, ConfigError> {
+    top.get(name)
+        .map(|value| {
+            value
+                .as_table()
+                .ok_or_else(|| ConfigError::WrongType(format!("{prefix}{name} must be a table")))
+        })
+        .transpose()
+}
+
+fn parse_nodes(
+    top: &toml::value::Table,
+    policy: &NodePolicy,
+    read_file: &mut impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<NodeSource>, ConfigError> {
+    let Some(table) = optional_table(top, "nodes", "")? else {
+        return Ok(Vec::new());
     };
-    let table = value
-        .as_table()
-        .ok_or_else(|| ConfigError::WrongType("subscription must be a table".to_string()))?;
-    reject_unknown_keys(table, "subscription", SUBSCRIPTION_KEYS)?;
-    let defaults = SubscriptionConfig::default();
-    let timeout = optional_u64(table, "timeout", defaults.timeout, "subscription")?;
-    if timeout == 0 {
-        return Err(ConfigError::InvalidValue(
-            "subscription.timeout must be greater than zero".to_string(),
-        ));
+    reject_unknown_keys(table, "nodes", &["sources"])?;
+    let Some(entries) = table.get("sources") else {
+        return Ok(Vec::new());
+    };
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| ConfigError::WrongType("nodes.sources must be an array".into()))?;
+    let mut sources = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let position = format!("nodes.sources entry {}", index + 1);
+        let (uri, explicit) = match entry {
+            toml::Value::String(uri) => (uri.as_str(), false),
+            toml::Value::Table(table) => {
+                reject_unknown_keys(table, &position, &["node"])?;
+                (
+                    table
+                        .get("node")
+                        .and_then(toml::Value::as_str)
+                        .ok_or_else(|| {
+                            ConfigError::WrongType(format!("{position}.node must be a string"))
+                        })?,
+                    true,
+                )
+            }
+            _ => {
+                return Err(ConfigError::WrongType(format!(
+                    "{position} must be a URI, @file, or node table"
+                )))
+            }
+        };
+        if !explicit {
+            if let Some(path) = uri.strip_prefix('@') {
+                validate_list_path(path)?;
+                let bytes = read_file(path).map_err(|detail| ConfigError::ListFileUnreadable {
+                    path: path.into(),
+                    detail,
+                })?;
+                if bytes.len() > MAX_CONFIG_BYTES {
+                    return Err(ConfigError::ListFileTooLarge {
+                        path: path.into(),
+                        size: bytes.len(),
+                    });
+                }
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| ConfigError::ListFileNotUtf8(path.into()))?;
+                for (line, uri) in text.lines().enumerate() {
+                    let uri = uri.trim();
+                    if uri.is_empty() || uri.starts_with('#') {
+                        continue;
+                    }
+                    if uri.starts_with('@') {
+                        return Err(ConfigError::RecursiveListReference {
+                            path: path.into(),
+                            line: line + 1,
+                        });
+                    }
+                    sources.push(manual_source(
+                        uri,
+                        format!("{position}, line {}", line + 1),
+                        policy,
+                    )?);
+                }
+                continue;
+            }
+            let scheme = uri.split_once(':').map(|(scheme, _)| scheme);
+            if scheme.is_some_and(|scheme| {
+                scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+            }) {
+                let source = RemoteSource::parse(uri)
+                    .map_err(|reason| ConfigError::InvalidValue(format!("{position}: {reason}")))?;
+                if seen.insert(source.clone()) {
+                    sources.push(NodeSource::Remote { source, position });
+                }
+                continue;
+            }
+        }
+        sources.push(manual_source(uri, position, policy)?);
     }
-    let retries = u32::try_from(optional_u64(
-        table,
-        "retries",
-        u64::from(defaults.retries),
-        "subscription",
-    )?)
-    .map_err(|_| ConfigError::InvalidValue("subscription.retries exceeds u32".to_string()))?;
-    Ok(SubscriptionConfig {
-        url: optional_string(table, "url", &defaults.url, "subscription")?,
-        interval: optional_u64(table, "interval", defaults.interval, "subscription")?,
-        timeout,
-        retries,
-        refine: parse_refinement(table)?,
-    })
+    Ok(sources)
+}
+
+fn manual_source(
+    uri: &str,
+    position: String,
+    policy: &NodePolicy,
+) -> Result<NodeSource, ConfigError> {
+    let node = policy
+        .manual(uri)
+        .map_err(|reason| ConfigError::InvalidValue(format!("{position}: {reason}")))?;
+    Ok(NodeSource::Manual { node, position })
+}
+
+fn parse_advanced(bytes: Option<&[u8]>) -> Result<(NodeConfig, LogConfig), ConfigError> {
+    let value = parse_document(bytes.unwrap_or_default())
+        .map_err(|error| ConfigError::InvalidValue(format!("advanced.toml: {error:?}")))?;
+    let top = value.as_table().expect("TOML document is a table");
+    reject_unknown_keys(top, "advanced", &["nodes", "log"])?;
+    let mut fetch_policy = FetchConfig::default();
+    let mut refinement = RefinementConfig::default();
+    let mut groups = BTreeMap::new();
+    if let Some(table) = optional_table(top, "nodes", "advanced.")? {
+        reject_unknown_keys(table, "nodes", &["fetch", "refine", "groups"])?;
+        if let Some(fetch) = optional_table(table, "fetch", "nodes.")? {
+            reject_unknown_keys(fetch, "nodes.fetch", FETCH_KEYS)?;
+            fetch_policy.interval =
+                optional_u64(fetch, "interval", fetch_policy.interval, "nodes.fetch")?;
+            fetch_policy.timeout =
+                optional_u64(fetch, "timeout", fetch_policy.timeout, "nodes.fetch")?;
+            if fetch_policy.timeout == 0 {
+                return Err(ConfigError::InvalidValue(
+                    "nodes.fetch.timeout must be positive".into(),
+                ));
+            }
+            fetch_policy.retries = u32::try_from(optional_u64(
+                fetch,
+                "retries",
+                u64::from(fetch_policy.retries),
+                "nodes.fetch",
+            )?)
+            .map_err(|_| ConfigError::InvalidValue("nodes.fetch.retries exceeds u32".into()))?;
+            fetch_policy.user_agent = optional_string(fetch, "user_agent", "", "nodes.fetch")?;
+            if fetch_policy
+                .user_agent
+                .bytes()
+                .any(|byte| byte < 0x20 || byte == 0x7f)
+            {
+                return Err(ConfigError::InvalidValue(
+                    "nodes.fetch.user_agent contains a control character".into(),
+                ));
+            }
+        }
+        if let Some(table) = optional_table(table, "groups", "nodes.")? {
+            for (name, value) in table {
+                if matches!(name.as_str(), "PROXY" | "GLOBAL" | "AUTO") || name.is_empty() {
+                    return Err(ConfigError::InvalidValue(
+                        "nodes.groups cannot redefine an all-node selector or empty tag".into(),
+                    ));
+                }
+                let pattern = value.as_str().ok_or_else(|| {
+                    ConfigError::WrongType("nodes.groups values must be strings".into())
+                })?;
+                groups.insert(name.clone(), pattern.to_owned());
+            }
+        }
+        refinement = parse_refinement(table)?;
+    }
+    let mut log = LogConfig::default();
+    if let Some(table) = optional_table(top, "log", "advanced.")? {
+        reject_unknown_keys(table, "log", &["max_size_mib", "retain"])?;
+        log.max_bytes = optional_u64(table, "max_size_mib", 4, "log")?
+            .checked_mul(1024 * 1024)
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                ConfigError::InvalidValue(
+                    "log.max_size_mib must be positive and fit in u64 bytes".into(),
+                )
+            })?;
+        log.retain = u32::try_from(optional_u64(table, "retain", 1, "log")?)
+            .map_err(|_| ConfigError::InvalidValue("log.retain exceeds u32".into()))?;
+    }
+    let policy = NodePolicy::compile(refinement, &groups)
+        .map_err(|error| ConfigError::InvalidValue(format!("advanced.toml: {error}")))?;
+    Ok((
+        NodeConfig {
+            sources: Vec::new(),
+            fetch: fetch_policy,
+            policy,
+        },
+        log,
+    ))
 }
 
 fn parse_refinement(subscription: &toml::value::Table) -> Result<RefinementConfig, ConfigError> {
@@ -620,21 +793,21 @@ fn parse_refinement(subscription: &toml::value::Table) -> Result<RefinementConfi
     };
     let table = value
         .as_table()
-        .ok_or_else(|| ConfigError::WrongType("subscription.refine must be a table".to_string()))?;
-    reject_unknown_keys(table, "subscription.refine", REFINEMENT_KEYS)?;
+        .ok_or_else(|| ConfigError::WrongType("nodes.refine must be a table".to_string()))?;
+    reject_unknown_keys(table, "nodes.refine", REFINEMENT_KEYS)?;
     let defaults = RefinementConfig::default();
     let max_tag_length = usize::try_from(optional_u64(
         table,
         "max_tag_length",
         defaults.max_tag_length as u64,
-        "subscription.refine",
+        "nodes.refine",
     )?)
     .map_err(|_| {
-        ConfigError::InvalidValue("subscription.refine.max_tag_length exceeds usize".to_string())
+        ConfigError::InvalidValue("nodes.refine.max_tag_length exceeds usize".to_string())
     })?;
     if max_tag_length == 0 {
         return Err(ConfigError::InvalidValue(
-            "subscription.refine.max_tag_length must be greater than zero".to_string(),
+            "nodes.refine.max_tag_length must be greater than zero".to_string(),
         ));
     }
     let rename = match table.get("rename") {
@@ -646,7 +819,7 @@ fn parse_refinement(subscription: &toml::value::Table) -> Result<RefinementConfi
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => {
             return Err(ConfigError::WrongType(
-                "subscription.refine.rename must be an array of tables".to_string(),
+                "nodes.refine.rename must be an array of tables".to_string(),
             ))
         }
     };
@@ -655,26 +828,19 @@ fn parse_refinement(subscription: &toml::value::Table) -> Result<RefinementConfi
             table,
             "exclude_pattern",
             &defaults.exclude_pattern,
-            "subscription.refine",
+            "nodes.refine",
         )?,
         rename,
-        strip_emoji: optional_bool(
-            table,
-            "strip_emoji",
-            defaults.strip_emoji,
-            "subscription.refine",
-        )?,
+        strip_emoji: optional_bool(table, "strip_emoji", defaults.strip_emoji, "nodes.refine")?,
         max_tag_length,
     })
 }
 
 fn parse_rename_rule(value: &toml::Value, index: usize) -> Result<RenameRule, ConfigError> {
     let table = value.as_table().ok_or_else(|| {
-        ConfigError::WrongType(format!(
-            "subscription.refine.rename[{index}] must be a table"
-        ))
+        ConfigError::WrongType(format!("nodes.refine.rename[{index}] must be a table"))
     })?;
-    let prefix = format!("subscription.refine.rename[{index}]");
+    let prefix = format!("nodes.refine.rename[{index}]");
     reject_unknown_keys(table, &prefix, RENAME_KEYS)?;
     Ok(RenameRule {
         match_pattern: required_string(table, "match", &prefix)?,
@@ -793,30 +959,83 @@ fn levenshtein(left: &str, right: &str) -> usize {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn source_types_order_deduplication_and_advanced_groups_share_one_candidate() {
+        let main = br#"[nodes]
+sources = ["https://example.invalid/sub", {node = "http://user:password@example.invalid:8080#custom"}, "https://example.invalid/sub", "@nodes.txt"]"#;
+        let advanced = br#"[nodes.groups]
+CUSTOM = "custom"
+[nodes.refine]
+rename = [{match = "provider", replace = "custom remote"}]
+[log]
+retain = 0
+"#;
+        let config = super::FluxConfig::parse_files(main, Some(advanced), |_| {
+            Ok(b"# comment\nhttp://user:password@example.invalid:8081#local\n".to_vec())
+        })
+        .unwrap();
+        assert_eq!(config.apps_mode, super::ListMode::Blacklist);
+        assert_eq!(config.nodes.remote_sources().count(), 1);
+        assert_eq!(config.log.retain, 0);
+        let raw = br#"{"outbounds":[{"type":"trojan","tag":"provider","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#;
+        let nodes =
+            crate::subscription::assemble_nodes(&config.nodes, |_| Some(raw.as_slice())).unwrap();
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.outbound["tag"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["custom remote", "custom", "local"]
+        );
+        assert!(nodes[..2]
+            .iter()
+            .all(|node| node.groups.iter().any(|tag| tag == "CUSTOM")));
+        assert!(crate::subscription::assemble_nodes(&config.nodes, |_| None).is_ok());
+        for bad in [
+            b"[nodes.groups]\nCUSTOM = '['".as_slice(),
+            b"[nodes.refine]\nexclude_pattern = '['",
+            b"[nodes.fetch]\ntimeout = 0",
+            b"[log]\nmax_size_mib = 0",
+        ] {
+            assert!(super::FluxConfig::parse_files(b"", Some(bad), |_| unreachable!()).is_err());
+        }
+        assert_eq!(
+            super::FluxConfig::parse_files(
+                include_bytes!("../../../module/flux.toml"),
+                Some(include_bytes!("../../../module/advanced.toml")),
+                |_| unreachable!()
+            )
+            .unwrap(),
+            super::FluxConfig::default()
+        );
+    }
+
+    #[test]
     fn manual_nodes_expand_files_without_provider_cleanup() {
-        let config = super::FluxConfig::parse_with_list_files(
-            b"[nodes]\nlist = ['trojan://placeholder@example.invalid:443#traffic', '@nodes.txt']\n[subscription.refine]\nmax_tag_length = 2\n",
+        let config = super::FluxConfig::parse_files(
+            b"[nodes]\nsources = ['trojan://placeholder@example.invalid:443#traffic', '@nodes.txt']\n",
+            Some(b"[nodes.refine]\nmax_tag_length = 2\n"),
             |path| {
                 assert_eq!(path, "nodes.txt");
                 Ok(b"# whole-line comment\nhy2://user%3Asecret@example.invalid:443#my%20node\n".to_vec())
             },
         ).unwrap();
-        assert_eq!(config.nodes[0].outbound["tag"], "traffic");
-        assert_eq!(config.nodes[1].outbound["tag"], "my node");
-        assert_eq!(config.nodes[1].outbound["password"], "user:secret");
-        assert!(config.subscription.url.is_empty());
+        let nodes = crate::subscription::assemble_nodes(&config.nodes, |_| None).unwrap();
+        assert_eq!(nodes[0].outbound["tag"], "traffic");
+        assert_eq!(nodes[1].outbound["tag"], "my node");
+        assert_eq!(nodes[1].outbound["password"], "user:secret");
+        assert!(config.nodes.remote_sources().next().is_none());
     }
 
     #[test]
     fn manual_uri_errors_identify_entry_without_credentials() {
         let malformed = super::FluxConfig::parse(
-            b"[nodes]\nlist = ['hy2://placeholder-secret@example.invalid:443' unexpected]\n",
+            b"[nodes]\nsources = ['hy2://placeholder-secret@example.invalid:443' unexpected]\n",
         )
         .unwrap_err();
         assert!(matches!(malformed, super::ConfigError::Syntax(ref detail)
             if detail.contains("line 2") && !detail.contains("placeholder-secret") && !detail.contains("hy2://")));
         let error = super::FluxConfig::parse(
-            b"[nodes]\nlist = ['vless://private-placeholder@example.invalid:443?type=xhttp']\n",
+            b"[nodes]\nsources = ['vless://private-placeholder@example.invalid:443?type=xhttp']\n",
         )
         .unwrap_err();
         assert!(matches!(error, super::ConfigError::InvalidValue(ref detail)
@@ -844,24 +1063,31 @@ list = ["tun0"]
 [ssid]
 mode = "whitelist"
 list = ["Office"]
-[subscription]
-url = ""
+"#;
+        let config = FluxConfig::parse_files(
+            source,
+            Some(
+                br#"
+[nodes.fetch]
 interval = 0
 timeout = 5
 retries = 0
-[subscription.refine]
+[nodes.refine]
 exclude_pattern = "announcement"
 rename = [{ match = "old", replace = "new" }]
 strip_emoji = false
 max_tag_length = 48
-"#;
-        let config = FluxConfig::parse(source).unwrap();
+"#,
+            ),
+            |_| unreachable!(),
+        )
+        .unwrap();
         assert_eq!(config.apps[0].canonical(), "0:com.example.browser");
         assert_eq!(config.bypass_v4[0].to_string(), "192.0.2.0/24");
         assert_eq!(config.bypass_v6[0].to_string(), "2001:db8:10::/48");
         assert_eq!(config.interfaces, ["tun0"]);
         assert_eq!(config.ssid_mode, ListMode::Whitelist);
-        assert_eq!(config.subscription.refine.rename[0].replace, "new");
+        assert_eq!(config.nodes.fetch.timeout, 5);
         assert_eq!(FluxConfig::parse(b"").unwrap(), FluxConfig::default());
     }
 

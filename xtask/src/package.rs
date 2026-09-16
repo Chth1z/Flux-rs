@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
-const ALLOWLIST: [&str; 15] = [
+const ALLOWLIST: [&str; 16] = [
     "module.prop",
     "skip_mount",
     "customize.sh",
@@ -31,6 +31,7 @@ const ALLOWLIST: [&str; 15] = [
     "bin/fluxd",
     "bin/sing-box",
     "etc/default-flux.toml",
+    "etc/default-advanced.toml",
     "etc/default-template.json",
     "build-info.toml",
     "LICENSE",
@@ -104,6 +105,14 @@ pub fn release(tag: &str) -> Result<(), String> {
         ));
     }
     let inputs = prepare_inputs(&root)?;
+    let provenance = git_provenance_from_tree(&root)?;
+    if provenance.ends_with("-dirty") {
+        return Err("release requires a clean working tree".into());
+    }
+    let inputs = Inputs {
+        release_name: true,
+        ..inputs
+    };
     verify_with(&inputs)?;
     let (source, digest) = inputs.release.corresponding_source(
         &util::target_dir(&root)?.join("xtask/source"),
@@ -134,7 +143,18 @@ fn package_once(target: &Path, inputs: &Inputs) -> Result<(PathBuf, [u8; 32]), S
     let version = workspace_version(&root)?;
     let module_prop = flux_core::version::module_prop(&version)
         .ok_or_else(|| format!("workspace version `{version}` is not representable (§13.4)"))?;
-    let zip_name = flux_core::version::artifact_name(&version);
+    let zip_name = if inputs.release_name {
+        flux_core::version::artifact_name(&version)
+    } else {
+        let provenance = git_provenance(&root)?;
+        let revision = provenance.strip_suffix("-dirty").unwrap_or(&provenance);
+        flux_core::version::development_artifact_name(
+            &version,
+            revision,
+            provenance.ends_with("-dirty"),
+        )
+        .ok_or_else(|| "invalid development artifact identity".to_string())?
+    };
     println!("package: version {version} -> {zip_name}");
     if root.join("module/module.prop").exists() {
         return Err(
@@ -201,6 +221,7 @@ fn workspace_version(root: &Path) -> Result<String, String> {
 // ------------------------------------------------------------------ engine
 
 struct Inputs {
+    release_name: bool,
     release: engine_release::Release,
     engine: engine_release::Artifact,
     build_info: Vec<u8>,
@@ -233,6 +254,7 @@ fn prepare_inputs(root: &Path) -> Result<Inputs, String> {
         .map_err(|error| format!("serialize build evidence: {error}"))?
         .into_bytes();
     Ok(Inputs {
+        release_name: false,
         release,
         engine,
         build_info,
@@ -377,6 +399,10 @@ fn git_provenance(root: &Path) -> Result<String, String> {
         }
         return Err("FLUX_COMMIT is not a 7-64 character hex commit provenance".into());
     }
+    git_provenance_from_tree(root)
+}
+
+fn git_provenance_from_tree(root: &Path) -> Result<String, String> {
     let output = Command::new("git")
         .current_dir(root)
         .args(["rev-parse", "HEAD"])
@@ -539,6 +565,11 @@ fn collect_entries(
     push("bin/fluxd", 0o755, util::read_bytes(fluxd)?);
     push("bin/sing-box", 0o755, util::read_bytes(&engine.binary)?);
     push("etc/default-flux.toml", 0o644, text("module/flux.toml")?);
+    push(
+        "etc/default-advanced.toml",
+        0o644,
+        text("module/advanced.toml")?,
+    );
     push(
         "etc/default-template.json",
         0o644,

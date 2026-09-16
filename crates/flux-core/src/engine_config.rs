@@ -242,6 +242,22 @@ pub fn build_effective(user: &Value, params: &EngineParams) -> Result<Value, Eng
     Ok(Value::Object(effective))
 }
 
+/// Supplies the engine's default cache destination only when enabled and not
+/// explicitly set (§9.6). All native explicit paths retain their meaning.
+pub fn complete_cache_path(generated: &mut Value, path: &str) {
+    let Some(cache) = generated
+        .pointer_mut("/experimental/cache_file")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if cache.get("enabled") == Some(&Value::Bool(true))
+        && (cache.get("path").is_none() || cache.get("path") == Some(&Value::String(String::new())))
+    {
+        cache.insert("path".into(), Value::String(path.into()));
+    }
+}
+
 /// The two tproxy inbounds Flux injects, each with only the four allowed keys.
 fn injected_inbounds(params: &EngineParams) -> Value {
     json!([
@@ -382,6 +398,32 @@ pub const DEFAULT_TEMPLATE_JSONC: &str = include_str!("../../../module/template.
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_an_enabled_implicit_cache_path_is_completed() {
+        for cache in [
+            json!({"enabled": true}),
+            json!({"enabled": true, "path": ""}),
+        ] {
+            let mut config =
+                json!({"experimental": {"cache_file": cache}, "route": {"final": "DIRECT"}});
+            complete_cache_path(&mut config, "/state/run/cache/sing-box.db");
+            assert_eq!(
+                config["experimental"]["cache_file"]["path"],
+                "/state/run/cache/sing-box.db"
+            );
+            assert_eq!(config["route"]["final"], "DIRECT");
+        }
+        for cache in [
+            json!({"enabled": false}),
+            json!({"enabled": true, "path": "user.db"}),
+            json!({"enabled": true, "path": null}),
+        ] {
+            let mut config = json!({"experimental": {"cache_file": cache}});
+            let original = config.clone();
+            complete_cache_path(&mut config, "/state/run/cache/sing-box.db");
+            assert_eq!(config, original);
+        }
+    }
     use super::*;
 
     #[test]

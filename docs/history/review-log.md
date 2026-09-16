@@ -675,3 +675,22 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 | 治理说明称 stable 和 Cargo.lock 固定 | 与所有者的不锁版本要求及已实现的 §9.7/§13.4 冲突 | 就地修正 GOV-7.3；不重写之前构建的历史证据 |
 
 进阶策略范围为抓取周期/超时/重试/User-Agent、原有名称清洗、节点分组匹配、Flux 日志保留。分组表达式只填充模板已有的空组，不创建新菜单；原始 `module/template.json` 及其 outbounds 不改。运行目录、配置、安装与版本合同均已就地更新，指南将在对应实现完成时同步，避免把未来配置冒充当前使用方法。
+
+### 0.6.15 统一来源与增量升级的实现复核（2026-09-16）
+
+**实现范围。** `nodes.sources` 合并手工 URI、直接子文件和多个 HTTP(S) 订阅；`advanced.toml` 独占抓取、清洗、分组和日志策略。主配置缺失与有效空文件分开处理。配置 I/O、纯迁移、来源快照和日志分别由独立模块负责；reactor 继续复用原有候选提交事务，不增加另一套激活流程。远端响应以 URL 的 SHA-256 作为缓存文件身份，取代原来两个文件维护的 URL 绑定。仅在候选被接受后发布缓存，迟到响应受当前来源集合约束。
+
+所有者已明确批准不锁版本的 `toml_edit` 依赖。安装器先停止共享 daemon 并持有实例锁，准备并验证迁移结果、保留原始字节，再发布两个配置文件；已是当前结构的文件保持字节不变。运行产物归 `run/`，日志在写入时轮转，生成配置补全缺省 engine cache 路径。包内保留许可证，安装只解压运行所需文件。模板文件与原 outbounds 未改，SHA-256 仍为 `c930a02a3c23b747b92086545df74eb82cdc3e8049e48e6b6b4819106fe5d219`。
+
+| 最初实现或说法 | 复核发现 | 处置 |
+|---|---|---|
+| 没有旧字段就不需要迁移 | 旧 Rust 的 apps-only 或空文件也继承旧 whitelist 默认；仅凭文档内容无法辨别 | 用正向确认的旧 Rust 模块身份传入迁移依据；完成后的 `nodes.sources` 是重试依据，不另造版本标记 |
+| pending 响应存在就等待提交 | 重名候选被拒后，未接受响应会挡住用户修复后的重新抓取 | 只有已绑定引擎事务的 pending 响应阻塞下一批；未接受候选可被后续请求替换 |
+| 收敛时发现缺缓存就抓取 | `interval=0` 时普通 reload 也可能反复发起初始请求 | 来源引入事件负责一次初始采集；定时、手动和网络恢复触发沿用各自明确语义 |
+| Rust 模块改 id，只需保留配置与开关 | 推理：两份 service 会竞争同一实例锁；旧卸载脚本仍会删除共享数据根。依据为旧 `module/service.sh` 与 `module/uninstall.sh` 的既有入口 | 成功迁移并继承开关后，移除正向确认的旧 Rust 模块的两个入口并设置 manager remove 标记；当前模块身份完整优先，包括明确的 enabled 状态。未触及旧 shell Flux |
+
+管理器的 disable/remove 与卸载入口语义核对了 [Magisk](https://topjohnwu.github.io/Magisk/guides.html)、[KernelSU](https://kernelsu.org/guide/module.html)、[APatch](https://apatch.dev/apm-guide.html) 官方模块指南。身份退休属于安装时的一次所有权移交，不引入运行时兼容分支。
+
+**软件验证。** Windows 的 fmt、flux-core 121 项、xtask 35 项、fluxd bin 8 项和 doc-check 通过。WSL 的 workspace Clippy（warnings 为错误）及完整 workspace 测试通过：core 121、fluxd 89、xtask 35；daemon_e2e 与 engine_lifecycle 完整流程通过。新增真实本地 HTTP 多来源场景覆盖重名修复后再抓取、换序复用缓存、同结果不换代、坏响应保留已接受缓存、迟到结果不复活已删除来源和 interval=0 的普通 reload 行为。Android all-targets Clippy 使用现有 NDK 27.3 通过；shell 语法和 ShellCheck 通过。宿主生命周期脚本已用真实 ZIP 和 Rust 安装器复验：首次安装、升级字节保持、可选文件缺省、残留目录、迁移失败不发布、旧 Rust 身份退休及其重试、当前开关优先与错配身份不触碰均通过。
+
+版本仍未提升为正式 1.0.0。本条不包含新候选整包构建、远端 CI、校园网或设备运行的验收结论；后续证据单独追加，旧设备结果不替代当前候选。

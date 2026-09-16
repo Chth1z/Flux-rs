@@ -135,6 +135,12 @@ mod tests {
         )
         .expect("template.json");
 
+        std::fs::write(
+            root.join("config/flux.toml"),
+            "[apps]\nmode = 'whitelist'\n",
+        )
+        .unwrap();
+
         let mut daemon_command = env.command(&["daemon"]);
         daemon_command.process_group(0);
         let mut daemon = daemon_command.spawn().expect("daemon spawns");
@@ -151,6 +157,7 @@ mod tests {
                 scenario_policy_domain_hot_reload(&env);
                 scenario_queued_reload_waits_for_convergence(&env);
                 scenario_subscription_refresh_after_failure(&env);
+                scenario_multiple_sources(&env);
             }
             scenario_bugreport(&env);
             scenario_stop(&env, &mut daemon, &root);
@@ -588,7 +595,7 @@ mod tests {
     fn scenario_subscription_refresh_after_failure(env: &Env) {
         let config_path = env.root.join("config/flux.toml");
         let previous = std::fs::read(&config_path).ok();
-        let log_path = env.root.join("fluxd.log");
+        let log_path = env.root.join("run/fluxd.log");
         let scheduled = || {
             std::fs::read_to_string(&log_path)
                 .unwrap_or_default()
@@ -600,7 +607,12 @@ mod tests {
         // network or route changes are needed to exercise failed refreshes.
         std::fs::write(
             &config_path,
-            "[subscription]\nurl = 'http://127.0.0.1:0'\ninterval = 1\ntimeout = 1\nretries = 0\n",
+            "[apps]\nmode = 'whitelist'\n[nodes]\nsources = ['http://127.0.0.1:0']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env.root.join("config/advanced.toml"),
+            "[nodes.fetch]\ninterval = 1\ntimeout = 1\nretries = 0\n",
         )
         .unwrap();
         let _ = env.run(&["reload"]);
@@ -619,7 +631,12 @@ mod tests {
 
         std::fs::write(
             &config_path,
-            "[subscription]\nurl = 'http://127.0.0.1:0'\ninterval = 0\ntimeout = 1\nretries = 0\n",
+            "[apps]\nmode = 'whitelist'\n[nodes]\nsources = ['http://127.0.0.1:0']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env.root.join("config/advanced.toml"),
+            "[nodes.fetch]\ninterval = 0\ntimeout = 1\nretries = 0\n",
         )
         .unwrap();
         let _ = env.run(&["reload"]);
@@ -641,6 +658,220 @@ mod tests {
         }
         let _ = env.run(&["reload"]);
         println!("PASS failed subscriptions keep configured refresh, interval zero stays manual");
+    }
+
+    struct Provider {
+        address: std::net::SocketAddr,
+        body: std::sync::Arc<std::sync::Mutex<String>>,
+        requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        delay: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Provider {
+        fn new(tag: &str) -> Self {
+            use std::io::Write;
+            use std::sync::{
+                atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+                Arc, Mutex,
+            };
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = Arc::new(Mutex::new(String::new()));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let delay = Arc::new(AtomicU64::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (content, count, delay_ms, stopping) =
+                (body.clone(), requests.clone(), delay.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut request = [0; 8192];
+                    if stream.read(&mut request).unwrap_or_default() == 0 {
+                        continue;
+                    }
+                    let body = content.lock().unwrap().clone();
+                    count.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(delay_ms.load(Ordering::SeqCst)));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            let provider = Self {
+                address,
+                body,
+                requests,
+                delay,
+                stop,
+                thread: Some(thread),
+            };
+            provider.node(tag);
+            provider
+        }
+
+        fn node(&self, tag: &str) {
+            *self.body.lock().unwrap() =
+                serde_json::json!({"outbounds": [{"type": "trojan", "tag": tag,
+                "server": "example.invalid", "server_port": 443, "password": "fixture-only"}]})
+                .to_string();
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/subscription", self.address)
+        }
+        fn count(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Provider {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(self.address);
+            let _ = self.thread.take().unwrap().join();
+        }
+    }
+
+    fn scenario_multiple_sources(env: &Env) {
+        let first = Provider::new("duplicate");
+        let second = Provider::new("duplicate");
+        let main_path = env.root.join("config/flux.toml");
+        let template_path = env.root.join("config/template.json");
+        let advanced_path = env.root.join("config/advanced.toml");
+        let previous = (
+            std::fs::read(&main_path).unwrap(),
+            std::fs::read(&template_path).unwrap(),
+            std::fs::read(&advanced_path).ok(),
+        );
+        let configure = |urls: &[String]| {
+            let mut sources = vec!["trojan://fixture-only@example.invalid:443#manual".to_string()];
+            sources.extend_from_slice(urls);
+            std::fs::write(
+                &main_path,
+                format!(
+                    "[apps]\nmode = 'whitelist'\n[nodes]\nsources = {}\n",
+                    serde_json::to_string(&sources).unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        let current_tags = || {
+            let path = env.status().engine.effective_config.unwrap();
+            let effective: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            effective["outbounds"][1]["outbounds"].clone()
+        };
+        let wait = |predicate: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(12);
+            while !predicate() {
+                assert!(
+                    Instant::now() < deadline,
+                    "multi-source condition timed out: {:?}",
+                    env.status()
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        std::fs::write(&template_path, r#"{"outbounds":[{"type":"direct","tag":"DIRECT"},{"type":"selector","tag":"AUTO","outbounds":[]}]}"#).unwrap();
+        std::fs::write(
+            &advanced_path,
+            "[nodes.fetch]\ninterval = 0\ntimeout = 5\nretries = 0\n",
+        )
+        .unwrap();
+        configure(&[first.url(), second.url()]);
+        let _ = env.run(&["reload"]);
+        wait(&|| {
+            env.status()
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("duplicate node tag"))
+        });
+        assert!(
+            first.count() > 0 && second.count() > 0,
+            "all sources attempted"
+        );
+        assert!(
+            env.status().engine.running,
+            "rejected pool retains running engine"
+        );
+
+        second.node("second");
+        let _ = env.run(&["subscribe"]);
+        wait(&|| current_tags() == serde_json::json!(["manual", "duplicate", "second"]));
+        let generation = env.status().generation;
+        let _ = env.run(&["subscribe"]);
+        assert_eq!(
+            env.status().generation,
+            generation,
+            "identical accepted bytes do not rotate"
+        );
+        let counts = (first.count(), second.count());
+        configure(&[second.url(), first.url()]);
+        let _ = env.run(&["reload"]);
+        wait(&|| current_tags() == serde_json::json!(["manual", "second", "duplicate"]));
+        assert_eq!(
+            (first.count(), second.count()),
+            counts,
+            "source reordering reuses cache"
+        );
+
+        *second.body.lock().unwrap() = "invalid provider body".into();
+        let _ = env.run(&["subscribe"]);
+        let accepted_generation = env.status().generation;
+        let counts = (first.count(), second.count());
+        let _ = env.run(&["reload"]);
+        assert_eq!(
+            (first.count(), second.count()),
+            counts,
+            "interval zero does not fetch again on ordinary reload"
+        );
+        assert_eq!(
+            env.status().generation,
+            accepted_generation,
+            "invalid response preserves accepted cache"
+        );
+        assert!(env.status().last_error.is_some());
+
+        // A late response must not recreate the cache or nodes of a removed source.
+        configure(&[first.url(), second.url()]);
+        second.node("second");
+        let _ = env.run(&["reload"]);
+        first.node("late-node");
+        first.delay.store(2000, std::sync::atomic::Ordering::SeqCst);
+        let before = first.count();
+        let mut refresh = env.command(&["subscribe"]).spawn().unwrap();
+        wait(&|| first.count() > before);
+        configure(&[second.url()]);
+        let _ = env.run(&["reload"]);
+        let _ = refresh.wait();
+        wait(&|| current_tags() == serde_json::json!(["manual", "second"]));
+        let source = flux_core::subscription::RemoteSource::parse(&first.url()).unwrap();
+        assert!(!env
+            .root
+            .join(format!("run/cache/sources/{}.raw", source.id()))
+            .exists());
+
+        std::fs::write(&main_path, previous.0).unwrap();
+        std::fs::write(&template_path, previous.1).unwrap();
+        match previous.2 {
+            Some(bytes) => std::fs::write(&advanced_path, bytes).unwrap(),
+            None => std::fs::remove_file(&advanced_path).unwrap(),
+        }
+        let _ = env.run(&["reload"]);
+        println!("PASS source collision recovery, ordered cache reuse, unchanged generation, invalid response and late removal");
     }
 
     fn scenario_bugreport(env: &Env) {
@@ -801,7 +1032,7 @@ mod tests {
     }
 
     fn dump_daemon_log(root: &Path) {
-        if let Ok(mut file) = std::fs::File::open(root.join("fluxd.log")) {
+        if let Ok(mut file) = std::fs::File::open(root.join("run/fluxd.log")) {
             let mut text = String::new();
             let _ = file.read_to_string(&mut text);
             eprintln!("--- fluxd.log ---\n{text}\n--- end fluxd.log ---");

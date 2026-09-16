@@ -35,7 +35,7 @@ pub const RUNTIME_ROOT: &str = "/data/adb/flux-rs";
 /// `module.prop` live. Note the underscore, and note that this directory
 /// belongs to the manager — Flux writes only those two files and never
 /// creates, moves or deletes the directory itself.
-pub const MODULE_DIR: &str = "/data/adb/modules/flux_rs";
+pub const MODULE_DIR: &str = "/data/adb/modules/Flux-rs";
 
 /// Environment override for the runtime root. A test hook only: it lets the
 /// integration tests run a full daemon against a temp directory as an ordinary
@@ -142,23 +142,28 @@ impl Layout {
         self.config_dir().join("template.json")
     }
 
-    /// Raw subscription response cache (§28.5): the one file under `run/`
-    /// whose bytes came from the network.
-    pub fn subscription_raw(&self) -> PathBuf {
-        self.run_dir().join("subscription.raw")
+    /// Optional disjoint advanced policy (§11.2.4).
+    pub fn advanced_toml(&self) -> PathBuf {
+        self.config_dir().join("advanced.toml")
     }
 
-    /// Local authority metadata for [`Layout::subscription_raw`]. This is
-    /// written from `flux.toml`, never from the network response, so a cache
-    /// left across a restart cannot be mistaken for a different URL.
-    pub fn subscription_url_binding(&self) -> PathBuf {
-        self.run_dir().join("subscription.url")
+    /// Source-addressed raw response caches (§28.5).
+    pub fn source_cache_dir(&self) -> PathBuf {
+        self.run_dir().join("cache/sources")
+    }
+
+    pub fn source_cache(&self, source: &flux_core::subscription::RemoteSource) -> PathBuf {
+        self.source_cache_dir().join(format!("{}.raw", source.id()))
+    }
+
+    pub fn engine_cache(&self) -> PathBuf {
+        self.run_dir().join("cache/sing-box.db")
     }
 
     /// The daemon's own log. Appended by the daemon and the engine's captured
     /// stdout/stderr (blueprint §13.3); included in `bugreport`.
     pub fn log_file(&self) -> PathBuf {
-        self.root.join("fluxd.log")
+        self.run_dir().join("fluxd.log")
     }
 
     /// The immutable per-generation engine config (blueprint §11.1).
@@ -177,10 +182,27 @@ impl Layout {
     /// Flux's private directory has to be, and Flux never replaces or follows
     /// an object it cannot prove is its own (§23.1, PHIL-5).
     pub fn ensure(&self) -> Result<Vec<String>, RootError> {
+        Self::ensure_directories([
+            self.root.clone(),
+            self.run_dir(),
+            self.config_dir(),
+            self.run_dir().join("cache"),
+        ])
+    }
+
+    pub fn ensure_source_cache(&self) -> io::Result<()> {
+        Self::ensure_directories([self.source_cache_dir()])
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    fn ensure_directories(
+        dirs: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Vec<String>, RootError> {
         // SAFETY: geteuid has no preconditions and cannot fail.
         let own_uid = unsafe { libc::geteuid() };
         let mut repairs = Vec::new();
-        for dir in [self.root.clone(), self.run_dir(), self.config_dir()] {
+        for dir in dirs {
             match fs::DirBuilder::new().mode(0o700).create(&dir) {
                 Ok(()) => continue,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -486,6 +508,36 @@ impl InstanceLock {
     }
 }
 
+/// Durable private same-directory replacement, shared by accepted caches and installation.
+pub fn write_private_replace(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let tmp = dir.join(format!(
+        ".{}.write.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("raw")
+    ));
+    let result = (|| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)?;
+        fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,13 +559,10 @@ mod tests {
             layout.template_json(),
             layout.config_dir().join("template.json")
         );
+        assert_eq!(layout.log_file(), layout.run_dir().join("fluxd.log"));
         assert_eq!(
-            layout.subscription_raw(),
-            layout.run_dir().join("subscription.raw")
-        );
-        assert_eq!(
-            layout.subscription_url_binding(),
-            layout.run_dir().join("subscription.url")
+            layout.source_cache_dir(),
+            layout.run_dir().join("cache/sources")
         );
         assert!(layout.ensure().expect("idempotent").is_empty());
         for dir in [

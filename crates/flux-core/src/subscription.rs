@@ -18,8 +18,9 @@ use regex_lite::{Regex, RegexBuilder};
 use serde_json::{Map, Number, Value};
 use url::{form_urlencoded, Host, Url};
 
-use crate::config::{FluxConfig, RefinementConfig};
+use crate::config::{NodeConfig, RefinementConfig};
 use crate::engine_config::RefinedNode;
+use std::collections::BTreeMap;
 
 const INFRASTRUCTURE_TYPES: &[&str] = &["selector", "urltest", "direct", "block", "dns"];
 
@@ -98,6 +99,22 @@ pub enum SubscriptionError {
         /// Shape error safe to expose in diagnostics.
         reason: String,
     },
+    /// A custom group expression was invalid (sorted group index).
+    InvalidGroupPattern(usize),
+    /// The same output tag was contributed at two positions.
+    DuplicateTag {
+        /// First contributing location.
+        first: String,
+        /// Conflicting location.
+        second: String,
+    },
+    /// A remote input failed parsing or refinement.
+    Source {
+        /// Configured source location, without its URL.
+        position: String,
+        /// Specific content error.
+        error: Box<SubscriptionError>,
+    },
     /// Refinement discarded every usable proxy node.
     ZeroNodes,
 }
@@ -132,6 +149,15 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidOutbound { index, reason } => {
                 write!(f, "invalid subscription outbound[{index}]: {reason}")
             }
+            Self::InvalidGroupPattern(index) => write!(
+                f,
+                "invalid nodes.groups expression at position {}",
+                index + 1
+            ),
+            Self::DuplicateTag { first, second } => {
+                write!(f, "duplicate node tag: {first} conflicts with {second}")
+            }
+            Self::Source { position, error } => write!(f, "{position}: {error}"),
             Self::ZeroNodes => write!(f, "subscription produced zero proxy nodes"),
         }
     }
@@ -150,32 +176,215 @@ pub fn parse_and_refine(
     refine_nodes(parse_subscription(response)?, config)
 }
 
-/// Builds the available input pool: explicit nodes first, then one accepted
-/// provider snapshot. Missing remote input never hides a usable manual node.
-pub fn assemble_nodes(
-    config: &FluxConfig,
-    response: Option<&[u8]>,
+/// Exact remote URL and its stable cache identity (§28.5).
+/// Debug output deliberately excludes the URL and its credentials.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RemoteSource {
+    url: String,
+    id: String,
+}
+
+impl fmt::Debug for RemoteSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteSource")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl RemoteSource {
+    /// Validates a fetch URL without normalising the configured identity.
+    pub fn parse(url: &str) -> Result<Self, &'static str> {
+        let parsed = url::Url::parse(url).map_err(|_| "invalid subscription URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err("subscription URL must use HTTP(S) and have a host");
+        }
+        Ok(Self {
+            url: url.into(),
+            id: crate::sha256::hex(&crate::sha256::digest(url.as_bytes())),
+        })
+    }
+    /// Exact configured URL; only acquisition uses this value.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+    /// Lowercase SHA-256 of the exact configured URL bytes.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// A typed, expanded input; its position never contains a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeSource {
+    /// An explicitly authored proxy node, already grouped without cleanup.
+    Manual {
+        /// Parsed outbound and membership.
+        node: RefinedNode,
+        /// One-based entry/line location.
+        position: String,
+    },
+    /// A distinct remote subscription.
+    Remote {
+        /// Fetch and cache identity.
+        source: RemoteSource,
+        /// One-based configured entry location.
+        position: String,
+    },
+}
+
+/// Provider cleanup compiled once when the configuration candidate is parsed.
+#[derive(Debug, Clone)]
+pub struct NodePolicy {
+    config: RefinementConfig,
+    exclude: Option<Regex>,
+    renames: Vec<(Regex, String)>,
+    groups: Vec<(String, Regex)>,
+}
+
+impl PartialEq for NodePolicy {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config
+            && self
+                .groups
+                .iter()
+                .map(|(tag, regex)| (tag, regex.as_str()))
+                .eq(other
+                    .groups
+                    .iter()
+                    .map(|(tag, regex)| (tag, regex.as_str())))
+    }
+}
+impl Eq for NodePolicy {}
+
+impl Default for NodePolicy {
+    fn default() -> Self {
+        Self::compile(RefinementConfig::default(), &BTreeMap::new())
+            .expect("built-in node policy is valid")
+    }
+}
+
+impl NodePolicy {
+    /// Validates every expression even when no remote source is available.
+    pub fn compile(
+        config: RefinementConfig,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<Self, SubscriptionError> {
+        let exclude = if config.exclude_pattern.is_empty() {
+            None
+        } else {
+            Some(
+                RegexBuilder::new(&config.exclude_pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|_| {
+                        SubscriptionError::InvalidExcludePattern("invalid expression".into())
+                    })?,
+            )
+        };
+        let renames = config
+            .rename
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                Regex::new(&rule.match_pattern)
+                    .map(|regex| (regex, rule.replace.clone()))
+                    .map_err(|_| SubscriptionError::InvalidRenamePattern {
+                        index,
+                        reason: "invalid expression".into(),
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        let mut patterns: BTreeMap<String, String> = COUNTRY_PATTERNS
+            .iter()
+            .map(|(tag, pattern)| ((*tag).into(), (*pattern).into()))
+            .collect();
+        patterns.extend(overrides.clone());
+        let groups = patterns
+            .into_iter()
+            .enumerate()
+            .map(|(index, (tag, pattern))| {
+                RegexBuilder::new(&pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map(|regex| (tag, regex))
+                    .map_err(|_| SubscriptionError::InvalidGroupPattern(index))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            config,
+            exclude,
+            renames,
+            groups,
+        })
+    }
+
+    fn groups(&self, tag: &str) -> Vec<String> {
+        self.groups
+            .iter()
+            .filter(|(_, regex)| regex.is_match(tag))
+            .map(|(group, _)| group.clone())
+            .collect()
+    }
+
+    /// Parses one explicit URI without provider name cleanup.
+    pub fn manual(&self, uri: &str) -> Result<RefinedNode, String> {
+        let outbound = parse_uri(uri)?;
+        let groups = self.groups(outbound["tag"].as_str().expect("URI parser supplies tag"));
+        Ok(RefinedNode { outbound, groups })
+    }
+
+    /// Parses and refines one remote response with this candidate's policy.
+    pub fn remote(&self, bytes: &[u8]) -> Result<Vec<RefinedNode>, SubscriptionError> {
+        self.refine(parse_subscription(bytes)?)
+    }
+}
+
+/// Assembles available inputs in source order and rejects ambiguous tags.
+/// Missing responses do not suppress independently available sources.
+pub fn assemble_nodes<'a>(
+    config: &NodeConfig,
+    response: impl Fn(&RemoteSource) -> Option<&'a [u8]>,
 ) -> Result<Vec<RefinedNode>, SubscriptionError> {
-    let mut nodes = config.nodes.clone();
-    if let Some(response) = response {
-        nodes.extend(parse_and_refine(response, &config.subscription.refine)?);
+    let mut nodes = Vec::new();
+    let mut tags = BTreeMap::<String, String>::new();
+    for input in &config.sources {
+        let (batch, position) = match input {
+            NodeSource::Manual { node, position } => (vec![node.clone()], position),
+            NodeSource::Remote { source, position } => {
+                let Some(bytes) = response(source) else {
+                    continue;
+                };
+                (
+                    config
+                        .policy
+                        .remote(bytes)
+                        .map_err(|error| SubscriptionError::Source {
+                            position: position.clone(),
+                            error: Box::new(error),
+                        })?,
+                    position,
+                )
+            }
+        };
+        for (index, node) in batch.into_iter().enumerate() {
+            let location = format!("{position}, node {}", index + 1);
+            let tag = node.outbound["tag"].as_str().expect("parsed node has tag");
+            if let Some(first) = tags.insert(tag.to_owned(), location.clone()) {
+                return Err(SubscriptionError::DuplicateTag {
+                    first,
+                    second: location,
+                });
+            }
+            nodes.push(node);
+        }
     }
     Ok(nodes)
 }
 
-/// Parses one explicit sharing URI, retaining its name and protocol settings.
-/// Errors describe the field without reproducing credentials or the URI.
+/// Parses one manual URI using built-in grouping policy.
 pub fn parse_manual_node(uri: &str) -> Result<RefinedNode, String> {
-    let outbound = parse_uri(uri)?;
-    let tag = outbound["tag"]
-        .as_str()
-        .expect("URI parser always supplies a tag");
-    let groups = compile_regions()
-        .iter()
-        .filter(|(_, pattern)| pattern.is_match(tag))
-        .map(|(group, _)| (*group).to_string())
-        .collect();
-    Ok(RefinedNode { outbound, groups })
+    NodePolicy::default().manual(uri)
 }
 
 /// Detects the provider format by content and returns unrefined outbounds.
@@ -215,101 +424,81 @@ pub fn refine_nodes(
     outbounds: Vec<Value>,
     config: &RefinementConfig,
 ) -> Result<Vec<RefinedNode>, SubscriptionError> {
-    let exclude = if config.exclude_pattern.is_empty() {
-        None
-    } else {
-        Some(
-            RegexBuilder::new(&config.exclude_pattern)
-                .case_insensitive(true)
-                .build()
-                .map_err(|error| SubscriptionError::InvalidExcludePattern(error.to_string()))?,
-        )
-    };
-    let renames = config
-        .rename
-        .iter()
-        .enumerate()
-        .map(|(index, rule)| {
-            Regex::new(&rule.match_pattern)
-                .map(|regex| (regex, rule.replace.as_str()))
-                .map_err(|error| SubscriptionError::InvalidRenamePattern {
+    NodePolicy::compile(config.clone(), &BTreeMap::new())?.refine(outbounds)
+}
+
+impl NodePolicy {
+    fn refine(&self, outbounds: Vec<Value>) -> Result<Vec<RefinedNode>, SubscriptionError> {
+        let config = &self.config;
+        let exclude = &self.exclude;
+        let renames = &self.renames;
+        let mut refined = Vec::new();
+        for (index, mut outbound) in outbounds.into_iter().enumerate() {
+            let object =
+                outbound
+                    .as_object_mut()
+                    .ok_or_else(|| SubscriptionError::InvalidOutbound {
+                        index,
+                        reason: "entry is not an object".to_string(),
+                    })?;
+            let kind = object.get("type").and_then(Value::as_str).ok_or_else(|| {
+                SubscriptionError::InvalidOutbound {
                     index,
-                    reason: error.to_string(),
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let regions = compile_regions();
+                    reason: "type is missing or is not a string".to_string(),
+                }
+            })?;
 
-    let mut refined = Vec::new();
-    for (index, mut outbound) in outbounds.into_iter().enumerate() {
-        let object =
-            outbound
-                .as_object_mut()
-                .ok_or_else(|| SubscriptionError::InvalidOutbound {
+            // 1. Infrastructure never becomes a selectable provider node.
+            if INFRASTRUCTURE_TYPES.contains(&kind) {
+                continue;
+            }
+            let original_tag = object.get("tag").and_then(Value::as_str).ok_or_else(|| {
+                SubscriptionError::InvalidOutbound {
                     index,
-                    reason: "entry is not an object".to_string(),
-                })?;
-        let kind = object.get("type").and_then(Value::as_str).ok_or_else(|| {
-            SubscriptionError::InvalidOutbound {
-                index,
-                reason: "type is missing or is not a string".to_string(),
+                    reason: "tag is missing or is not a string".to_string(),
+                }
+            })?;
+
+            // 2. Exclusion deliberately observes the provider's original tag.
+            if exclude
+                .as_ref()
+                .is_some_and(|pattern| pattern.is_match(original_tag))
+            {
+                continue;
             }
-        })?;
 
-        // 1. Infrastructure never becomes a selectable provider node.
-        if INFRASTRUCTURE_TYPES.contains(&kind) {
-            continue;
-        }
-        let original_tag = object.get("tag").and_then(Value::as_str).ok_or_else(|| {
-            SubscriptionError::InvalidOutbound {
-                index,
-                reason: "tag is missing or is not a string".to_string(),
+            // 3. Rename rules are ordered global substitutions.
+            let mut tag = original_tag.to_string();
+            for (pattern, replacement) in renames {
+                tag = pattern.replace_all(&tag, replacement.as_str()).into_owned();
             }
-        })?;
 
-        // 2. Exclusion deliberately observes the provider's original tag.
-        if exclude
-            .as_ref()
-            .is_some_and(|pattern| pattern.is_match(original_tag))
-        {
-            continue;
+            // 4. Emoji removal precedes multiplier normalisation.
+            if config.strip_emoji {
+                tag = strip_emoji(&tag);
+            }
+
+            // 5. Canonical multiplier notation and whitespace. Flux-original uses
+            // the protocol type if cleanup leaves an empty tag.
+            tag = normalise_tag(&tag);
+            if tag.is_empty() {
+                tag = kind.to_string();
+            }
+
+            // 6. Match jq's character-counted ellipsis truncation.
+            tag = truncate_tag(&tag, config.max_tag_length);
+            object.insert("tag".to_string(), Value::String(tag.clone()));
+
+            // 7. Group only the final user-visible tag.
+            let groups = self.groups(&tag);
+            refined.push(RefinedNode { outbound, groups });
         }
 
-        // 3. Rename rules are ordered global substitutions.
-        let mut tag = original_tag.to_string();
-        for (pattern, replacement) in &renames {
-            tag = pattern.replace_all(&tag, *replacement).into_owned();
+        if refined.is_empty() {
+            return Err(SubscriptionError::ZeroNodes);
         }
-
-        // 4. Emoji removal precedes multiplier normalisation.
-        if config.strip_emoji {
-            tag = strip_emoji(&tag);
-        }
-
-        // 5. Canonical multiplier notation and whitespace. Flux-original uses
-        // the protocol type if cleanup leaves an empty tag.
-        tag = normalise_tag(&tag);
-        if tag.is_empty() {
-            tag = kind.to_string();
-        }
-
-        // 6. Match jq's character-counted ellipsis truncation.
-        tag = truncate_tag(&tag, config.max_tag_length);
-        object.insert("tag".to_string(), Value::String(tag.clone()));
-
-        // 7. Group only the final user-visible tag.
-        let groups = regions
-            .iter()
-            .filter(|(_, pattern)| pattern.is_match(&tag))
-            .map(|(group, _)| (*group).to_string())
-            .collect();
-        refined.push(RefinedNode { outbound, groups });
+        Ok(refined)
     }
-
-    if refined.is_empty() {
-        return Err(SubscriptionError::ZeroNodes);
-    }
-    Ok(refined)
 }
 
 fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
@@ -953,19 +1142,6 @@ fn insert_json_string(
     }
 }
 
-fn compile_regions() -> Vec<(&'static str, Regex)> {
-    COUNTRY_PATTERNS
-        .iter()
-        .map(|(group, pattern)| {
-            let regex = RegexBuilder::new(pattern)
-                .case_insensitive(true)
-                .build()
-                .expect("Flux-original country patterns are valid regex-lite expressions");
-            (*group, regex)
-        })
-        .collect()
-}
-
 fn strip_emoji(tag: &str) -> String {
     tag.chars()
         .filter(|character| {
@@ -1018,20 +1194,30 @@ mod tests {
     use crate::config::RenameRule;
 
     #[test]
+    fn source_identity_is_exact_and_duplicate_tags_name_positions_without_secrets() {
+        let first = RemoteSource::parse("https://example.invalid/sub?token=one").unwrap();
+        let changed = RemoteSource::parse("https://example.invalid/sub?token=two").unwrap();
+        assert_ne!(first.id(), changed.id());
+        assert!(!format!("{first:?}").contains("token="));
+        let config = crate::config::FluxConfig::parse(br#"[nodes]
+sources = ["trojan://private-value@example.invalid:443#same", "hy2://secret-value@example.invalid:443#same"]"#).unwrap();
+        let error = assemble_nodes(&config.nodes, |_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("entry 1") && error.contains("entry 2"));
+        assert!(!error.contains("private-value") && !error.contains("secret-value"));
+    }
+
+    #[test]
     fn manual_and_remote_pool_preserves_source_order_and_cleanup_boundary() {
-        let refinement = config();
-        let mut config = FluxConfig::default();
-        config.nodes.push(
-            parse_manual_node("trojan://placeholder@example.invalid:443#traffic%20node").unwrap(),
-        );
-        config.subscription.refine = refinement;
-        config.subscription.refine.rename = vec![RenameRule {
-            match_pattern: "old".to_string(),
-            replace: "remote".to_string(),
-        }];
+        let config = crate::config::FluxConfig::parse_files(
+            br#"[nodes]
+sources = ["trojan://placeholder@example.invalid:443#traffic%20node", "https://example.invalid/sub"]"#,
+            Some(br#"[nodes.refine]
+rename = [{match = "old", replace = "remote"}]"#), |_| unreachable!()).unwrap();
         let raw = br#"{"outbounds":[{"type":"trojan","tag":"old","server":"example.invalid","server_port":443,"password":"placeholder"}]}"#;
-        assert_eq!(assemble_nodes(&config, None).unwrap(), config.nodes);
-        let pool = assemble_nodes(&config, Some(raw)).unwrap();
+        assert_eq!(assemble_nodes(&config.nodes, |_| None).unwrap().len(), 1);
+        let pool = assemble_nodes(&config.nodes, |_| Some(raw.as_slice())).unwrap();
         assert_eq!(pool[0].outbound["tag"], "traffic node");
         assert_eq!(pool[1].outbound["tag"], "remote");
         let template = json!({"outbounds":[{"type":"selector","tag":"AUTO","outbounds":[]}]});

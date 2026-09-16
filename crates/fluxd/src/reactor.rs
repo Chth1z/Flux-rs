@@ -26,30 +26,28 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
-use flux_core::config::{FluxConfig, ListMode, SubscriptionConfig};
+use flux_core::config::{FluxConfig, ListMode, NodeConfig};
 use flux_core::control_wire::{
     Counters, EngineStatus, Request, Response, RootManagerStatus, SsidStatus, State,
 };
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::selector::PackageIndex;
 use flux_core::ssid::ssid_verdict;
+use flux_core::subscription::RemoteSource;
 
 use crate::checks;
 use crate::control::{ControlConn, ControlServer};
 use crate::engine::{self, EngineChild, EngineError, EngineSpec};
 use crate::layout::{InstanceLock, Layout, LockError};
+use crate::logger::Logger;
 use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
-use crate::time::format_utc;
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
 /// updates produce event bursts; one convergence per burst is enough.
 const DEBOUNCE: Duration = Duration::from_millis(1_500);
-
-/// The daemon log is rotated once to `.1` at startup past this size.
-const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Cap on the buffered partial engine-output line.
 const ENGINE_LINE_CAP: usize = 8 * 1024;
@@ -121,8 +119,7 @@ struct SsidTransport {
 
 #[derive(Debug)]
 struct PendingSubscription {
-    url: String,
-    raw: Vec<u8>,
+    raw: std::collections::BTreeMap<RemoteSource, Vec<u8>>,
     /// The engine generation built from `raw`, once candidate validation has
     /// begun. This keeps an unrelated transaction failure from discarding a
     /// fetched response that merely arrived while that transaction was live.
@@ -301,7 +298,7 @@ struct Reactor {
     default_route_was_ready: bool,
     route_recovery_epoch: u64,
     subscription_fetch_route_epoch: u64,
-    subscription_schedule: Option<(String, u64)>,
+    subscription_schedule: Option<(Vec<RemoteSource>, u64)>,
     pending_subscription: Option<PendingSubscription>,
     subscription_fetch_queued: bool,
     subscription_reconfigure_queued: bool,
@@ -316,6 +313,7 @@ struct Reactor {
     wifi_changed: bool,
     dataplane_error_active: bool,
     config_warnings: Vec<String>,
+    source_warnings: Vec<String>,
     current_policy: Option<PolicyCandidate>,
     current_engine_user: Option<serde_json::Value>,
     ssid_transport: Option<SsidTransport>,
@@ -451,6 +449,7 @@ impl Reactor {
             wifi_changed: false,
             dataplane_error_active: false,
             config_warnings: Vec::new(),
+            source_warnings: Vec::new(),
             current_policy: None,
             current_engine_user: None,
             ssid_transport: None,
@@ -586,42 +585,58 @@ impl Reactor {
     /// state only — no BPF or netlink read — because it runs on every wakeup.
     fn module_prop_line(&self) -> String {
         let dataplane = self.dataplane.status();
-        if self.layout.disabled() {
+        if self.layout.disabled() || self.shutdown_requested {
             return if self.engine.is_some() || self.convergence_busy() {
-                "\u{1f634} [Disabled] stopping".to_string()
+                "😴 [STOPPING] 正在停止".into()
             } else {
-                "\u{1f634} [Disabled] toggle this module on to enable Flux".to_string()
+                "😴 [STOPPED] 已停止".into()
             };
         }
-        if dataplane.active
-            && self.engine.is_some()
-            && self.activation_role.is_none()
-            && !self.ssid_paused
+        let error = self
+            .policy_error
+            .as_ref()
+            .map(|(token, _)| token.as_str())
+            .or_else(|| {
+                self.subscription_error
+                    .as_ref()
+                    .map(|(token, _)| token.as_str())
+            })
+            .or(self.last_error.as_deref());
+        if let Some(child) = self
+            .engine
+            .as_ref()
+            .filter(|_| dataplane.active && self.activation_role.is_none() && !self.ssid_paused)
         {
-            let ifaces: Vec<&str> = dataplane
+            let ifaces = dataplane
                 .ifaces
                 .iter()
                 .filter(|iface| iface.status == "active")
                 .map(|iface| iface.name.as_str())
-                .collect();
-            return format!(
-                "\u{1f970} [Active] gen {} \u{b7} {} apps \u{b7} {}",
-                self.generation,
-                dataplane.policy.selected,
-                ifaces.join(", ")
-            );
+                .collect::<Vec<_>>()
+                .join(", ");
+            let selection = self
+                .current_policy
+                .as_ref()
+                .map(|policy| {
+                    let (mode, list) = match policy.flux.apps_mode {
+                        ListMode::Whitelist => ("白名单", "选择清单"),
+                        ListMode::Blacklist => ("黑名单", "排除清单"),
+                    };
+                    format!("{mode} · {list} {} 项", policy.flux.apps.len())
+                })
+                .unwrap_or_default();
+            let mut line = format!("🥰 [RUNNING] PID: {} · {selection} · {ifaces}", child.pid);
+            if let Some(error) = error {
+                line.push_str(&format!(" · 上次更新: {error}"));
+            }
+            return line;
         }
         if self.ssid_paused {
-            return "\u{1f634} [Inactive] paused on this Wi-Fi network".to_string();
+            return "😴 [PAUSED] 当前 Wi-Fi 已排除".into();
         }
-        match self
-            .policy_error
-            .as_ref()
-            .map(|(token, _)| token.as_str())
-            .or(self.last_error.as_deref())
-        {
-            Some(error) => format!("\u{1f92f} [Inactive] {error}"),
-            None => "\u{1f914} [Inactive] converging".to_string(),
+        match error {
+            Some(error) => format!("🤯 [FAILED] {error}"),
+            None => "🤔 [STARTING] 正在启动".into(),
         }
     }
 
@@ -1801,7 +1816,11 @@ impl Reactor {
 
         let subscription_url_changed = candidate_policy.as_ref().is_some_and(|candidate| {
             self.current_policy.as_ref().is_some_and(|current| {
-                current.flux.subscription.url != candidate.flux.subscription.url
+                !current
+                    .flux
+                    .nodes
+                    .remote_sources()
+                    .eq(candidate.flux.nodes.remote_sources())
             })
         });
         let engine_flux = candidate_policy
@@ -1815,8 +1834,8 @@ impl Reactor {
         let mut candidate_user = if want_engine {
             match engine_flux.as_ref() {
                 Some(flux) => {
-                    self.ensure_subscription_schedule(&flux.subscription);
-                    match self.read_engine_config(flux, !subscription_url_changed) {
+                    self.ensure_subscription_schedule(&flux.nodes);
+                    match self.read_engine_config(flux) {
                         Ok(user) => {
                             if self
                                 .subscription_error
@@ -1833,23 +1852,12 @@ impl Reactor {
                             }
                             Some(user)
                         }
-                        Err((token, _)) if token == "subscription_cache_missing" => {
-                            if self.subscription_retry_on_route {
-                                self.logger
-                                    .log("engine generation is waiting for default-route recovery");
-                            } else {
-                                match self.start_subscription_fetch_with(
-                                    &flux.subscription,
-                                    "raw cache is missing",
-                                ) {
-                                    Ok(()) => self.logger.log(
-                                        "engine generation is waiting for a subscription response",
-                                    ),
-                                    Err((token, detail)) => {
-                                        self.set_subscription_error(token, detail);
-                                    }
-                                }
+                        Err((token, detail)) if token == "subscription_cache_missing" => {
+                            if self.subscription_error.is_none() {
+                                self.set_subscription_error(token, detail);
                             }
+                            self.logger
+                                .log("engine generation is waiting for a source response");
                             None
                         }
                         Err((token, detail)) => {
@@ -1982,9 +1990,19 @@ impl Reactor {
             self.dataplane_error_active = false;
         }
 
+        if want_engine
+            && candidate_user.is_none()
+            && self
+                .pending_subscription
+                .as_ref()
+                .is_some_and(|pending| pending.generation.is_none())
+        {
+            self.pending_subscription = None;
+        }
         if let Some(policy) = candidate_policy {
             match self.dataplane.apply_policy(&policy.desired) {
                 Ok(()) => {
+                    self.logger.configure(policy.flux.log);
                     self.current_policy = Some(policy);
                     self.policy_retry_available = true;
                     self.clear_policy_error();
@@ -2099,9 +2117,14 @@ impl Reactor {
             self.pending_subscription.as_mut(),
             self.current_policy.as_ref(),
         ) {
-            if pending.url == policy.flux.subscription.url {
-                pending.generation = Some(generation);
-            }
+            pending.raw.retain(|source, _| {
+                policy
+                    .flux
+                    .nodes
+                    .remote_sources()
+                    .any(|current| current == source)
+            });
+            pending.generation = Some(generation);
         }
         let (port_v4, port_v6) = match engine::draw_ports() {
             Ok(ports) => ports,
@@ -2806,32 +2829,12 @@ impl Reactor {
         }
     }
 
-    fn subscription_config_from_authority(
-        &self,
-    ) -> Result<SubscriptionConfig, (String, Option<String>)> {
-        self.flux_config_from_authority()
-            .map(|flux| flux.subscription)
+    fn subscription_config_from_authority(&self) -> Result<NodeConfig, (String, Option<String>)> {
+        self.flux_config_from_authority().map(|flux| flux.nodes)
     }
 
     fn flux_config_from_authority(&self) -> Result<FluxConfig, (String, Option<String>)> {
-        let path = self.layout.flux_toml();
-        let flux = match crate::layout::read_capped(&path, flux_core::config::MAX_CONFIG_BYTES + 1)
-        {
-            Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
-                (
-                    "flux_config_invalid".to_string(),
-                    Some(checks::describe_flux_error(&error)),
-                )
-            })?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => FluxConfig::default(),
-            Err(error) => {
-                return Err((
-                    "flux_config_unreadable".to_string(),
-                    Some(format!("{}: {error}", path.display())),
-                ));
-            }
-        };
-        Ok(flux)
+        crate::configuration::load(&self.layout)
     }
 
     fn start_subscription_fetch(&mut self, reason: &str) -> Result<(), (String, Option<String>)> {
@@ -2843,20 +2846,12 @@ impl Reactor {
         }
         let config = self.subscription_config_from_authority()?;
         self.start_subscription_fetch_with(&config, reason)?;
-        if self
-            .pending_subscription
-            .as_ref()
-            .is_some_and(|pending| pending.generation.is_none())
-        {
-            self.engine_config_changed = true;
-            self.converge("pending subscription refresh");
-        }
         Ok(())
     }
 
     fn start_subscription_fetch_with(
         &mut self,
-        config: &SubscriptionConfig,
+        config: &NodeConfig,
         reason: &str,
     ) -> Result<(), (String, Option<String>)> {
         if self.layout.disabled() {
@@ -2865,18 +2860,11 @@ impl Reactor {
                 Some("subscription refresh is unavailable while Flux is disabled".to_string()),
             ));
         }
-        if config.url.is_empty() {
+        if config.remote_sources().next().is_none() {
             return Err((
                 "subscription_fetch_failed:disabled".to_string(),
-                Some("subscription.url is empty".to_string()),
+                Some("nodes.sources has no remote subscription".to_string()),
             ));
-        }
-        if self
-            .pending_subscription
-            .as_ref()
-            .is_some_and(|pending| pending.url == config.url)
-        {
-            return Ok(());
         }
         if self
             .pending_subscription
@@ -2893,9 +2881,8 @@ impl Reactor {
         self.refresh_default_route_observation("subscription fetch start");
         self.subscription_fetch_route_epoch = self.route_recovery_epoch;
         let request = crate::subscription::FetchRequest {
-            url: config.url.clone(),
-            timeout: Duration::from_secs(config.timeout),
-            retries: config.retries,
+            sources: config.remote_sources().cloned().collect(),
+            policy: config.fetch.clone(),
         };
         match self.subscription_worker.start(request) {
             Ok(true) => {
@@ -2905,7 +2892,7 @@ impl Reactor {
             }
             Ok(false) => Ok(()),
             Err(error) => Err((
-                "subscription_fetch_failed:worker".to_string(),
+                "subscription_fetch_failed:worker".into(),
                 Some(format!("cannot start subscription worker: {error}")),
             )),
         }
@@ -2919,106 +2906,105 @@ impl Reactor {
             Ok(config) => config,
             Err((token, detail)) => {
                 self.set_subscription_error(token, detail);
-                self.complete_convergence_controls();
-                return;
-            }
-        };
-        let config = &flux.subscription;
-
-        if completed.url != config.url || config.url.is_empty() || self.layout.disabled() {
-            self.logger
-                .log("discarded a subscription result for a superseded configuration");
-            let unavailable = config.url.is_empty() || self.layout.disabled();
-            if !unavailable {
-                if let Err((token, detail)) =
-                    self.start_subscription_fetch_with(config, "configured URL changed")
-                {
-                    self.set_subscription_error(token, detail);
-                }
-            } else {
-                self.complete_waiting_controls(
-                    true,
-                    Some((
-                        "subscription_fetch_failed:disabled",
-                        "subscription refresh was discarded because subscription is disabled",
-                    )),
-                );
-                self.rearm_control_timer();
-            }
-            if !self.subscription_worker.is_busy() {
-                self.complete_convergence_controls();
-            }
-            return;
-        }
-
-        let raw = match completed.result {
-            Ok(raw) => raw,
-            Err(error) => {
-                self.pending_subscription = None;
-                self.set_subscription_error(error.token, Some(error.detail));
-                self.refresh_default_route_observation("subscription fetch failure");
-                if self.route_recovery_epoch != self.subscription_fetch_route_epoch {
-                    self.subscription_retry_on_route = false;
-                    self.logger.log(
-                        "default route recovered while the subscription request was in flight; retrying once",
-                    );
-                    self.start_scheduled_subscription_fetch(
-                        "default route recovered during failed request",
-                    );
-                    return;
-                }
-                self.subscription_retry_on_route = true;
                 self.rearm_subscription_timer();
-                self.logger
-                    .log("subscription fetch failed; keeping configured refresh policy and route-recovery trigger");
                 self.complete_convergence_controls();
                 return;
             }
         };
-
-        // A completed HTTP exchange ends the extra route-recovery trigger even
-        // when its content is rejected. The configured cadence is independent.
-        self.subscription_retry_on_route = false;
-        self.rearm_subscription_timer();
-
-        if let Err(error) = flux_core::subscription::assemble_nodes(&flux, Some(&raw)) {
-            let (token, detail) = crate::subscription::subscription_error_status(&error);
+        let config = &flux.nodes;
+        self.ensure_subscription_schedule(config);
+        if self.layout.disabled() || config.remote_sources().next().is_none() {
             self.pending_subscription = None;
-            self.set_subscription_error(token, Some(detail));
-            self.logger.log("subscription content was rejected");
-            self.complete_convergence_controls();
+            self.complete_waiting_controls(
+                true,
+                Some((
+                    "subscription_fetch_failed:disabled",
+                    "subscription refresh was discarded because remote acquisition is disabled",
+                )),
+            );
+            self.rearm_control_timer();
             return;
         }
-
         if self
             .pending_subscription
             .as_ref()
             .is_some_and(|pending| pending.generation.is_some())
         {
-            // Never replace the raw input that an in-flight generation is
-            // waiting to commit. Re-fetch current authority after that
-            // transaction reaches a terminal state.
             self.subscription_fetch_queued = true;
-            self.logger.log(
-                "deferred a newer subscription response until the active transaction finishes",
-            );
-            if !self.convergence_busy() {
-                self.resume_queued_subscription_work();
-            }
+            self.rearm_subscription_timer();
             return;
         }
 
+        let mut raw = std::collections::BTreeMap::new();
+        let mut failures = Vec::new();
+        let mut transport_failed = false;
+        let requested: BTreeSet<_> = completed
+            .sources
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect();
+        self.subscription_fetch_queued |= config
+            .remote_sources()
+            .any(|source| !requested.contains(source));
+        for (source, result) in completed.sources {
+            let position = config.sources.iter().find_map(|input| match input {
+                flux_core::subscription::NodeSource::Remote {
+                    source: current,
+                    position,
+                } if current == &source => Some(position),
+                _ => None,
+            });
+            let Some(position) = position else { continue }; // A late result cannot revive a removed source.
+            match result {
+                Ok(bytes) => match config.policy.remote(&bytes) {
+                    Ok(_) => {
+                        raw.insert(source, bytes);
+                    }
+                    Err(error) => {
+                        let (token, detail) =
+                            crate::subscription::subscription_error_status(&error);
+                        failures.push((token, format!("{position}: {detail}")));
+                    }
+                },
+                Err(error) => {
+                    transport_failed = true;
+                    failures.push((error.token, format!("{position}: {}", error.detail)));
+                }
+            }
+        }
+        self.subscription_retry_on_route = transport_failed;
+        if transport_failed {
+            self.refresh_default_route_observation("subscription fetch failure");
+            if self.route_recovery_epoch != self.subscription_fetch_route_epoch {
+                self.subscription_retry_on_route = false;
+                self.subscription_fetch_queued = true;
+            }
+        }
+        self.rearm_subscription_timer();
+        if let Some((token, _)) = failures.first() {
+            self.set_subscription_error(
+                token.clone(),
+                Some(
+                    failures
+                        .iter()
+                        .map(|(token, detail)| format!("{token}: {detail}"))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            );
+        } else {
+            self.clear_subscription_error();
+        }
+        if raw.is_empty() {
+            self.pending_subscription = None;
+            self.resume_queued_subscription_work();
+            self.complete_convergence_controls();
+            return;
+        }
         self.pending_subscription = Some(PendingSubscription {
-            url: completed.url,
             raw,
             generation: None,
         });
-        self.subscription_retry_on_route = false;
-        self.clear_subscription_error();
-        // The fetch authority is the file on disk, which may be newer than
-        // `current_policy` when a manual command races the inotify debounce.
-        // Re-read both domains so the validated response is applied to the
-        // exact policy that requested it.
         self.policy_changed = true;
         self.policy_retry_available = true;
         self.engine_config_changed = true;
@@ -3028,145 +3014,77 @@ impl Reactor {
         }
     }
 
-    fn configure_subscription(&mut self, url_changed: bool) {
+    fn configure_subscription(&mut self, sources_changed: bool) {
         let Some(config) = self
             .current_policy
             .as_ref()
-            .map(|policy| policy.flux.subscription.clone())
+            .map(|policy| policy.flux.nodes.clone())
         else {
             return;
         };
-        let raw_path = self.layout.subscription_raw();
-
-        if config.url.is_empty() {
-            self.complete_waiting_controls(
-                true,
-                Some((
-                    "subscription_fetch_failed:disabled",
-                    "subscription refresh was cancelled because subscription.url is empty",
-                )),
-            );
-            self.rearm_control_timer();
-        }
-
-        if url_changed
+        if sources_changed
             && self
                 .pending_subscription
                 .as_ref()
                 .is_some_and(|pending| pending.generation.is_some())
         {
             self.subscription_reconfigure_queued = true;
-            self.subscription_schedule = None;
-            disarm_timer(&self.subscription_timer);
             return;
         }
-
-        if config.url.is_empty() {
-            self.subscription_schedule = None;
+        self.ensure_subscription_schedule(&config);
+        if let Err(error) = crate::subscription::prune_cache(&self.layout, &config) {
+            self.logger.log(&format!("source cache cleanup: {error}"));
+        }
+        if config.remote_sources().next().is_none() {
             self.subscription_retry_on_route = false;
             self.pending_subscription = None;
             self.subscription_fetch_queued = false;
             self.subscription_reconfigure_queued = false;
-            disarm_timer(&self.subscription_timer);
-            if self.remove_subscription_cache_files("subscription was disabled") {
-                self.clear_subscription_error();
-            }
-            return;
-        }
-
-        let pending_matches = self
-            .pending_subscription
-            .as_ref()
-            .is_some_and(|pending| pending.url == config.url);
-        let cache_matches = match self.subscription_cache_matches(&config.url) {
-            Ok(matches) => matches,
-            Err(error) => {
-                self.set_subscription_error(
-                    "subscription_fetch_failed:cache_read".to_string(),
-                    Some(format!(
-                        "cannot read {}: {error}",
-                        self.layout.subscription_url_binding().display()
-                    )),
-                );
-                false
-            }
-        } && raw_path.is_file();
-        let needs_fetch = url_changed || !cache_matches;
-        if needs_fetch {
-            if !pending_matches {
-                self.pending_subscription = None;
-            }
-            self.remove_subscription_cache_files(if url_changed {
-                "the configured URL changed"
-            } else {
-                "the cache authority binding was absent or stale"
-            });
-        }
-
-        self.ensure_subscription_schedule(&config);
-
-        if needs_fetch && !pending_matches && (!self.subscription_retry_on_route || url_changed) {
-            if let Err((token, detail)) =
-                self.start_subscription_fetch_with(&config, "subscription configuration")
-            {
-                self.set_subscription_error(token, detail);
-            }
+            self.clear_subscription_error();
+            self.complete_waiting_controls(
+                true,
+                Some((
+                    "subscription_fetch_failed:disabled",
+                    "nodes.sources has no remote subscription",
+                )),
+            );
+            self.rearm_control_timer();
         }
     }
 
-    fn ensure_subscription_schedule(&mut self, config: &SubscriptionConfig) {
-        if config.url.is_empty() {
+    fn ensure_subscription_schedule(&mut self, config: &NodeConfig) {
+        let sources: Vec<_> = config.remote_sources().cloned().collect();
+        if sources.is_empty() {
             self.subscription_schedule = None;
             disarm_timer(&self.subscription_timer);
             return;
         }
-        let schedule = (config.url.clone(), config.interval);
+        let introduced_source = sources.iter().any(|source| {
+            self.subscription_schedule
+                .as_ref()
+                .is_none_or(|(previous, _)| !previous.contains(source))
+        });
+        let schedule = (sources, config.fetch.interval);
         if self.subscription_schedule.as_ref() != Some(&schedule) {
             self.subscription_schedule = Some(schedule);
             self.rearm_subscription_timer();
         }
-    }
-
-    fn subscription_cache_matches(&self, url: &str) -> io::Result<bool> {
-        let path = self.layout.subscription_url_binding();
-        let bytes = match crate::layout::read_capped(
-            &path,
-            flux_core::config::MAX_CONFIG_BYTES.saturating_add(1),
-        ) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if bytes.len() > flux_core::config::MAX_CONFIG_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "subscription URL binding exceeds the Flux config limit",
-            ));
-        }
-        Ok(bytes == url.as_bytes())
-    }
-
-    fn remove_subscription_cache_files(&mut self, reason: &str) -> bool {
-        let mut ok = true;
-        for path in [
-            self.layout.subscription_raw(),
-            self.layout.subscription_url_binding(),
-        ] {
-            match fs::remove_file(&path) {
-                Ok(()) => self.logger.log(&format!(
-                    "removed subscription cache state because {reason}"
-                )),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    ok = false;
-                    self.set_subscription_error(
-                        "subscription_fetch_failed:cache_remove".to_string(),
-                        Some(format!("cannot remove {}: {error}", path.display())),
-                    );
+        if introduced_source {
+            let snapshots = crate::subscription::source_snapshots(
+                &self.layout,
+                config,
+                self.pending_subscription
+                    .as_ref()
+                    .map(|pending| &pending.raw),
+            );
+            if snapshots.raw.len() < config.remote_sources().count() {
+                if let Err((token, detail)) =
+                    self.start_subscription_fetch_with(config, "new source configuration")
+                {
+                    self.set_subscription_error(token, detail);
                 }
             }
         }
-        ok
     }
 
     fn rearm_subscription_timer(&self) {
@@ -3188,12 +3106,12 @@ impl Reactor {
         let config = self
             .current_policy
             .as_ref()
-            .map(|policy| policy.flux.subscription.clone())
+            .map(|policy| policy.flux.nodes.clone())
             .or_else(|| self.subscription_config_from_authority().ok());
         let Some(config) = config else {
             return;
         };
-        if config.url.is_empty() {
+        if config.remote_sources().next().is_none() {
             return;
         }
         if let Err((token, detail)) = self.start_subscription_fetch_with(&config, reason) {
@@ -3236,16 +3154,7 @@ impl Reactor {
             self.subscription_reconfigure_queued = false;
             self.subscription_fetch_queued = false;
             self.engine_config_changed = true;
-            let url_changed = self
-                .current_policy
-                .as_ref()
-                .map(|policy| {
-                    !self
-                        .subscription_cache_matches(&policy.flux.subscription.url)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(true);
-            self.configure_subscription(url_changed);
+            self.configure_subscription(true);
             return;
         }
         if self.subscription_fetch_queued {
@@ -3259,66 +3168,54 @@ impl Reactor {
     }
 
     fn commit_pending_subscription(&mut self, generation: Option<u64>) -> bool {
-        let should_commit = self.pending_subscription.as_ref().is_some_and(|pending| {
-            pending.generation == generation
-                && (generation.is_some()
-                    || self
-                        .current_policy
-                        .as_ref()
-                        .is_some_and(|policy| policy.flux.subscription.url == pending.url))
-        });
-        if !should_commit {
+        if !self
+            .pending_subscription
+            .as_ref()
+            .is_some_and(|pending| pending.generation == generation)
+        {
             return true;
         }
         let pending = self
             .pending_subscription
             .take()
-            .expect("pending subscription was just matched");
-        let path = self.layout.subscription_raw();
-        let binding_path = self.layout.subscription_url_binding();
-        let unchanged = fs::read(&path)
-            .map(|current| current == pending.raw)
-            .unwrap_or(false);
-        let raw_result = if unchanged {
-            Ok(())
-        } else {
-            write_private_replace(&path, &pending.raw)
+            .expect("matched pending batch");
+        let Some(policy) = self.current_policy.as_ref() else {
+            return true;
         };
-        let binding_unchanged = fs::read(&binding_path)
-            .map(|current| current == pending.url.as_bytes())
-            .unwrap_or(false);
-        let result = raw_result.and_then(|()| {
-            if binding_unchanged {
-                Ok(())
-            } else {
-                // Raw first, authority second: a crash between the renames can
-                // only leave an unbound response, never bind old raw to a new
-                // URL.
-                write_private_replace(&binding_path, pending.url.as_bytes())
+        let mut failures = Vec::new();
+        for (source, raw) in pending.raw {
+            if !policy
+                .flux
+                .nodes
+                .remote_sources()
+                .any(|current| current == &source)
+            {
+                continue;
             }
-        });
-        match result {
-            Ok(()) => {
-                self.clear_subscription_error();
-                self.logger.log(if unchanged {
-                    "subscription cache already matched the accepted response"
-                } else {
-                    "subscription cache committed atomically"
-                });
-                true
+            let path = self.layout.source_cache(&source);
+            let unchanged =
+                crate::layout::read_capped(&path, crate::subscription::MAX_SUBSCRIPTION_BYTES + 1)
+                    .is_ok_and(|current| current == raw);
+            if !unchanged {
+                if let Err(error) = self
+                    .layout
+                    .ensure_source_cache()
+                    .and_then(|()| crate::layout::write_private_replace(&path, &raw))
+                {
+                    failures.push(format!("source {}: {error}", source.id()));
+                }
             }
-            Err(error) => {
-                self.set_subscription_error(
-                    "subscription_fetch_failed:cache_write".to_string(),
-                    Some(format!(
-                        "cannot write subscription cache state ({} or {}): {error}",
-                        path.display(),
-                        binding_path.display()
-                    )),
-                );
-                self.logger.log("subscription cache commit failed");
-                false
-            }
+        }
+        if failures.is_empty() {
+            self.logger
+                .log("accepted source responses committed atomically");
+            true
+        } else {
+            self.set_subscription_error(
+                "subscription_fetch_failed:cache_write".into(),
+                Some(failures.join("; ")),
+            );
+            false
         }
     }
 
@@ -3437,9 +3334,8 @@ impl Reactor {
     /// deliberately independent so a broken sibling file cannot roll back a
     /// valid update (§10.5).
     fn read_engine_config(
-        &self,
+        &mut self,
         flux: &FluxConfig,
-        use_cache: bool,
     ) -> Result<serde_json::Value, (String, Option<String>)> {
         let path = self.layout.template_json();
         let bytes = match crate::layout::read_capped(&path, MAX_ENGINE_CONFIG_BYTES + 1) {
@@ -3477,25 +3373,28 @@ impl Reactor {
         let template = engine_config::parse_jsonc(&text)
             .map_err(|e| ("engine_config_invalid".to_string(), Some(e.to_string())))?;
 
-        let pending = self
-            .pending_subscription
-            .as_ref()
-            .filter(|pending| {
-                !flux.subscription.url.is_empty() && pending.url == flux.subscription.url
-            })
-            .map(|pending| pending.raw.as_slice());
-        let raw =
-            crate::subscription::subscription_snapshot(&self.layout, flux, pending, use_cache)
-                .map_err(|(token, detail)| (token, Some(detail)))?;
-        let nodes =
-            flux_core::subscription::assemble_nodes(flux, raw.as_deref()).map_err(|error| {
-                let (token, detail) = crate::subscription::subscription_error_status(&error);
-                (token, Some(detail))
-            })?;
+        let snapshots = crate::subscription::source_snapshots(
+            &self.layout,
+            &flux.nodes,
+            self.pending_subscription
+                .as_ref()
+                .map(|pending| &pending.raw),
+        );
+        self.source_warnings = snapshots.warnings;
+        let nodes = flux_core::subscription::assemble_nodes(&flux.nodes, |source| {
+            snapshots.raw.get(source).map(|raw| raw.as_ref())
+        })
+        .map_err(|error| {
+            let (token, detail) = crate::subscription::subscription_error_status(&error);
+            (token, Some(detail))
+        })?;
 
-        engine_config::generate_from_template(&template, &nodes).map_err(|error| {
+        engine_config::generate_from_template(&template, &nodes).map(|mut generated| {
+            engine_config::complete_cache_path(&mut generated, &self.layout.engine_cache().to_string_lossy());
+            generated
+        }).map_err(|error| {
             if matches!(error, engine_config::EngineConfigError::UnfilledGroups(_))
-                && raw.is_none() && !flux.subscription.url.is_empty() {
+                && snapshots.raw.len() < flux.nodes.remote_sources().count() {
                 return ("subscription_cache_missing".to_string(), Some("no available input fills the template groups; waiting for the configured subscription".to_string()));
             }
             let token = match error {
@@ -3510,24 +3409,7 @@ impl Reactor {
     }
 
     fn read_policy_config(&self) -> Result<PolicyCandidate, (String, Option<String>)> {
-        let flux = match crate::layout::read_capped(
-            &self.layout.flux_toml(),
-            flux_core::config::MAX_CONFIG_BYTES + 1,
-        ) {
-            Ok(bytes) => checks::parse_flux_config(&self.layout, &bytes).map_err(|error| {
-                (
-                    "flux_config_invalid".to_string(),
-                    Some(checks::describe_flux_error(&error)),
-                )
-            })?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => FluxConfig::default(),
-            Err(error) => {
-                return Err((
-                    "flux_config_unreadable".to_string(),
-                    Some(error.to_string()),
-                ));
-            }
-        };
+        let flux = self.flux_config_from_authority()?;
 
         let mut warnings = Vec::new();
         let selected_uids =
@@ -3561,7 +3443,7 @@ impl Reactor {
                 let selected = flux.resolve_selected_uids(&index).map_err(|error| {
                     (
                         "flux_config_invalid".to_string(),
-                        Some(checks::describe_flux_error(&error)),
+                        Some(crate::configuration::describe_flux_error(&error)),
                     )
                 })?;
                 for selector in &flux.apps {
@@ -3739,6 +3621,7 @@ impl Reactor {
             }
         }
         warnings.extend(self.config_warnings.iter().cloned());
+        warnings.extend(self.source_warnings.iter().cloned());
 
         let counters = match self.dataplane.counters() {
             Ok(counters) => counters,
@@ -4132,71 +4015,6 @@ fn write_replace(path: &Path, data: &[u8]) -> io::Result<()> {
 /// Writes one machine-owned secret with the same fsync-then-rename shape as
 /// the engine candidate transaction, while keeping the previous path intact
 /// until the final atomic replacement.
-fn write_private_replace(path: &Path, data: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp = dir.join(format!(
-        ".{}.subscription.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("raw")
-    ));
-    let result = (|| -> io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-// -------------------------------------------------------------------- logging
-
-/// Timestamped append-only logger: the daemon log file plus a stderr mirror.
-pub struct Logger {
-    file: Option<fs::File>,
-}
-
-impl Logger {
-    /// Opens (and once-rotates) the daemon log. A missing or unwritable log
-    /// never stops the daemon; stderr still gets everything.
-    pub fn open(layout: &Layout) -> Self {
-        use std::os::unix::fs::OpenOptionsExt;
-        let path = layout.log_file();
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.len() > LOG_ROTATE_BYTES {
-                let _ = fs::rename(&path, layout.root().join("fluxd.log.1"));
-            }
-        }
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&path)
-            .ok();
-        Self { file }
-    }
-
-    pub fn log(&mut self, line: &str) {
-        let full = format!("[{}] {line}\n", format_utc(SystemTime::now()));
-        eprint!("{full}");
-        if let Some(file) = &mut self.file {
-            let _ = file.write_all(full.as_bytes());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

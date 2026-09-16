@@ -6,11 +6,11 @@ eBPF and an **unmodified** official
 VPN, alter packets' IP addresses or ports, or take over traffic from apps you
 did not select.
 
-> **Status:** pre-release. The normative design is the 0.9.5 blueprint
-> (`docs/spec/blueprint.md`); the implementation has caught up with it, and
-> the workspace version stays at 0.9.0 until the device regression and every
-> gate in §20 pass. A signed release tag is the only release channel — do not
-> treat an Actions artifact or a third-party repack as one.
+> **Status:** preparing the 1.0.0 candidate for owner review. The normative
+> contract lives in `docs/spec/`; the workspace manifest is the version source.
+> A signed release tag is the only release channel. Development packages carry
+> their Git revision and are not formal releases. Current software evidence and
+> remaining device validation are tracked in `docs/plan/implementation.md`.
 
 ## What it does
 
@@ -40,7 +40,7 @@ Direct with a specific reason in `status`.
 
 ## Requirements
 
-| Item | 0.9.0 requirement |
+| Item | Requirement |
 |---|---|
 | Root manager | Magisk, KernelSU, or APatch (no minimum beyond module support) |
 | CPU | arm64/aarch64 |
@@ -102,28 +102,35 @@ captured traffic is routed.
 Verify the release's `Flux-rs-v<version>-arm64.zip` against the adjacent `SHA256SUMS`, then install
 it from the Magisk, KernelSU, or APatch manager app. **A fresh install
 lands as a disabled module on purpose**, so installation alone does not capture
-traffic; upgrades preserve whatever you chose and never overwrite user configs.
+traffic. Upgrades preserve the switch, template and explicit settings; structural
+TOML migrations retain original files under `run/migrations/`.
 
 The switch is your root manager's own module toggle. `fluxd` watches that file
 with inotify, so toggling the module takes effect immediately instead of at the
 next boot, and there is no separate switch file, no `action.sh` and no second
 place to look. `fluxd enable` / `fluxd disable` write the same file. The
 manager's module description doubles as a live status readout, for example
-`🥰 [Active] gen 7 · 3 apps · rmnet_data0`.
+`🥰 [RUNNING] PID: 1234 · 黑名单 · 排除清单 3 项 · rmnet_data0`.
+This reports local capture readiness, not Internet connectivity.
 
-The two authority files are:
+Configuration responsibilities are separate:
 
 - `/data/adb/flux-rs/config/flux.toml` — which apps, which destinations, which
   interfaces and which Wi-Fi networks, each as a mode plus a list, along with
-  manual node inputs and optional subscription settings.
+  the ordered `nodes.sources` list. All four selection dimensions default to
+  an empty blacklist; use an explicit whitelist to select only named apps.
+- `/data/adb/flux-rs/config/advanced.toml` — optional fetch, refinement, group
+  matching and daemon-log retention policy. Omitted settings use built-in defaults.
 - `/data/adb/flux-rs/config/template.json` — the sing-box configuration
   template: DNS, routing rules, and the skeleton of the selector groups.
 
 **You edit the template; Flux generates what the engine runs.** From the
 template plus manual and available subscription nodes it produces `run/sing-box.<generation>.json`,
 filling the selector groups that are still vacant and appending the refined
-nodes. Everything else retains its JSON value; comments and formatting stay in
-your source template. A
+nodes. Generation preserves the template
+menus and native policy. Runtime completion injects the two TProxy inbounds and
+supplies an implicit enabled engine-cache path under `run/cache/`; explicit paths
+retain their meaning. Comments and formatting stay in the source template. A
 subscription update needs no manual merge.
 
 The shipped bootstrap template is the original Flux module's, so both projects
@@ -141,9 +148,10 @@ and Flux says so instead of starting the engine on it: `check` and the module
 description report which groups are waiting. A region your provider has no node
 for becomes `DIRECT`, so one unused group never takes the configuration down.
 
-**Flux never writes to anything under `config/`.** Reinstalling does not
-overwrite it, and everything under `run/` can be deleted at any time and will be
-rebuilt.
+**The running daemon only reads `config/`.** Installation owns one-time
+configuration migrations. `run/` contains logs, caches, generated files and IPC;
+it persists across reboot and upgrade. Never unlink a live daemon lock or socket.
+A missing main configuration is an error, not a request to select more apps.
 
 After editing the configuration, enable the module in the manager and reboot
 once. Flux validates the complete configuration before activation and fetches a
@@ -154,7 +162,7 @@ and saved configuration edits take effect without rebooting.
 For details or diagnostics after that first reboot:
 
 ```sh
-FLUXD=/data/adb/modules/flux_rs/bin/fluxd
+FLUXD=/data/adb/modules/Flux-rs/bin/fluxd
 $FLUXD status
 $FLUXD check
 ```
@@ -163,27 +171,31 @@ $FLUXD check
 fetch subscriptions. If neither manual nodes nor a cached response fill the
 template, it reports `engine_config_unfilled`.
 
-### Manual nodes and optional subscriptions
+### One node-source list
 
 ```toml
 [nodes]
-list = ["@nodes.txt"]
-
-[subscription]
-url = ""                 # optional; manual nodes also work on their own
-interval = 86400
+sources = ["https://provider.example.invalid/sub", "@nodes.txt"]
 ```
 
-`nodes.txt` lives beside `flux.toml`, with one sharing URI per line. Inline URIs
-in `list` are also accepted. Manual names and protocol settings are preserved.
-The original regional menus remain unchanged: use a matching regional name,
-reference a node's tag in a menu yourself, or add an empty `AUTO` selector for
-all nodes. Flux does not choose a new menu for you.
+Use either input alone or mix several subscriptions, local files and inline
+sharing URIs. A local file contains one manual URI per line. Sources preserve
+order; an exact duplicate remote URL contributes once. HTTP(S) strings identify
+subscriptions, so an HTTP proxy is explicit: `{ node = "http://user:password@proxy.example.invalid:8080#HTTP" }`.
+Manual names remain untouched, and conflicting tags report source positions.
 
-Provider cleanup settings belong under `[subscription.refine]`; leave the table
-out to use defaults. Existing pre-release configs move `exclude_pattern`,
-`rename`, `strip_emoji` and `max_tag_length` into that table. See the
-[configuration guide](docs/guide/how-to.md) for examples and protocol boundaries.
+The original regional menus remain unchanged: use a matching regional name,
+reference a node tag in a menu, or add an empty `AUTO` selector for all nodes.
+Provider cleanup belongs to `advanced.toml`'s `nodes.refine`; acquisition to
+`nodes.fetch`; optional selector matching to `nodes.groups`. No overlapping
+configuration layers or user modes are needed. Native engine policy stays in
+the template. See the [configuration guide](docs/guide/how-to.md) for examples.
+
+Accepted raw responses live in `run/cache/sources/<source-id>.raw`, identified by
+the exact URL. There is no second URL marker file. Local policy edits reuse the
+raw response offline; failed refreshes keep the schedule and accepted cache.
+Default logs and diagnostic bundles also live under `run/`. Required licence
+materials accompany the ZIP without becoming runtime installation prerequisites.
 
 The manager's WebUI entry opens a redirect page for the external controller
 configured in the template's optional `clash_api` block. When no controller is
@@ -200,7 +212,7 @@ Dependency versions are not pinned. Rust follows `stable`, Cargo requirements
 are open, and `Cargo.lock` is a local generated resolution; `cargo update`
 refreshes it. Packaging resolves the latest stable official sing-box once per
 operation and uses the configured NDK. The BPF ABI remains an explicit
-compatibility contract. Packaging has one entry point and 15 allowed files.
+compatibility contract. Packaging has one entry point and an explicit file allowlist.
 
 ```sh
 cargo test --workspace

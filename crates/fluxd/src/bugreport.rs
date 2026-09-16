@@ -144,7 +144,7 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
     let dir = options
         .output_dir
         .clone()
-        .unwrap_or_else(|| layout.root().to_path_buf());
+        .unwrap_or_else(|| layout.run_dir());
     let path = dir.join(name);
     let comment = format!(
         "flux-rs {} commit {commit} {}",
