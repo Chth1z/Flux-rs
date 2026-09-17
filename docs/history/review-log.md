@@ -757,3 +757,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** `find_inode` 每次打开阻塞、无超时的 `NETLINK_SOCK_DIAG` socket，`recv` 直到 `NLMSG_DONE`。timerfd 不能打断这次 `recv`；半份 dump 被当成“socket 不存在”。审计甲 R03 / rc.3 I6。
 
 **处置：** 就地改正 §9.5 / §10.4：`ProbeReady` 把非阻塞 SOCK_DIAG 放进 epoll，每个 datagram 走与 §8.5 相同的完整性门。没有 `NLMSG_DONE` 是 Incomplete，不是 absent。生产路径不再从 reactor 调用阻塞 `find_inode`。不 bump ABI。不实现 TCX。
+
+### 0.6.22 PolicyEpoch 双 bank 落地（2026-09-17）
+
+**原说法：** §10.5 已禁止 add-then-subtract，但 `apply_policy` 仍先加后减；E1 未选路径不读 control。
+
+**实际：** 同一 `cidr_mode` 对着新旧前缀并集可见，就是第三态。要把 UID / LPM / self-address 与 `cidr_mode` 收成一次 leaf 交换，E1 必须知道当前 bank。把 `uid_policy` 做成 `ARRAY_OF_MAPS` 会在未选路径再付一次 inner-map；两张同型 HASH 加常量 if/else 不会。`BPF_MAP_FREEZE` 不可逆，所以预留 leaf 是运行时池，不是解冻复用。审计甲 R01 / rc.3 I3。
+
+**处置：** ABI `0xF10C0905`：`policy_bank` 占用原 `pad1[8]` 的首字节，结构仍 96。`apply_policy` 写入 inactive bank 后一次 `control_root` 交换；`publish_inactive` 禁止 `MAP_CREATE`，池空则为 `inactive_publish_failed`。§14.1 改为未选流量付身份 helpers + 一次 control 快照 + 一次 HASH miss。Phase 4–6 设备重跑需 GOV-1.2。不实现 TCX。

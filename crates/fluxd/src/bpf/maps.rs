@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::io;
-#[cfg(test)]
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
@@ -36,6 +35,10 @@ struct MapHandle {
 pub struct MapSet {
     maps: Vec<MapHandle>,
     control_published: bool,
+    /// Unfrozen ARRAY leaf reserved so `publish_inactive` never `MAP_CREATE`s.
+    /// Freeze is irreversible on 5.15, so this is a pool slot, not a recycled
+    /// live leaf. Not an ELF `.maps` object.
+    spare_leaf: Option<OwnedFd>,
 }
 
 pub struct MapCreateFailure {
@@ -93,9 +96,11 @@ impl MapSet {
                 error: io::Error::new(io::ErrorKind::InvalidData, "unexpected map remained"),
             });
         }
+        let spare_leaf = create_one(spec(abi::MAP_CONTROL_LEAF), -1, None)?;
         Ok(Self {
             maps,
             control_published: false,
+            spare_leaf: Some(spare_leaf),
         })
     }
 
@@ -107,6 +112,22 @@ impl MapSet {
     }
 
     pub fn publish_control(&mut self, control: &Control) -> io::Result<()> {
+        self.publish_leaf(control, SparePolicy::Refill)
+    }
+
+    /// Same pointer swap as [`Self::publish_control`], but never
+    /// `BPF_MAP_CREATE`. An empty spare is `inactive_publish_failed`.
+    pub fn publish_inactive_control(&mut self, control: &Control) -> io::Result<()> {
+        self.publish_leaf(control, SparePolicy::NoCreate)
+    }
+
+    fn publish_leaf(&mut self, control: &Control, spare: SparePolicy) -> io::Result<()> {
+        if control.policy_bank > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("policy_bank {} is not 0 or 1", control.policy_bank),
+            ));
+        }
         let leaf_index = self
             .maps
             .iter()
@@ -117,14 +138,23 @@ impl MapSet {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "control_root map missing"))?;
 
         let replacement = if self.control_published {
-            Some(
-                create_one(spec(abi::MAP_CONTROL_LEAF), -1, None).map_err(|failure| {
-                    io::Error::new(
-                        failure.error.kind(),
-                        format!("{}: {}", failure.name, failure.error),
-                    )
-                })?,
-            )
+            match self.spare_leaf.take() {
+                Some(fd) => Some(fd),
+                None if spare == SparePolicy::Refill => Some(
+                    create_one(spec(abi::MAP_CONTROL_LEAF), -1, None).map_err(|failure| {
+                        io::Error::new(
+                            failure.error.kind(),
+                            format!("{}: {}", failure.name, failure.error),
+                        )
+                    })?,
+                ),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "inactive_publish_failed: no reserved control leaf",
+                    ));
+                }
+            }
         } else {
             None
         };
@@ -157,6 +187,16 @@ impl MapSet {
             };
         }
         self.control_published = true;
+        if spare == SparePolicy::Refill && self.spare_leaf.is_none() {
+            self.spare_leaf = Some(create_one(spec(abi::MAP_CONTROL_LEAF), -1, None).map_err(
+                |failure| {
+                    io::Error::new(
+                        failure.error.kind(),
+                        format!("{}: {}", failure.name, failure.error),
+                    )
+                },
+            )?);
+        }
         Ok(())
     }
 
@@ -173,43 +213,85 @@ impl MapSet {
             .sum())
     }
 
-    pub fn update_uid_mode(&self, uid: u32, mode: u8) -> io::Result<()> {
-        let fd = self
-            .fd(abi::MAP_UID_POLICY)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uid_policy map missing"))?;
+    pub fn update_uid_mode(&self, bank: u8, uid: u32, mode: u8) -> io::Result<()> {
+        let name = abi::uid_policy_map(bank);
+        let fd = self.fd(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
+        })?;
         sys::update_map(fd, &uid.to_ne_bytes(), &[mode], 0)
     }
 
-    pub fn update_bypass_v4(&self, key: &LpmV4Key, tag: abi::BypassTag) -> io::Result<()> {
-        self.update_one(abi::MAP_BYPASS_V4, as_bytes(key), &[tag as u8])
+    pub fn delete_uid_mode(&self, bank: u8, uid: u32) -> io::Result<()> {
+        self.delete_one(abi::uid_policy_map(bank), &uid.to_ne_bytes())
     }
 
-    pub fn delete_bypass_v4(&self, key: &LpmV4Key) -> io::Result<()> {
-        self.delete_one(abi::MAP_BYPASS_V4, as_bytes(key))
+    pub fn uid_keys(&self, bank: u8) -> io::Result<Vec<u32>> {
+        let keys = self.collect_keys(abi::uid_policy_map(bank), 4)?;
+        keys.into_iter()
+            .map(|key| {
+                key.try_into().map(u32::from_ne_bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "uid key was not 4 bytes")
+                })
+            })
+            .collect()
     }
 
-    pub fn update_bypass_v6(&self, key: &LpmV6Key, tag: abi::BypassTag) -> io::Result<()> {
-        self.update_one(abi::MAP_BYPASS_V6, as_bytes(key), &[tag as u8])
+    pub fn update_bypass_v4(
+        &self,
+        bank: u8,
+        key: &LpmV4Key,
+        tag: abi::BypassTag,
+    ) -> io::Result<()> {
+        self.update_one(abi::bypass_v4_map(bank), as_bytes(key), &[tag as u8])
     }
 
-    pub fn delete_bypass_v6(&self, key: &LpmV6Key) -> io::Result<()> {
-        self.delete_one(abi::MAP_BYPASS_V6, as_bytes(key))
+    pub fn delete_bypass_v4(&self, bank: u8, key: &LpmV4Key) -> io::Result<()> {
+        self.delete_one(abi::bypass_v4_map(bank), as_bytes(key))
     }
 
-    pub fn update_self_v4(&self, address: &[u8; 4]) -> io::Result<()> {
-        self.update_one(abi::MAP_SELF_ADDR_V4, address, &[1])
+    pub fn bypass_v4_keys(&self, bank: u8) -> io::Result<Vec<LpmV4Key>> {
+        collect_typed_keys(self.collect_keys(abi::bypass_v4_map(bank), size_of::<LpmV4Key>())?)
     }
 
-    pub fn delete_self_v4(&self, address: &[u8; 4]) -> io::Result<()> {
-        self.delete_one(abi::MAP_SELF_ADDR_V4, address)
+    pub fn update_bypass_v6(
+        &self,
+        bank: u8,
+        key: &LpmV6Key,
+        tag: abi::BypassTag,
+    ) -> io::Result<()> {
+        self.update_one(abi::bypass_v6_map(bank), as_bytes(key), &[tag as u8])
     }
 
-    pub fn update_self_v6(&self, address: &[u8; 16]) -> io::Result<()> {
-        self.update_one(abi::MAP_SELF_ADDR_V6, address, &[1])
+    pub fn delete_bypass_v6(&self, bank: u8, key: &LpmV6Key) -> io::Result<()> {
+        self.delete_one(abi::bypass_v6_map(bank), as_bytes(key))
     }
 
-    pub fn delete_self_v6(&self, address: &[u8; 16]) -> io::Result<()> {
-        self.delete_one(abi::MAP_SELF_ADDR_V6, address)
+    pub fn bypass_v6_keys(&self, bank: u8) -> io::Result<Vec<LpmV6Key>> {
+        collect_typed_keys(self.collect_keys(abi::bypass_v6_map(bank), size_of::<LpmV6Key>())?)
+    }
+
+    pub fn update_self_v4(&self, bank: u8, address: &[u8; 4]) -> io::Result<()> {
+        self.update_one(abi::self_addr_v4_map(bank), address, &[1])
+    }
+
+    pub fn delete_self_v4(&self, bank: u8, address: &[u8; 4]) -> io::Result<()> {
+        self.delete_one(abi::self_addr_v4_map(bank), address)
+    }
+
+    pub fn self_v4_keys(&self, bank: u8) -> io::Result<Vec<[u8; 4]>> {
+        collect_typed_keys(self.collect_keys(abi::self_addr_v4_map(bank), 4)?)
+    }
+
+    pub fn update_self_v6(&self, bank: u8, address: &[u8; 16]) -> io::Result<()> {
+        self.update_one(abi::self_addr_v6_map(bank), address, &[1])
+    }
+
+    pub fn delete_self_v6(&self, bank: u8, address: &[u8; 16]) -> io::Result<()> {
+        self.delete_one(abi::self_addr_v6_map(bank), address)
+    }
+
+    pub fn self_v6_keys(&self, bank: u8) -> io::Result<Vec<[u8; 16]>> {
+        collect_typed_keys(self.collect_keys(abi::self_addr_v6_map(bank), 16)?)
     }
 
     pub fn clear_fault_latch(&self) -> io::Result<()> {
@@ -277,6 +359,22 @@ impl MapSet {
         }
     }
 
+    fn collect_keys(&self, name: &str, key_len: usize) -> io::Result<Vec<Vec<u8>>> {
+        let fd = self.fd(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
+        })?;
+        let mut keys = Vec::new();
+        let mut previous: Option<Vec<u8>> = None;
+        loop {
+            let mut next = vec![0u8; key_len];
+            if !sys::next_map_key(fd, previous.as_deref(), &mut next)? {
+                return Ok(keys);
+            }
+            keys.push(next.clone());
+            previous = Some(next);
+        }
+    }
+
     /// Backs `Runtime::maps` for the Phase 4 device test; unused by this
     /// crate's own unit tests.
     #[cfg(test)]
@@ -284,6 +382,40 @@ impl MapSet {
     pub fn identities(&self) -> Vec<MapIdentity> {
         self.maps.iter().map(|map| map.identity.clone()).collect()
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SparePolicy {
+    Refill,
+    NoCreate,
+}
+
+fn collect_typed_keys<T: Copy>(keys: Vec<Vec<u8>>) -> io::Result<Vec<T>> {
+    keys.into_iter()
+        .map(|key| {
+            if key.len() != size_of::<T>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "map key was {} bytes, expected {}",
+                        key.len(),
+                        size_of::<T>()
+                    ),
+                ));
+            }
+            let mut value = std::mem::MaybeUninit::<T>::uninit();
+            // SAFETY: `key` is exactly size_of::<T>() and T is a kernel ABI
+            // struct (repr(C) POD). The copy is the only write before assume_init.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    key.as_ptr(),
+                    value.as_mut_ptr().cast::<u8>(),
+                    size_of::<T>(),
+                );
+                Ok(value.assume_init())
+            }
+        })
+        .collect()
 }
 
 fn as_bytes<T>(value: &T) -> &[u8] {
@@ -420,6 +552,11 @@ mod tests {
         assert_eq!(spec(abi::MAP_FAULT_EVENTS).key_size, 0);
         assert_eq!(spec(abi::MAP_CONTROL_LEAF).value_size, 96);
         assert_eq!(spec(abi::MAP_TCP_DECISION).value_size, 16);
-        assert_eq!(spec(abi::MAP_BYPASS_V4).map_flags, BPF_F_NO_PREALLOC);
+        assert_eq!(spec(abi::MAP_BYPASS_V4_0).map_flags, BPF_F_NO_PREALLOC);
+        assert_eq!(spec(abi::MAP_BYPASS_V4_1).map_flags, BPF_F_NO_PREALLOC);
+        assert_eq!(
+            spec(abi::MAP_UID_POLICY_0).max_entries,
+            spec(abi::MAP_UID_POLICY_1).max_entries
+        );
     }
 }

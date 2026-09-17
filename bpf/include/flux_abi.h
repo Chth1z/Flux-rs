@@ -25,6 +25,11 @@
 /* ------------------------------------------------------------------ magic */
 
 /* Bump on ANY layout, map-set or semantic change. Not related to SemVer.
+ * 0xF10C0905: PolicyEpoch dual banks. uid_policy / bypass_* / self_addr_*
+ *             become two same-type maps selected by flux_control.policy_bank
+ *             (one byte of former pad1). sizeof(flux_control) stays 96.
+ *             uid_policy is NOT ARRAY_OF_MAPS: E1 is a constant if/else plus
+ *             one HASH lookup after the control snapshot that names the bank.
  * 0xF10C0904: bypass LPM values distinguish mechanism-reserved prefixes from
  *             user policy, and flux_control carries the CIDR list direction.
  *             The control layout and every existing field offset stay fixed.
@@ -49,7 +54,7 @@
  * kernel/userspace data contract and do not require a bump, because no BPF
  * program reads them. Only struct layouts and the map set do.
  */
-#define FLUX_ABI_MAGIC 0xF10C0904u
+#define FLUX_ABI_MAGIC 0xF10C0905u
 
 /* Guards against reading uninitialised or foreign socket storage. */
 #define FLUX_DECISION_MAGIC 0xD3C15100u
@@ -61,17 +66,22 @@
  * flux.bpf.c are documentation; the two MUST agree and a flux-core test
  * checks the table against this header.
  */
-#define FLUX_MAP_UID_POLICY   "uid_policy"    /* HASH       4096   u32 -> u8   */
-#define FLUX_MAP_BYPASS_V4    "bypass_v4"     /* LPM_TRIE  65536   NO_PREALLOC */
-#define FLUX_MAP_BYPASS_V6    "bypass_v6"     /* LPM_TRIE  65536   NO_PREALLOC */
+#define FLUX_MAP_UID_POLICY_0 "uid_policy_0"  /* HASH       4096   u32 -> u8   */
+#define FLUX_MAP_UID_POLICY_1 "uid_policy_1"
+#define FLUX_MAP_BYPASS_V4_0  "bypass_v4_0"   /* LPM_TRIE  65536   NO_PREALLOC */
+#define FLUX_MAP_BYPASS_V4_1  "bypass_v4_1"
+#define FLUX_MAP_BYPASS_V6_0  "bypass_v6_0"
+#define FLUX_MAP_BYPASS_V6_1  "bypass_v6_1"
 
 /* The device's own addresses, kept OUT of the LPM tries on purpose. They are
  * always full-length prefixes, so a trie buys nothing over exact hashing, and
  * HASH deletes cleanly as IPv6 privacy addresses rotate. It also sidesteps the
  * LPM trie UBSAN crash present on 6.6.0-6.6.46 (blueprint D20, section 1.5.3a).
  */
-#define FLUX_MAP_SELF_ADDR_V4 "self_addr_v4"  /* HASH        256   4B  -> u8   */
-#define FLUX_MAP_SELF_ADDR_V6 "self_addr_v6"  /* HASH        256   16B -> u8   */
+#define FLUX_MAP_SELF_ADDR_V4_0 "self_addr_v4_0" /* HASH     256   4B  -> u8   */
+#define FLUX_MAP_SELF_ADDR_V4_1 "self_addr_v4_1"
+#define FLUX_MAP_SELF_ADDR_V6_0 "self_addr_v6_0" /* HASH     256   16B -> u8   */
+#define FLUX_MAP_SELF_ADDR_V6_1 "self_addr_v6_1"
 
 /* Per-UID byte and packet counters, updated ONLY on captured packets so
  * unselected traffic is untouched. Carries no address, port or time series --
@@ -204,7 +214,8 @@ struct flux_control {
 	__u32 draining_count;       /* 76  diagnostics only                    */
 	__u32 bypass_v4_count;      /* 80  diagnostics only                    */
 	__u32 bypass_v6_count;      /* 84  diagnostics only                    */
-	__u8 pad1[8];               /* 88  MUST be 0                           */
+	__u8 policy_bank;           /* 88  0 or 1: which policy map bank is live */
+	__u8 pad1[7];               /* 89  MUST be 0                           */
 };
 
 /* No MAC addresses here, on purpose.

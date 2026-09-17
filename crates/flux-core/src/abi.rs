@@ -14,6 +14,10 @@
 
 /// Bumped on ANY layout, map-set or semantic change. Unrelated to SemVer.
 ///
+/// * `0xF10C0905` dual PolicyEpoch banks. `uid_policy` / `bypass_*` /
+///   `self_addr_*` become two same-type maps selected by
+///   [`Control::policy_bank`]. `sizeof(Control)` stays 96; one byte of former
+///   `pad1` is now the bank. `uid_policy` is not `ARRAY_OF_MAPS`.
 /// * `0xF10C0904` tags bypass LPM values as mechanism-reserved or user policy
 ///   and carries the CIDR list direction in the former control padding. The
 ///   control size and every existing field offset remain unchanged.
@@ -25,28 +29,88 @@
 ///   [`Counter::SawPacket`] for the positive liveness check (blueprint §8.5.4).
 /// * `0xF10C0901` dropped `peer_mac` / `host_mac`; ingress forces
 ///   `PACKET_HOST` instead (blueprint D17).
-pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0904;
+pub const FLUX_ABI_MAGIC: u32 = 0xF10C_0905;
 
 /// Guards against reading uninitialised or foreign socket storage.
 pub const FLUX_DECISION_MAGIC: u32 = 0xD3C1_5100;
 
 // ------------------------------------------------------------------ map names
 
-/// `HASH`, `u32 -> u8`.
-pub const MAP_UID_POLICY: &str = "uid_policy";
-/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only.
-pub const MAP_BYPASS_V4: &str = "bypass_v4";
-/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only.
-pub const MAP_BYPASS_V6: &str = "bypass_v6";
+/// `HASH`, `u32 -> u8`, PolicyEpoch bank 0.
+pub const MAP_UID_POLICY_0: &str = "uid_policy_0";
+/// `HASH`, `u32 -> u8`, PolicyEpoch bank 1.
+pub const MAP_UID_POLICY_1: &str = "uid_policy_1";
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only, bank 0.
+pub const MAP_BYPASS_V4_0: &str = "bypass_v4_0";
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only, bank 1.
+pub const MAP_BYPASS_V4_1: &str = "bypass_v4_1";
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only, bank 0.
+pub const MAP_BYPASS_V6_0: &str = "bypass_v6_0";
+/// `LPM_TRIE`, `BPF_F_NO_PREALLOC`. Prefixes only, bank 1.
+pub const MAP_BYPASS_V6_1: &str = "bypass_v6_1";
 
 /// The device's own IPv4 addresses, kept out of the LPM trie on purpose.
 ///
 /// They are always full-length prefixes, so a trie buys nothing over exact
 /// hashing, `HASH` deletes cleanly as addresses come and go, and it sidesteps
 /// the LPM trie UBSAN crash on 6.6.0–6.6.46 (blueprint D20, §1.5.3a).
-pub const MAP_SELF_ADDR_V4: &str = "self_addr_v4";
-/// The device's own IPv6 addresses. See [`MAP_SELF_ADDR_V4`].
-pub const MAP_SELF_ADDR_V6: &str = "self_addr_v6";
+pub const MAP_SELF_ADDR_V4_0: &str = "self_addr_v4_0";
+/// Bank 1 of [`MAP_SELF_ADDR_V4_0`].
+pub const MAP_SELF_ADDR_V4_1: &str = "self_addr_v4_1";
+/// The device's own IPv6 addresses. See [`MAP_SELF_ADDR_V4_0`].
+pub const MAP_SELF_ADDR_V6_0: &str = "self_addr_v6_0";
+/// Bank 1 of [`MAP_SELF_ADDR_V6_0`].
+pub const MAP_SELF_ADDR_V6_1: &str = "self_addr_v6_1";
+
+/// Named `uid_policy` HASH for `bank` (0 or 1).
+pub const fn uid_policy_map(bank: u8) -> &'static str {
+    if bank & 1 == 0 {
+        MAP_UID_POLICY_0
+    } else {
+        MAP_UID_POLICY_1
+    }
+}
+
+/// Named IPv4 bypass LPM for `bank` (0 or 1).
+pub const fn bypass_v4_map(bank: u8) -> &'static str {
+    if bank & 1 == 0 {
+        MAP_BYPASS_V4_0
+    } else {
+        MAP_BYPASS_V4_1
+    }
+}
+
+/// Named IPv6 bypass LPM for `bank` (0 or 1).
+pub const fn bypass_v6_map(bank: u8) -> &'static str {
+    if bank & 1 == 0 {
+        MAP_BYPASS_V6_0
+    } else {
+        MAP_BYPASS_V6_1
+    }
+}
+
+/// Named IPv4 self-address HASH for `bank` (0 or 1).
+pub const fn self_addr_v4_map(bank: u8) -> &'static str {
+    if bank & 1 == 0 {
+        MAP_SELF_ADDR_V4_0
+    } else {
+        MAP_SELF_ADDR_V4_1
+    }
+}
+
+/// Named IPv6 self-address HASH for `bank` (0 or 1).
+pub const fn self_addr_v6_map(bank: u8) -> &'static str {
+    if bank & 1 == 0 {
+        MAP_SELF_ADDR_V6_0
+    } else {
+        MAP_SELF_ADDR_V6_1
+    }
+}
+
+/// The bank that is not `live` (0 or 1).
+pub const fn inactive_policy_bank(live: u8) -> u8 {
+    1 - (live & 1)
+}
 
 /// `PERCPU_HASH`, per-UID byte and packet counters.
 ///
@@ -68,12 +132,21 @@ pub const MAP_FAULT_EVENTS: &str = "fault_events";
 pub const MAP_COUNTERS: &str = "counters";
 
 /// Every map symbol name the loader must bind, in declaration order.
-pub const MAP_NAMES: [&str; 12] = [
-    MAP_UID_POLICY,
-    MAP_BYPASS_V4,
-    MAP_BYPASS_V6,
-    MAP_SELF_ADDR_V4,
-    MAP_SELF_ADDR_V6,
+///
+/// The spare unfrozen `control_leaf` used to publish without `MAP_CREATE` on
+/// the inactive path is a runtime FD, not an ELF `.maps` object, so it is not
+/// in this table.
+pub const MAP_NAMES: [&str; 17] = [
+    MAP_UID_POLICY_0,
+    MAP_UID_POLICY_1,
+    MAP_BYPASS_V4_0,
+    MAP_BYPASS_V4_1,
+    MAP_BYPASS_V6_0,
+    MAP_BYPASS_V6_1,
+    MAP_SELF_ADDR_V4_0,
+    MAP_SELF_ADDR_V4_1,
+    MAP_SELF_ADDR_V6_0,
+    MAP_SELF_ADDR_V6_1,
     MAP_UID_STATS,
     MAP_TCP_DECISION,
     MAP_CONTROL_ROOT,
@@ -377,8 +450,12 @@ pub struct Control {
     pub bypass_v4_count: u32,
     /// Diagnostics only.
     pub bypass_v6_count: u32,
+    /// 0 or 1: which PolicyEpoch bank `uid_policy_*` / `bypass_*` /
+    /// `self_addr_*` the snapshot names. Occupies the first byte of the former
+    /// `pad1[8]`.
+    pub policy_bank: u8,
     /// Must be zero.
-    pub pad1: [u8; 8],
+    pub pad1: [u8; 7],
 }
 
 // ------------------------------------------------------------------ uid_stats
@@ -637,7 +714,21 @@ mod tests {
         assert_eq!(offset_of!(Control, draining_count), 76);
         assert_eq!(offset_of!(Control, bypass_v4_count), 80);
         assert_eq!(offset_of!(Control, bypass_v6_count), 84);
-        assert_eq!(offset_of!(Control, pad1), 88);
+        assert_eq!(offset_of!(Control, policy_bank), 88);
+        assert_eq!(offset_of!(Control, pad1), 89);
+    }
+
+    #[test]
+    fn policy_bank_names_are_paired() {
+        assert_eq!(uid_policy_map(0), MAP_UID_POLICY_0);
+        assert_eq!(uid_policy_map(1), MAP_UID_POLICY_1);
+        assert_eq!(uid_policy_map(2), MAP_UID_POLICY_0);
+        assert_eq!(inactive_policy_bank(0), 1);
+        assert_eq!(inactive_policy_bank(1), 0);
+        assert_eq!(MAP_NAMES.len(), 17);
+        for name in MAP_NAMES {
+            assert!(name.len() < 16, "{name} exceeds BPF_OBJ_NAME_LEN minus NUL");
+        }
     }
 
     #[test]

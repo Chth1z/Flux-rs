@@ -2,8 +2,8 @@
 //!
 //! Blueprint §12 deliberately forbids libbpf, libelf, aya and pinning. The
 //! product embeds one ELF object and this module performs the small subset it
-//! needs: strict ELF64 parsing, symbol-name map relocations, twelve explicit
-//! map creations, a hand-built BTF load and four `SCHED_CLS` program loads.
+//! needs: strict ELF64 parsing, symbol-name map relocations, explicit
+//! map creations from MAP_SPECS, a hand-built BTF load and four `SCHED_CLS` program loads.
 //! Phase 4 stops there: nothing in this module attaches a program or changes
 //! packet flow.
 
@@ -333,11 +333,16 @@ fn expected_program_maps(name: &str) -> &'static [String] {
     match name {
         flux_core::abi::PROG_CAP_L2 | flux_core::abi::PROG_CAP_L3 => CAPTURE.get_or_init(|| {
             sorted_names(&[
-                flux_core::abi::MAP_UID_POLICY,
-                flux_core::abi::MAP_BYPASS_V4,
-                flux_core::abi::MAP_BYPASS_V6,
-                flux_core::abi::MAP_SELF_ADDR_V4,
-                flux_core::abi::MAP_SELF_ADDR_V6,
+                flux_core::abi::MAP_UID_POLICY_0,
+                flux_core::abi::MAP_UID_POLICY_1,
+                flux_core::abi::MAP_BYPASS_V4_0,
+                flux_core::abi::MAP_BYPASS_V4_1,
+                flux_core::abi::MAP_BYPASS_V6_0,
+                flux_core::abi::MAP_BYPASS_V6_1,
+                flux_core::abi::MAP_SELF_ADDR_V4_0,
+                flux_core::abi::MAP_SELF_ADDR_V4_1,
+                flux_core::abi::MAP_SELF_ADDR_V6_0,
+                flux_core::abi::MAP_SELF_ADDR_V6_1,
                 flux_core::abi::MAP_UID_STATS,
                 flux_core::abi::MAP_TCP_DECISION,
                 flux_core::abi::MAP_CONTROL_ROOT,

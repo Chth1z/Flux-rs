@@ -327,33 +327,48 @@ static __always_inline int bypass_hit(const struct flux_pkt *p,
 {
 	__u8 tag = 0;
 
+	if (!c)
+		return 1;
+
 	if (p->family == 4) {
 		__u32 exact;
 		__builtin_memcpy(&exact, p->daddr, 4);
-		if (bpf_map_lookup_elem(&self_addr_v4, &exact))
+		if (c->policy_bank) {
+			if (bpf_map_lookup_elem(&self_addr_v4_1, &exact))
+				return 1;
+		} else if (bpf_map_lookup_elem(&self_addr_v4_0, &exact)) {
 			return 1;
+		}
 		struct flux_lpm_v4_key k = {};
 		k.prefixlen = 32;
 		__builtin_memcpy(k.addr, p->daddr, 4);
-		__u8 *found = bpf_map_lookup_elem(&bypass_v4, &k);
+		__u8 *found = c->policy_bank
+				      ? bpf_map_lookup_elem(&bypass_v4_1, &k)
+				      : bpf_map_lookup_elem(&bypass_v4_0, &k);
 		if (found)
 			tag = *found;
 	} else {
 		__u8 exact[16];
 		__builtin_memcpy(exact, p->daddr, 16);
-		if (bpf_map_lookup_elem(&self_addr_v6, exact))
+		if (c->policy_bank) {
+			if (bpf_map_lookup_elem(&self_addr_v6_1, exact))
+				return 1;
+		} else if (bpf_map_lookup_elem(&self_addr_v6_0, exact)) {
 			return 1;
+		}
 		struct flux_lpm_v6_key k = {};
 		k.prefixlen = 128;
 		__builtin_memcpy(k.addr, p->daddr, 16);
-		__u8 *found = bpf_map_lookup_elem(&bypass_v6, &k);
+		__u8 *found = c->policy_bank
+				      ? bpf_map_lookup_elem(&bypass_v6_1, &k)
+				      : bpf_map_lookup_elem(&bypass_v6_0, &k);
 		if (found)
 			tag = *found;
 	}
 
 	if (tag == FLUX_BYPASS_RESERVED)
 		return 1;
-	if (c && c->cidr_mode == FLUX_CIDR_WHITELIST)
+	if (c->cidr_mode == FLUX_CIDR_WHITELIST)
 		return tag == 0;
 	return tag != 0;
 }
@@ -480,8 +495,10 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (!l3 && skb->vlan_present)
 		return TC_ACT_UNSPEC;
 
-	// E1 -- socket identity. This is the entire cost paid by traffic that
-	// belongs to an unselected UID: one helper call and one hash miss.
+	// E1 -- socket identity plus the frozen leaf that names the live
+	// PolicyEpoch bank. Unselected traffic pays identity helpers, one
+	// control snapshot, and one HASH miss, then TC_ACT_UNSPEC. uid_policy
+	// is two HASH maps with a constant if/else, not ARRAY_OF_MAPS.
 	struct bpf_sock *skc = skb->sk;
 	if (!skc)
 		return TC_ACT_UNSPEC;
@@ -492,7 +509,12 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	__u32 uid = bpf_get_socket_uid(skb);
 	if (uid == OVERFLOWUID)
 		return TC_ACT_UNSPEC;
-	__u8 *mode = bpf_map_lookup_elem(&uid_policy, &uid);
+	const struct flux_control *c = ctrl();
+	if (!c)
+		return TC_ACT_UNSPEC;
+	__u8 *mode = c->policy_bank
+			     ? bpf_map_lookup_elem(&uid_policy_1, &uid)
+			     : bpf_map_lookup_elem(&uid_policy_0, &uid);
 	if (!mode)
 		return TC_ACT_UNSPEC;
 
@@ -514,11 +536,6 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 			return TC_ACT_UNSPEC;
 		if (d->mode != FLUX_DEC_CAPTURED) {
 			cnt(FLUX_CNT_DROP_CORRUPT);
-			return TC_ACT_SHOT;
-		}
-		const struct flux_control *c = ctrl();
-		if (!c) {
-			cnt(FLUX_CNT_DROP_INACTIVE);
 			return TC_ACT_SHOT;
 		}
 		if (!c->active) {
@@ -543,7 +560,6 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (p.fragment) {
 		// The destination is known even without an L4 header, so the
 		// bypass decision is still exact.
-		const struct flux_control *c = ctrl();
 		if (bypass_hit(&p, c))
 			return TC_ACT_UNSPEC;
 		if (*mode == FLUX_UID_SELECTED && c && c->active) {
@@ -561,11 +577,9 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (p.l4proto == IPPROTO_TCP) {
 		// E4 -- only locally initiated connections get a decision.
 		// Connections that already existed before capture was enabled
-		// never pay the control lookup.
+		// never reach a first-SYN decision.
 		if (!(p.tcp_syn && !p.tcp_ack))
 			return TC_ACT_UNSPEC;
-
-		const struct flux_control *c = ctrl();
 
 		// Structured so that every c-> dereference sits inside a branch
 		// where the verifier has already proven c != NULL. Do NOT
@@ -629,8 +643,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	// effect immediately.
 	if (*mode != FLUX_UID_SELECTED)
 		return TC_ACT_UNSPEC;
-	const struct flux_control *c = ctrl();
-	if (!c || !c->active)
+	if (!c->active)
 		return TC_ACT_UNSPEC;
 	if (bypass_hit(&p, c))
 		return TC_ACT_UNSPEC;
@@ -648,11 +661,11 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 // fluxd has read the counter. Its only job is to prove the classifier chain
 // actually reaches that position.
 //
-// This has to be a separate program rather than a flag inside cap_core,
-// because unselected traffic returns at E1 and never reaches ctrl() -- a
-// control-flag design would have forced the snapshot lookup to the top of the
-// hot path for every packet on the device. Here the cost is paid only while
-// the probe is attached, and the capture entries stay untouched.
+// This has to be a separate program rather than a flag inside cap_core:
+// packets without skb->sk still return at E1 before ctrl(), and counting
+// SAW_PACKET on the capture entries would charge every classified packet.
+// The probe pays the cost only while attached; capture entries stay
+// untouched.
 //
 // TC_ACT_UNSPEC so the chain continues exactly as it would without us: the
 // probe must not change the fate of a single packet. See blueprint 8.5.4.

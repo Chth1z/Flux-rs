@@ -3,8 +3,8 @@
 //! Blueprint §10.5: a first SYN or UDP datagram sees the maps as they are.
 //! An existing TCP decision being immutable does not make a mixed epoch safe.
 //! This module is the host-side model of that contract. It does not talk to
-//! the kernel; `fluxd` still mutates live maps in place until the PolicyEpoch
-//! commit lands.
+//! the kernel. `fluxd` commits a PolicyEpoch by writing the inactive bank and
+//! swapping one frozen control leaf (`policy_bank`).
 //!
 //! Two protocols are named so they cannot be confused:
 //!
@@ -126,7 +126,8 @@ pub fn epoch_commit_windows(from: &PolicyEpoch, desired: &PolicyEpoch) -> Vec<Po
     vec![from.clone(), committed(from, desired)]
 }
 
-/// Visible epochs under today's `apply_policy` order (blueprint §10.5 defect).
+/// Visible epochs under the add-then-subtract `apply_policy` order that
+/// existed before PolicyEpoch dual-bank commit (blueprint §10.5 defect).
 ///
 /// Additive UID / prefix / self-address writes, then `cidr_mode`, then
 /// DRAINING and deletes. One snapshot is recorded after each of those six

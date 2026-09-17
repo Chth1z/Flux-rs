@@ -31,57 +31,43 @@ pub struct MapSpec {
     pub needs_inner_map: bool,
 }
 
-pub const MAP_SPECS: [MapSpec; 12] = [
+const fn hash_u8(name: &'static str, key_size: u32, max_entries: u32) -> MapSpec {
     MapSpec {
-        name: abi::MAP_UID_POLICY,
+        name,
         map_type: MAP_TYPE_HASH,
-        key_size: 4,
+        key_size,
         value_size: 1,
-        max_entries: abi::UID_POLICY_MAX_ENTRIES,
+        max_entries,
         map_flags: 0,
         needs_btf: false,
         needs_inner_map: false,
-    },
+    }
+}
+
+const fn lpm(name: &'static str, key_size: u32) -> MapSpec {
     MapSpec {
-        name: abi::MAP_BYPASS_V4,
+        name,
         map_type: MAP_TYPE_LPM_TRIE,
-        key_size: size_of::<LpmV4Key>() as u32,
+        key_size,
         value_size: 1,
         max_entries: abi::LPM_MAX_ENTRIES,
         map_flags: BPF_F_NO_PREALLOC,
         needs_btf: false,
         needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_BYPASS_V6,
-        map_type: MAP_TYPE_LPM_TRIE,
-        key_size: size_of::<LpmV6Key>() as u32,
-        value_size: 1,
-        max_entries: abi::LPM_MAX_ENTRIES,
-        map_flags: BPF_F_NO_PREALLOC,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_SELF_ADDR_V4,
-        map_type: MAP_TYPE_HASH,
-        key_size: 4,
-        value_size: 1,
-        max_entries: abi::SELF_ADDR_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_SELF_ADDR_V6,
-        map_type: MAP_TYPE_HASH,
-        key_size: 16,
-        value_size: 1,
-        max_entries: abi::SELF_ADDR_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
+    }
+}
+
+pub const MAP_SPECS: [MapSpec; 17] = [
+    hash_u8(abi::MAP_UID_POLICY_0, 4, abi::UID_POLICY_MAX_ENTRIES),
+    hash_u8(abi::MAP_UID_POLICY_1, 4, abi::UID_POLICY_MAX_ENTRIES),
+    lpm(abi::MAP_BYPASS_V4_0, size_of::<LpmV4Key>() as u32),
+    lpm(abi::MAP_BYPASS_V4_1, size_of::<LpmV4Key>() as u32),
+    lpm(abi::MAP_BYPASS_V6_0, size_of::<LpmV6Key>() as u32),
+    lpm(abi::MAP_BYPASS_V6_1, size_of::<LpmV6Key>() as u32),
+    hash_u8(abi::MAP_SELF_ADDR_V4_0, 4, abi::SELF_ADDR_MAX_ENTRIES),
+    hash_u8(abi::MAP_SELF_ADDR_V4_1, 4, abi::SELF_ADDR_MAX_ENTRIES),
+    hash_u8(abi::MAP_SELF_ADDR_V6_0, 16, abi::SELF_ADDR_MAX_ENTRIES),
+    hash_u8(abi::MAP_SELF_ADDR_V6_1, 16, abi::SELF_ADDR_MAX_ENTRIES),
     MapSpec {
         name: abi::MAP_UID_STATS,
         map_type: MAP_TYPE_PERCPU_HASH,
@@ -172,8 +158,8 @@ fn bpf_map_type_name(map_type: u32) -> &'static str {
 #[allow(dead_code)]
 fn c_key_size(spec: &MapSpec) -> String {
     match spec.name {
-        abi::MAP_BYPASS_V4 => "sizeof(struct flux_lpm_v4_key)".to_string(),
-        abi::MAP_BYPASS_V6 => "sizeof(struct flux_lpm_v6_key)".to_string(),
+        abi::MAP_BYPASS_V4_0 | abi::MAP_BYPASS_V4_1 => "sizeof(struct flux_lpm_v4_key)".to_string(),
+        abi::MAP_BYPASS_V6_0 | abi::MAP_BYPASS_V6_1 => "sizeof(struct flux_lpm_v6_key)".to_string(),
         abi::MAP_FAULT_LATCH => "sizeof(struct flux_fault_key)".to_string(),
         abi::MAP_TCP_DECISION => "sizeof(int)".to_string(),
         _ => spec.key_size.to_string(),

@@ -100,6 +100,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   candidate starts. Readiness is a non-blocking `ProbeReady` in epoll; an
   incomplete dump is not treated as "socket absent"
   (`docs/spec/blueprint.md` §9.5).
+- Policy updates no longer mutate the live UID / bypass / self-address maps.
+  `apply_policy` writes the inactive bank and commits with one frozen control
+  leaf that names `policy_bank`. `FLUX_ABI_MAGIC` is `0xF10C0905`.
+  `publish_inactive` never `MAP_CREATE`s; an empty spare is
+  `inactive_publish_failed`.
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

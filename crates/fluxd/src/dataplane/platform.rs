@@ -9,8 +9,10 @@ use std::time::Duration;
 #[cfg(test)]
 use flux_core::abi::UidStats;
 use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key};
+use flux_core::cidr::{Ipv4Cidr, Ipv6Cidr};
 use flux_core::config::ListMode;
 use flux_core::control_wire::{Counters, IfaceStatus, PolicyCounts};
+use flux_core::policy_epoch::{self, PolicyEpoch};
 
 use crate::bpf::{self, RingBuffer, Runtime};
 use crate::netlink::{
@@ -349,7 +351,7 @@ impl Manager {
         })?;
         runtime
             .maps()
-            .update_uid_mode(uid, abi::UidMode::Selected as u8)
+            .update_uid_mode(control.policy_bank & 1, uid, abi::UidMode::Selected as u8)
             .map_err(|error| DataplaneError::map_op("uid_policy_update", error))?;
         control.active = 1;
         runtime
@@ -553,7 +555,8 @@ impl Manager {
     }
 
     /// Converges the policy domain without changing `active` or generation.
-    /// Every add happens before any downgrade/delete (blueprint §10.5 / D5).
+    /// The inactive bank is written in full, then one control-leaf swap names
+    /// it (blueprint §10.5). The live bank is not mutated.
     pub fn apply_policy(&mut self, desired: &DesiredPolicy) -> Result<(), DataplaneError> {
         if self.test_bypass {
             self.status.policy = PolicyCounts {
@@ -573,19 +576,6 @@ impl Manager {
                 "selected UID count exceeds the ABI limit",
             ));
         }
-        let total_uids = self
-            .uid_modes
-            .keys()
-            .copied()
-            .chain(desired.selected_uids.iter().copied())
-            .collect::<BTreeSet<_>>()
-            .len();
-        if total_uids > abi::UID_POLICY_MAX_ENTRIES as usize {
-            return Err(DataplaneError::new(
-                "policy_capacity:uid_policy",
-                "selected plus boot-lifetime draining UIDs exceed the ABI limit",
-            ));
-        }
         if desired.bypass_v4.len() > abi::LPM_MAX_ENTRIES as usize
             || desired.bypass_v6.len() > abi::LPM_MAX_ENTRIES as usize
         {
@@ -602,129 +592,43 @@ impl Manager {
         let (desired_self_v4, desired_self_v6, truncated) =
             self.desired_self_addresses(&snapshot.addresses)?;
 
-        // Additive half: new SELECTED entries and every new bypass target.
-        for uid in desired.selected_uids.iter().copied().collect::<Vec<_>>() {
-            if self.uid_modes.get(&uid) == Some(&(abi::UidMode::Selected as u8)) {
-                continue;
-            }
-            self.maps_mut()?
-                .update_uid_mode(uid, abi::UidMode::Selected as u8)
-                .map_err(|error| DataplaneError::map_op("uid_policy_update", error))?;
-            self.uid_modes.insert(uid, abi::UidMode::Selected as u8);
-        }
-        for (key, tag) in desired
-            .bypass_v4
-            .iter()
-            .filter_map(|(key, tag)| (self.bypass_v4.get(key) != Some(tag)).then_some((*key, *tag)))
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .update_bypass_v4(&key, tag)
-                .map_err(|error| DataplaneError::map_op("bypass_v4_update", error))?;
-            self.bypass_v4.insert(key, tag);
-        }
-        for (key, tag) in desired
-            .bypass_v6
-            .iter()
-            .filter_map(|(key, tag)| (self.bypass_v6.get(key) != Some(tag)).then_some((*key, *tag)))
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .update_bypass_v6(&key, tag)
-                .map_err(|error| DataplaneError::map_op("bypass_v6_update", error))?;
-            self.bypass_v6.insert(key, tag);
-        }
-        for address in desired_self_v4
-            .difference(&self.self_v4)
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .update_self_v4(&address)
-                .map_err(|error| DataplaneError::map_op("self_addr_v4_update", error))?;
-            self.self_v4.insert(address);
-        }
-        for address in desired_self_v6
-            .difference(&self.self_v6)
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .update_self_v6(&address)
-                .map_err(|error| DataplaneError::map_op("self_addr_v6_update", error))?;
-            self.self_v6.insert(address);
+        let mut last = self.last_control.ok_or_else(|| {
+            DataplaneError::new("control_missing", "inactive generation was not published")
+        })?;
+        let live_bank = last.policy_bank & 1;
+        let inactive_bank = abi::inactive_policy_bank(live_bank);
+        let from = self.live_epoch();
+        let wanted = desired_epoch(desired, &desired_self_v4, &desired_self_v6);
+        let next = policy_epoch::committed(&from, &wanted);
+        if next.selected.len() + next.draining.len() > abi::UID_POLICY_MAX_ENTRIES as usize {
+            return Err(DataplaneError::new(
+                "policy_capacity:uid_policy",
+                "selected plus boot-lifetime draining UIDs exceed the ABI limit",
+            ));
         }
 
-        // The LPM contents are in place before their interpretation changes.
-        // Publishing a new frozen leaf preserves active and generation while
-        // making Batch A's cidr_mode field authoritative for new flows.
-        self.publish_cidr_mode(desired.cidr_mode)?;
+        self.write_policy_bank(inactive_bank, &next)?;
+
+        last.policy_bank = inactive_bank;
+        last.cidr_mode = cidr_mode_value(desired.cidr_mode);
+        last.selected_count = next.selected.len() as u32;
+        last.draining_count = next.draining.len() as u32;
+        last.bypass_v4_count = next.bypass_v4.len() as u32;
+        last.bypass_v6_count = next.bypass_v6.len() as u32;
+        self.maps_mut()?
+            .publish_control(&last)
+            .map_err(|error| DataplaneError::map_op("control_publish", error))?;
+        self.last_control = Some(last);
+
+        self.uid_modes = uid_modes_from_epoch(&next);
+        self.bypass_v4.clone_from(&desired.bypass_v4);
+        self.bypass_v6.clone_from(&desired.bypass_v6);
+        self.self_v4 = desired_self_v4;
+        self.self_v6 = desired_self_v6;
         self.apps_mode = desired.apps_mode;
+        self.cidr_mode = desired.cidr_mode;
         self.interfaces_mode = desired.interfaces_mode;
         self.interfaces.clone_from(&desired.interfaces);
-
-        // Subtractive half. UID entries are downgraded, never deleted within
-        // this boot; prefix/address maps delete only keys no longer desired.
-        let removed_uids = self
-            .uid_modes
-            .iter()
-            .filter_map(|(uid, mode)| {
-                (*mode == abi::UidMode::Selected as u8 && !desired.selected_uids.contains(uid))
-                    .then_some(*uid)
-            })
-            .collect::<Vec<_>>();
-        for uid in removed_uids {
-            self.maps_mut()?
-                .update_uid_mode(uid, abi::UidMode::Draining as u8)
-                .map_err(|error| DataplaneError::map_op("uid_policy_update", error))?;
-            self.uid_modes.insert(uid, abi::UidMode::Draining as u8);
-        }
-        for key in self
-            .bypass_v4
-            .keys()
-            .filter(|key| !desired.bypass_v4.contains_key(*key))
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .delete_bypass_v4(&key)
-                .map_err(|error| DataplaneError::map_op("bypass_v4_delete", error))?;
-            self.bypass_v4.remove(&key);
-        }
-        for key in self
-            .bypass_v6
-            .keys()
-            .filter(|key| !desired.bypass_v6.contains_key(*key))
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .delete_bypass_v6(&key)
-                .map_err(|error| DataplaneError::map_op("bypass_v6_delete", error))?;
-            self.bypass_v6.remove(&key);
-        }
-        for address in self
-            .self_v4
-            .difference(&desired_self_v4)
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .delete_self_v4(&address)
-                .map_err(|error| DataplaneError::map_op("self_addr_v4_delete", error))?;
-            self.self_v4.remove(&address);
-        }
-        for address in self
-            .self_v6
-            .difference(&desired_self_v6)
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.maps_mut()?
-                .delete_self_v6(&address)
-                .map_err(|error| DataplaneError::map_op("self_addr_v6_delete", error))?;
-            self.self_v6.remove(&address);
-        }
 
         self.status.policy = self.policy_counts();
         self.status
@@ -739,18 +643,130 @@ impl Manager {
         Ok(())
     }
 
-    fn publish_cidr_mode(&mut self, mode: ListMode) -> Result<(), DataplaneError> {
-        let encoded = cidr_mode_value(mode);
-        if let Some(mut control) = self.last_control {
-            if control.cidr_mode != encoded {
-                control.cidr_mode = encoded;
-                self.maps_mut()?
-                    .publish_control(&control)
-                    .map_err(|error| DataplaneError::map_op("control_publish", error))?;
-                self.last_control = Some(control);
+    fn live_epoch(&self) -> PolicyEpoch {
+        let mut epoch = PolicyEpoch::new(match self.cidr_mode {
+            ListMode::Blacklist => abi::CidrMode::Blacklist,
+            ListMode::Whitelist => abi::CidrMode::Whitelist,
+        });
+        for (uid, mode) in &self.uid_modes {
+            if *mode == abi::UidMode::Selected as u8 {
+                epoch.selected.insert(*uid);
+            } else if *mode == abi::UidMode::Draining as u8 {
+                epoch.draining.insert(*uid);
             }
         }
-        self.cidr_mode = mode;
+        epoch.bypass_v4 = self
+            .bypass_v4
+            .iter()
+            .map(|(key, tag)| (lpm_v4_to_cidr(*key), *tag))
+            .collect();
+        epoch.bypass_v6 = self
+            .bypass_v6
+            .iter()
+            .map(|(key, tag)| (lpm_v6_to_cidr(*key), *tag))
+            .collect();
+        epoch.self_v4 = self.self_v4.iter().copied().map(Ipv4Addr::from).collect();
+        epoch.self_v6 = self.self_v6.iter().copied().map(Ipv6Addr::from).collect();
+        epoch
+    }
+
+    fn write_policy_bank(&mut self, bank: u8, epoch: &PolicyEpoch) -> Result<(), DataplaneError> {
+        let maps = self.maps_mut()?;
+        for uid in &epoch.selected {
+            maps.update_uid_mode(bank, *uid, abi::UidMode::Selected as u8)
+                .map_err(|error| DataplaneError::map_op("uid_policy_update", error))?;
+        }
+        for uid in &epoch.draining {
+            maps.update_uid_mode(bank, *uid, abi::UidMode::Draining as u8)
+                .map_err(|error| DataplaneError::map_op("uid_policy_update", error))?;
+        }
+        for uid in maps
+            .uid_keys(bank)
+            .map_err(|error| DataplaneError::map_op("uid_policy_keys", error))?
+        {
+            if !epoch.selected.contains(&uid) && !epoch.draining.contains(&uid) {
+                maps.delete_uid_mode(bank, uid)
+                    .map_err(|error| DataplaneError::map_op("uid_policy_delete", error))?;
+            }
+        }
+
+        for (cidr, tag) in &epoch.bypass_v4 {
+            maps.update_bypass_v4(bank, &cidr.to_lpm_key(), *tag)
+                .map_err(|error| DataplaneError::map_op("bypass_v4_update", error))?;
+        }
+        let desired_v4: BTreeSet<LpmV4Key> = epoch
+            .bypass_v4
+            .keys()
+            .map(|cidr| cidr.to_lpm_key())
+            .collect();
+        for key in maps
+            .bypass_v4_keys(bank)
+            .map_err(|error| DataplaneError::map_op("bypass_v4_keys", error))?
+        {
+            if !desired_v4.contains(&key) {
+                maps.delete_bypass_v4(bank, &key)
+                    .map_err(|error| DataplaneError::map_op("bypass_v4_delete", error))?;
+            }
+        }
+
+        for (cidr, tag) in &epoch.bypass_v6 {
+            maps.update_bypass_v6(bank, &cidr.to_lpm_key(), *tag)
+                .map_err(|error| DataplaneError::map_op("bypass_v6_update", error))?;
+        }
+        let desired_v6: BTreeSet<LpmV6Key> = epoch
+            .bypass_v6
+            .keys()
+            .map(|cidr| cidr.to_lpm_key())
+            .collect();
+        for key in maps
+            .bypass_v6_keys(bank)
+            .map_err(|error| DataplaneError::map_op("bypass_v6_keys", error))?
+        {
+            if !desired_v6.contains(&key) {
+                maps.delete_bypass_v6(bank, &key)
+                    .map_err(|error| DataplaneError::map_op("bypass_v6_delete", error))?;
+            }
+        }
+
+        let desired_self_v4: BTreeSet<[u8; 4]> = epoch
+            .self_v4
+            .iter()
+            .copied()
+            .map(Ipv4Addr::octets)
+            .collect();
+        for address in &desired_self_v4 {
+            maps.update_self_v4(bank, address)
+                .map_err(|error| DataplaneError::map_op("self_addr_v4_update", error))?;
+        }
+        for address in maps
+            .self_v4_keys(bank)
+            .map_err(|error| DataplaneError::map_op("self_addr_v4_keys", error))?
+        {
+            if !desired_self_v4.contains(&address) {
+                maps.delete_self_v4(bank, &address)
+                    .map_err(|error| DataplaneError::map_op("self_addr_v4_delete", error))?;
+            }
+        }
+
+        let desired_self_v6: BTreeSet<[u8; 16]> = epoch
+            .self_v6
+            .iter()
+            .copied()
+            .map(Ipv6Addr::octets)
+            .collect();
+        for address in &desired_self_v6 {
+            maps.update_self_v6(bank, address)
+                .map_err(|error| DataplaneError::map_op("self_addr_v6_update", error))?;
+        }
+        for address in maps
+            .self_v6_keys(bank)
+            .map_err(|error| DataplaneError::map_op("self_addr_v6_keys", error))?
+        {
+            if !desired_self_v6.contains(&address) {
+                maps.delete_self_v6(bank, &address)
+                    .map_err(|error| DataplaneError::map_op("self_addr_v6_delete", error))?;
+            }
+        }
         Ok(())
     }
 
@@ -818,8 +834,14 @@ impl Manager {
         if control.active != 0 {
             control.active = 0;
             self.maps_mut()?
-                .publish_control(&control)
-                .map_err(|error| DataplaneError::map_op("control_publish", error))?;
+                .publish_inactive_control(&control)
+                .map_err(|error| {
+                    if error.to_string().starts_with("inactive_publish_failed") {
+                        DataplaneError::new("inactive_publish_failed", error.to_string())
+                    } else {
+                        DataplaneError::map_op("control_publish", error)
+                    }
+                })?;
             self.last_control = Some(control);
         }
         self.status.active = false;
@@ -955,6 +977,9 @@ impl Manager {
         let mut control =
             inactive_control(host.ifindex, peer.ifindex, generation, port_v4, port_v6)?;
         control.cidr_mode = cidr_mode_value(self.cidr_mode);
+        if let Some(last) = self.last_control {
+            control.policy_bank = last.policy_bank & 1;
+        }
         let counts = self.policy_counts();
         control.selected_count = counts.selected;
         control.draining_count = counts.draining;
@@ -1825,6 +1850,56 @@ fn cidr_mode_value(mode: ListMode) -> u16 {
     }
 }
 
+fn desired_epoch(
+    desired: &DesiredPolicy,
+    self_v4: &BTreeSet<[u8; 4]>,
+    self_v6: &BTreeSet<[u8; 16]>,
+) -> PolicyEpoch {
+    let mut epoch = PolicyEpoch::new(match desired.cidr_mode {
+        ListMode::Blacklist => abi::CidrMode::Blacklist,
+        ListMode::Whitelist => abi::CidrMode::Whitelist,
+    });
+    epoch.selected = desired.selected_uids.clone();
+    epoch.bypass_v4 = desired
+        .bypass_v4
+        .iter()
+        .map(|(key, tag)| (lpm_v4_to_cidr(*key), *tag))
+        .collect();
+    epoch.bypass_v6 = desired
+        .bypass_v6
+        .iter()
+        .map(|(key, tag)| (lpm_v6_to_cidr(*key), *tag))
+        .collect();
+    epoch.self_v4 = self_v4.iter().copied().map(Ipv4Addr::from).collect();
+    epoch.self_v6 = self_v6.iter().copied().map(Ipv6Addr::from).collect();
+    epoch
+}
+
+fn uid_modes_from_epoch(epoch: &PolicyEpoch) -> BTreeMap<u32, u8> {
+    let mut modes = BTreeMap::new();
+    for uid in &epoch.selected {
+        modes.insert(*uid, abi::UidMode::Selected as u8);
+    }
+    for uid in &epoch.draining {
+        modes.insert(*uid, abi::UidMode::Draining as u8);
+    }
+    modes
+}
+
+fn lpm_v4_to_cidr(key: LpmV4Key) -> Ipv4Cidr {
+    Ipv4Cidr {
+        addr: Ipv4Addr::from(key.addr),
+        prefix_len: u8::try_from(key.prefixlen).unwrap_or(32).min(32),
+    }
+}
+
+fn lpm_v6_to_cidr(key: LpmV6Key) -> Ipv6Cidr {
+    Ipv6Cidr {
+        addr: Ipv6Addr::from(key.addr),
+        prefix_len: u8::try_from(key.prefixlen).unwrap_or(128).min(128),
+    }
+}
+
 fn inactive_control(
     host_ifindex: u32,
     peer_ifindex: u32,
@@ -1866,7 +1941,8 @@ fn inactive_control(
         draining_count: 0,
         bypass_v4_count: 0,
         bypass_v6_count: 0,
-        pad1: [0; 8],
+        policy_bank: 0,
+        pad1: [0; 7],
     })
 }
 

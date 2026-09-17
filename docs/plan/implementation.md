@@ -18,7 +18,7 @@
 | rc.2 主题 2：ingress 快路径 | 已落地；5.15.211 Phase 4 加载通过 | `bpf/flux.bpf.c` `flx_in` I1b；ABI 未 bump；见 §0.6.19 |
 | rc.2 主题 3：attach 模块 | 已落地 | `crates/fluxd/src/dataplane/attachment.rs`；MAP_SPECS 生成 C 占位 |
 | 发布剩余 | **尚未具备正式发布结论** | §20 验收见 §17.0.3；签在 rc.2 之后 |
-| 1.0.0-rc.3 设计 | 批 0–2 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady）；批 3 未做 | `docs/plan/rc3.md` |
+| 1.0.0-rc.3 设计 | 批 0–3 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady、PolicyEpoch 双 bank / ABI `0xF10C0905`）；批 4 未做 | `docs/plan/rc3.md` |
 
 ### 17.0.1 设计哲学返工清单
 

@@ -68,6 +68,7 @@ Every possible failure point specifies **how it is detected, what action is take
 | Interface appears | `RTM_NEWLINK` + admission | Attach after debounce; if zero coverage previously caused `Inactive`, publish `active=1` again after the admission + readiness loop closes | Direct during the window (R091-10) |
 | Netlink socket overflows | `ENOBUFS` / `NLMSG_OVERRUN` | **Discard the batch and perform a complete new dump** (§10.4.1 item 2) | None (control-plane internal) |
 | Map update fails during a policy hot update | errno from `bpf_map_update_elem` | Keep the live epoch unchanged; record the error and **enqueue one complete convergence again**; do not unwind by mutating the live bank (§10.5) | New flows keep seeing the **complete old epoch**. A mixed epoch is a defect, not a benign window |
+| `publish_inactive` has no reserved control leaf | spare FD absent after freeze (or syscall failure on the swap) | `inactive_publish_failed`; do not report capturing; stop the engine; **do not `MAP_CREATE` on this path** | New flows should fail open once `active=0` is visible; if the swap itself failed, admitted TCP may still drop until a later successful inactive publish |
 | The `disable` file metadata is neither success nor `NotFound` | `EIO` / `EACCES` / … | Treat as **Unreadable**: do not enable capture; `status` reports the path could not be observed (§11.1, §27.1.1) | Capture stays off. Not the same as "file absent" |
 | `uid_policy` exceeds 4096 or more than 1024 entries are simultaneously `SELECTED` | Count each separately | Reject the hot update and retain the current policy | No change |
 | Any bypass LPM exceeds 65536 | Count by address family; local addresses do not count toward the LPM | **Reject activation and report it**; do not silently discard entries | Direct |
@@ -107,7 +108,7 @@ Every possible failure point specifies **how it is detected, what action is take
 {
   "ok": true,
   "version": "0.9.0",                // Sole source is the workspace manifest; bump with each release
-  "abi_magic": "0xF10C0904",          // Whatever bpf/include/flux_abi.h defines; an example, not a pin
+  "abi_magic": "0xF10C0905",          // Whatever bpf/include/flux_abi.h defines; an example, not a pin
   "state": "Disabled" | "Inactive" | "Active",
   "root_manager": "KernelSU",         // Detected manager; null when unknown
   "generation": 7,

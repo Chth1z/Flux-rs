@@ -82,6 +82,7 @@ fn struct_specs() -> Vec<StructSpec> {
                 draining_count,
                 bypass_v4_count,
                 bypass_v6_count,
+                policy_bank,
                 pad1,
             ]
         ),
@@ -216,11 +217,16 @@ fn enum_members() -> Vec<(&'static str, u64)> {
 /// String `#define`s: C name paired with the mirrored Rust value.
 fn string_defines() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("FLUX_MAP_UID_POLICY", abi::MAP_UID_POLICY),
-        ("FLUX_MAP_BYPASS_V4", abi::MAP_BYPASS_V4),
-        ("FLUX_MAP_BYPASS_V6", abi::MAP_BYPASS_V6),
-        ("FLUX_MAP_SELF_ADDR_V4", abi::MAP_SELF_ADDR_V4),
-        ("FLUX_MAP_SELF_ADDR_V6", abi::MAP_SELF_ADDR_V6),
+        ("FLUX_MAP_UID_POLICY_0", abi::MAP_UID_POLICY_0),
+        ("FLUX_MAP_UID_POLICY_1", abi::MAP_UID_POLICY_1),
+        ("FLUX_MAP_BYPASS_V4_0", abi::MAP_BYPASS_V4_0),
+        ("FLUX_MAP_BYPASS_V4_1", abi::MAP_BYPASS_V4_1),
+        ("FLUX_MAP_BYPASS_V6_0", abi::MAP_BYPASS_V6_0),
+        ("FLUX_MAP_BYPASS_V6_1", abi::MAP_BYPASS_V6_1),
+        ("FLUX_MAP_SELF_ADDR_V4_0", abi::MAP_SELF_ADDR_V4_0),
+        ("FLUX_MAP_SELF_ADDR_V4_1", abi::MAP_SELF_ADDR_V4_1),
+        ("FLUX_MAP_SELF_ADDR_V6_0", abi::MAP_SELF_ADDR_V6_0),
+        ("FLUX_MAP_SELF_ADDR_V6_1", abi::MAP_SELF_ADDR_V6_1),
         ("FLUX_MAP_UID_STATS", abi::MAP_UID_STATS),
         ("FLUX_MAP_TCP_DECISION", abi::MAP_TCP_DECISION),
         ("FLUX_MAP_CONTROL_ROOT", abi::MAP_CONTROL_ROOT),

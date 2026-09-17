@@ -662,7 +662,7 @@ a selected app's socket
 ```
 
 Three properties hold along the whole path: **IP and port are never rewritten**;
-the hot path for unselected traffic is one helper call plus one HASH miss; and
+the hot path for unselected traffic is identity helpers, one control snapshot, and one HASH miss; and
 when the engine is gone, the next new SYN or datagram misses the listener lookup
 *before* the redirect and goes Direct.
 
@@ -785,10 +785,13 @@ datagram**, every pre-redirect failure below is Direct:
 
 Unselected traffic is **not** untouched, and saying so to users was wrong.
 
-The real cost per packet is one TC invocation, one `bpf_get_socket_uid()`, and
-one `uid_policy` HASH miss, followed immediately by `TC_ACT_UNSPEC`. It performs
-no packet parsing, reads no control snapshot, enters no userspace, and changes
-nothing about the Android classifiers that run after it.
+The real cost per packet is one TC invocation, identity helpers
+(`bpf_sk_fullsock`, `bpf_get_socket_uid`), one frozen control snapshot so
+the live PolicyEpoch bank is named, and one `uid_policy_{0|1}` HASH miss,
+followed immediately by `TC_ACT_UNSPEC`. It performs no packet parsing,
+enters no userspace, and changes nothing about the Android classifiers that
+run after it. `uid_policy` is two HASH maps selected by a constant if/else;
+it is not `ARRAY_OF_MAPS`.
 
 So the honest user-facing sentence is "not taken over, does not enter the
 proxy". The sentence "the kernel program never even looks at it" is false, and
@@ -1243,15 +1246,15 @@ hand-written mirror and MUST carry tests asserting every `size_of` and field
 offset against it, with `cargo xtask abi-check` having clang compute the C side
 in CI. **Changing any layout MUST change `FLUX_ABI_MAGIC` in the same commit.**
 
-## 6.1 The map set — 12 kernel objects in steady state
+## 6.1 The map set — 17 named kernel objects, plus one spare leaf
 
 | Name | Type | Key | Value | max_entries / flags |
 |---|---|---|---|---|
-| `uid_policy` | `HASH` | `__u32 uid` | `__u8` (`FLUX_UID_*`) | 4096 |
-| `bypass_v4` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` (`FLUX_BYPASS_*`) | 65536, `BPF_F_NO_PREALLOC` — kernel-forced, so `max_entries` is only a ceiling |
-| `bypass_v6` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` (`FLUX_BYPASS_*`) | 65536, as above |
-| `self_addr_v4` | `HASH` | `__u8[4]` | `__u8` | 256 — D20: local addresses are full-length prefixes and never enter the LPM |
-| `self_addr_v6` | `HASH` | `__u8[16]` | `__u8` | 256, as above |
+| `uid_policy_0` / `uid_policy_1` | `HASH` | `__u32 uid` | `__u8` (`FLUX_UID_*`) | 4096 each. Live bank named by `flux_control.policy_bank` |
+| `bypass_v4_0` / `bypass_v4_1` | `LPM_TRIE` | `flux_lpm_v4_key` | `__u8` (`FLUX_BYPASS_*`) | 65536 each, `BPF_F_NO_PREALLOC` — kernel-forced, so `max_entries` is only a ceiling |
+| `bypass_v6_0` / `bypass_v6_1` | `LPM_TRIE` | `flux_lpm_v6_key` | `__u8` (`FLUX_BYPASS_*`) | 65536 each, as above |
+| `self_addr_v4_0` / `self_addr_v4_1` | `HASH` | `__u8[4]` | `__u8` | 256 each — D20: local addresses are full-length prefixes and never enter the LPM |
+| `self_addr_v6_0` / `self_addr_v6_1` | `HASH` | `__u8[16]` | `__u8` | 256 each, as above |
 | `uid_stats` | `PERCPU_HASH` | `__u32 uid` | `struct flux_uid_stats` (16 B) | 4096 — D23, updated only on captured packets |
 | `tcp_decision` | `SK_STORAGE` | `int`, implicit | `struct flux_decision` (16 B) | 0, `BPF_F_NO_PREALLOC`, **requires BTF** |
 | `control_root` | `ARRAY_OF_MAPS` | `__u32 0` | reference to the current leaf | 1 |
@@ -1260,8 +1263,12 @@ in CI. **Changing any layout MUST change `FLUX_ABI_MAGIC` in the same commit.**
 | `fault_events` | `RINGBUF` | — | `struct flux_fault_event` (32 B) | 16384 bytes |
 | `counters` | `PERCPU_ARRAY` | `__u32 idx` | `__u64` | 32 |
 
-- During publication two `control_leaf` maps exist briefly; at every other moment
-  there are 12 objects.
+- `MAP_NAMES` lists those 17 symbols. A further unfrozen `control_leaf` is
+  created at load and held as a runtime FD so `publish_inactive` never
+  `MAP_CREATE`s. It is not an ELF `.maps` object. Freeze is irreversible on
+  5.15, so the spare is a pool slot, not a recycled live leaf. After a
+  successful ordinary publish the spare is refilled; after inactive it is not.
+  An empty spare on the inactive path is `inactive_publish_failed`.
 - `fault_events` is fixed at 16384 because that is the smallest value that is
   both a power of two and PAGE_SIZE-aligned under 4 KiB and 16 KiB alike, which
   keeps the ABI from forking on page size.
@@ -1269,8 +1276,10 @@ in CI. **Changing any layout MUST change `FLUX_ABI_MAGIC` in the same commit.**
 - Forbidden: a `bpf_spin_lock` that would make selected packets contend
   globally; per-packet telemetry; a per-flow map; any claim that an `ARRAY`
   update of a large struct is atomic; and putting `uid_policy` behind
-  `ARRAY_OF_MAPS` (unselected traffic would pay a map-in-map on E1, §14.1).
-  Adding a map requires stating its hot-path and lifecycle cost.
+  `ARRAY_OF_MAPS` (that would add a map-in-map on E1, §14.1). Two HASH maps and
+  a constant if/else after the control snapshot that already names `cidr_mode`
+  is the PolicyEpoch mechanism. Adding a map requires stating its hot-path and
+  lifecycle cost.
 
 ### 6.1.1 The bypass value distinguishes mechanism from policy
 
@@ -1354,6 +1363,8 @@ Fields are in `bpf/include/flux_abi.h`. What matters here:
 - `probe_remote_v4[4]` / `probe_remote_v6[16]` / `probe_remote_port`, the fixed
   synthetic remote that makes the listener lookup deterministic;
 - `cidr_mode`, in the former `pad0[2]` (§6.1.1);
+- `policy_bank`, one byte of the former `pad1[8]`: 0 or 1, naming the live
+  PolicyEpoch bank. `sizeof(flux_control)` stays 96;
 - diagnostic counts: `selected_count`, `draining_count`, `bypass_v4_count`,
   `bypass_v6_count`.
 
@@ -1363,12 +1374,14 @@ Fields are in `bpf/include/flux_abi.h`. What matters here:
 `xchg()`es the pointer, calls `synchronize_rcu()` before the syscall returns, and
 frees the old inner map after a further RCU grace period. Therefore:
 
-1. create a new `control_leaf`, an `ARRAY` of one element;
+1. take the reserved unfrozen `control_leaf` (ordinary publishes may
+   `MAP_CREATE` a replacement if the spare is empty; `publish_inactive` must
+   not);
 2. write the whole struct with a single
    `bpf_map_update_elem(leaf, 0, &full_control)`;
 3. `BPF_MAP_FREEZE(leaf)`;
 4. publish with `bpf_map_update_elem(control_root, 0, &leaf_fd)`;
-5. close the old leaf fd.
+5. close the old leaf fd. Ordinary publishes then refill the spare.
 
 **Mandatory on the BPF side:** look up `control_root[0]` exactly **once** per
 invocation and use the returned inner pointer for the rest of that invocation.
@@ -1458,14 +1471,16 @@ E0  if skb->protocol ∉ {ETH_P_IP, ETH_P_IPV6}            -> UNSPEC
 E1  skc = skb->sk;             if !skc                   -> UNSPEC
     sk  = bpf_sk_fullsock(skc);if !sk                    -> UNSPEC
     uid = bpf_get_socket_uid(skb)
-    mode = uid_policy[uid];    if miss                   -> UNSPEC   <- the entire cost for unselected traffic
+    c = ctrl();                if !c                     -> UNSPEC
+    mode = uid_policy_{c->policy_bank}[uid]; if miss     -> UNSPEC
+           /* identity + one control snapshot + one HASH miss for unselected */
+           /* if/else on two HASH maps; not ARRAY_OF_MAPS. reuse c below. */
 E2  /* a decision exists: no L4 parse, and fragments follow the decision */
     d = bpf_sk_storage_get(&tcp_decision, sk, NULL, 0)
     if d:
         if d->magic != FLUX_DECISION_MAGIC || d->reserved != 0 || d->mode unknown
                                                           -> cnt(CORRUPT); SHOT
         if d->mode == DIRECT                              -> UNSPEC
-        c = ctrl();  if !c                                -> cnt; SHOT
         if !c->active                                     -> cnt(INACTIVE); SHOT
         if d->generation != c->generation                 -> cnt(STALE_GEN); SHOT
         goto HANDOFF(c)
@@ -1473,19 +1488,17 @@ E3  /* no decision yet */
     parse L3 (bounded by l3_end AND data_end); if unsupported -> UNSPEC
     if fragment:   /* IPv6: only with a complete 8-byte Fragment header */
         if bypass_lookup(family, daddr)                   -> UNSPEC
-        c = ctrl()
-        if mode == SELECTED && c && c->active             -> cnt(UDP_FRAG_DROP); SHOT
+        if mode == SELECTED && c->active                  -> cnt(UDP_FRAG_DROP); SHOT
         else                                              -> UNSPEC
         /* UDP_FRAG_DROP is the historical ABI name. The condition is
            selected + active + no TCP decision + IP fragment; L4 is not
            proven. The published JSON key stays until the ABI bump. */
     parse L4 (bounded by l3_end AND data_end); if !TCP && !UDP -> UNSPEC
 E4  if TCP:
-        if !(SYN && !ACK)                                 -> UNSPEC   /* a connection established before capture pays no control cost */
+        if !(SYN && !ACK)                                 -> UNSPEC
         cand.magic = FLUX_DECISION_MAGIC
-        c = ctrl()
         capture = (mode == SELECTED)
-               && c && c->active
+               && c->active
                && !bypass_lookup(family, daddr)
                && listener_alive(c, family, TCP)          /* emits one fault on a miss */
         cand.mode = capture ? CAPTURED : DIRECT
@@ -1495,12 +1508,12 @@ E4  if TCP:
         if !d:  cnt(ALLOC_FAIL);                          -> UNSPEC /* no stickiness; a later SYN may decide again */
         /* obey the winner unconditionally, even where it contradicts this cand */
         if d->mode == DIRECT: cnt(DIRECT_FIRST)           -> UNSPEC
-        if !c || !c->active || d->generation != c->generation
+        if !c->active || d->generation != c->generation
                                                           -> cnt; SHOT
         cnt(ADMIT_TCP); goto HANDOFF(c)
 E5  if UDP:
         if mode != SELECTED                               -> UNSPEC
-        c = ctrl(); if !c || !c->active                   -> UNSPEC
+        if !c->active                                     -> UNSPEC
         if bypass_lookup(family, daddr)                    -> UNSPEC
         if !listener_alive(c, family, UDP)                -> fault; UNSPEC
         cnt(ADMIT_UDP); goto HANDOFF(c)
@@ -2130,7 +2143,8 @@ on an unfamiliar OEM there is no way to know in advance who is ahead of us.
 
 **Why the existing counters cannot answer it.** §6.1 increments counters only at
 decision, drop and fault edges, precisely so that unselected traffic keeps its
-steady-state cost of one helper plus one hash miss (§14.1). If no selected app
+steady-state cost of identity helpers, one control snapshot and one hash miss
+(§14.1). If no selected app
 happens to be communicating, every counter stays still — which is
 indistinguishable from the program never having run.
 
@@ -2142,13 +2156,12 @@ theory.
 
 **A rejected design, stated because it is the natural first idea.** Add a
 `verify` flag to `flux_control` and have `flx_cap_l2/l3` count when it picks up
-the snapshot. **This does not work.** Look at step E1 of §7.3: unselected traffic
-returns `TC_ACT_UNSPEC` on the `uid_policy` miss and **never reaches `ctrl()`**,
-which is only called on the E2 branch where a decision already exists. Making the
-flag effective would mean hoisting the snapshot lookup to the very top of the hot
-path, paying two extra map lookups on **every outbound packet on the device** —
-destroying the performance floor of §14.1 permanently to serve a check that runs
-for two seconds at activation.
+the snapshot. **This does not work.** Packets without `skb->sk` still return at
+E1 before `ctrl()`. Making the flag effective for every outbound frame would
+mean counting on the capture entries themselves — charging every classified
+packet, including unselected UIDs, for a check that runs for two seconds at
+activation. `flx_verify` exists so that cost is paid only while the probe is
+attached.
 
 **The mechanism: a separate probe program, `flx_verify`.**
 
@@ -2270,7 +2283,7 @@ control snapshot that already exists stays at `active=0`:
 3. Check `all.rp_filter`. Create the veth, set MTU and sysctls, bring it up. **No
    MAC is read**, because since D17 the control struct has no MAC field.
 4. Create the route table 20260 entries and the two RPDB rules.
-5. Load the BTF, the 12 maps and the 4 programs, `flx_verify` (§8.5.4) among
+5. Load the BTF, the maps in `MAP_NAMES` plus the spare control leaf, and the 4 programs, `flx_verify` (§8.5.4) among
    them. Register the ringbuf with epoll. Publish the initial frozen leaf with
    `active=0`.
 6. Parse `packages.list` and the configuration; fill `uid_policy`, the two
@@ -2838,12 +2851,15 @@ observes the maps as they are, and a wrong first SYN writes the wrong
 decision for the life of the socket.
 
 `uid_policy` stays a HASH keyed by UID. Making it a map-in-map so that
-unselected traffic pays an extra lookup is forbidden (§14.1 E1).
+unselected traffic pays an extra inner-map lookup is forbidden (§14.1 E1).
+The live bank is selected by `policy_bank` in the same frozen leaf as
+`cidr_mode`: one `ctrl()`, then a constant if/else and one HASH lookup.
 
-The in-place order "add new keys, publish `cidr_mode`, then subtract" is a
+`fluxd` commits by writing the inactive bank and swapping that leaf. The
+in-place order "add new keys, publish `cidr_mode`, then subtract" is a
 **contract defect**. It produces observable epochs equal to neither the old
 nor the new tuple. The four counterexamples live as tests in
-`flux-core::policy_epoch`. Code that still executes that order is wrong.
+`flux-core::policy_epoch`.
 
 ## 10.6 CLI
 
@@ -3066,7 +3082,7 @@ clang -target bpf -O2 -g -Wall -Wextra -Werror \
 
 ## 12.2 Map creation
 
-**Maps are created explicitly from Rust and never inferred from the ELF.** `fluxd/src/bpf/maps.rs` holds a constant table describing all 12 maps — the list and its order are `flux-core::abi::MAP_NAMES` — with `map_type`, `key_size`, `value_size`, `max_entries`, `map_flags` and `name`, and issues one `BPF_MAP_CREATE` each. The map definitions in the C file are therefore symbol placeholders, and the single source of truth for the parameters is Rust, with `flux_abi.h` constraining the value layouts.
+**Maps are created explicitly from Rust and never inferred from the ELF.** `fluxd/src/bpf/maps.rs` holds a constant table describing every named map — the list and its order are `flux-core::abi::MAP_NAMES` — with `map_type`, `key_size`, `value_size`, `max_entries`, `map_flags` and `name`, and issues one `BPF_MAP_CREATE` each. The map definitions in the C file are therefore symbol placeholders, and the single source of truth for the parameters is Rust, with `flux_abi.h` constraining the value layouts. A spare unfrozen `control_leaf` is created at the same time and is not named in the ELF.
 
 The `control_leaf` inner map is created first, and its fd becomes the `inner_map_fd` used to create `control_root`.
 
@@ -3479,14 +3495,14 @@ No SBOM, signature, per-file hash or layered manifest is produced unless a real 
 
 | Path | Work performed |
 |---|---|
-| Unselected UID — the overwhelming majority of traffic | one TC invocation, `bpf_get_socket_uid`, one HASH miss. **No packet parsing, no control read** (§2.2.4) |
-| TCP holding a `DIRECT` decision | the above plus `bpf_sk_fullsock` and one SK_STORAGE lookup. **No parsing, no control read** |
-| First SYN of a selected-but-direct TCP flow | the above plus one control read (two map lookups), one LPM lookup, one listener lookup, one storage create. Nothing is written afterwards |
+| Unselected UID — the overwhelming majority of traffic | one TC invocation, identity helpers, one control snapshot, one HASH miss on the live `uid_policy` bank. **No packet parsing** (§2.2.4). The snapshot is required so UID classification and `cidr_mode` are one PolicyEpoch |
+| TCP holding a `DIRECT` decision | the above plus one SK_STORAGE lookup. The control snapshot is already held from E1 |
+| First SYN of a selected-but-direct TCP flow | the above plus one LPM lookup, one listener lookup, one storage create. Nothing is written afterwards |
 | First SYN of a captured TCP flow | the above plus `bpf_redirect` — zero writes on L2, two bytes on L3 — then on ingress one `change_type`, one control read, one listener lookup and `bpf_sk_assign` |
 | Captured TCP ingress, established or fragment | after `PACKET_HOST` and ethertype: a minimal L3/TCP-flag or fragment check, then `TC_ACT_OK`. **No `pull_headers`, no full parse, no assign** (§7.5 I1b) |
-| Captured TCP, steady state, L2 | `bpf_sk_fullsock`, one storage lookup, one control read (two map lookups), one `uid_stats` lookup (D23), `bpf_redirect`. **Zero packet writes, zero clone copies, zero parsing** |
+| Captured TCP, steady state, L2 | `bpf_sk_fullsock`, one storage lookup, the E1 control snapshot (two map lookups) reused, one HASH hit, one `uid_stats` lookup (D23), `bpf_redirect`. **Zero packet writes, zero clone copies, zero parsing** |
 | Captured TCP, steady state, L3 or rmnet | the above plus `bpf_skb_change_head(14)` and a two-byte EtherType write |
-| Selected UDP, per datagram | UID lookup, bounded parse, one control read, one LPM lookup, one listener lookup, redirect; on ingress one `change_type`, one control read, one lookup and assign |
+| Selected UDP, per datagram | UID lookup (after the same snapshot), bounded parse, one LPM lookup, one listener lookup, redirect; on ingress one `change_type`, one control read, one lookup and assign |
 
 Against the two earlier blueprints, the L2 steady state for a captured TCP flow lost: one socket hash lookup (D1), one sentinel lookup (D2), one 6-byte MAC comparison (D3), and one 12-byte `bpf_skb_store_bytes` together with the `skb_ensure_writable()` copy it forced on a cloned skb (D17) — and it parses no L3 or L4 at all, as a by-product of D6. **On that path Flux does not touch a single byte of the packet.**
 

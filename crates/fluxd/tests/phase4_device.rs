@@ -1,6 +1,6 @@
 //! Non-attaching Phase 4 acceptance test for a rooted Android device.
 //!
-//! The test creates exactly twelve maps, one BTF object and four unattached
+//! The test creates the ABI map set, one BTF object and four unattached
 //! programs. It never attaches, pins, changes network state or sends traffic.
 //! Closing all FDs must make every recorded map/program ID unavailable.
 
