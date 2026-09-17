@@ -2146,7 +2146,7 @@ impl Reactor {
                 return;
             }
         };
-        let mut check = match engine::spawn_check(&self.spec.binary, &candidate) {
+        let mut check = match engine::spawn_check(&self.spec, &candidate) {
             Ok(check) => check,
             Err(e) => {
                 let _ = fs::remove_file(&candidate);
@@ -3022,9 +3022,11 @@ impl Reactor {
         self.subscription.pending = None;
         self.refresh_default_route_observation("subscription fetch start");
         self.subscription.fetch_route_epoch = self.subscription.route_recovery_epoch;
+        self.subscription.fetch_epoch = self.subscription.fetch_epoch.saturating_add(1);
         let request = crate::subscription::FetchRequest {
             sources: config.remote_sources().cloned().collect(),
             policy: config.fetch.clone(),
+            epoch: self.subscription.fetch_epoch,
         };
         match self.subscription_worker.start(request) {
             Ok(true) => {
@@ -3044,6 +3046,13 @@ impl Reactor {
         let Some(completed) = self.subscription_worker.take_result() else {
             return;
         };
+        if completed.epoch != self.subscription.fetch_epoch {
+            self.logger
+                .log("discarded a late subscription fetch result");
+            self.rearm_subscription_timer();
+            self.complete_convergence_controls();
+            return;
+        }
         let flux = match self.flux_config_from_authority() {
             Ok(config) => config,
             Err((token, detail)) => {
@@ -3591,7 +3600,7 @@ impl Reactor {
                     let siblings = index
                         .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
                         .into_iter()
-                        .filter(|package| *package != selector.package)
+                        .filter(|package| *package != selector.package())
                         .collect::<Vec<_>>();
                     if !siblings.is_empty() {
                         warnings.push(format!(

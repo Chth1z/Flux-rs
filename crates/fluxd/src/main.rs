@@ -60,6 +60,26 @@ mod watch;
 
 use std::process::ExitCode;
 
+/// `stop` after a socket or protocol failure (`docs/spec/interaction.md` §27.3.4).
+/// Success requires proof the daemon is gone: `daemon.lock` is not held.
+fn stop_unreachable_exit(lock_held: bool) -> u8 {
+    if lock_held {
+        1
+    } else {
+        0
+    }
+}
+
+/// `enable`/`disable` once the C9 file operation has a result. The process
+/// exit is not `Response.ok` for "runtime already Active/Disabled".
+fn authority_file_exit(file_ok: bool, runtime_at_target: bool) -> (u8, bool) {
+    if file_ok {
+        (0, !runtime_at_target)
+    } else {
+        (1, false)
+    }
+}
+
 /// Embedded data plane. Empty unless the build set `FLUX_BUILD_BPF=1`; the
 /// loader refuses a zero-length object rather than pretending to attach.
 const BPF_OBJECT: &[u8] = include_bytes!(env!("FLUX_BPF_OBJECT"));
@@ -396,7 +416,11 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         },
 
         "subscribe" => {
-            match ask_with_timeout(&layout, Request::Subscribe, Duration::from_secs(125)) {
+            match ask_with_timeout(
+                &layout,
+                Request::Subscribe,
+                crate::subscription::MAX_FETCH_BATCH + Duration::from_secs(5),
+            ) {
                 Ok(response) => {
                     print_status(&response);
                     if response.ok {
@@ -417,10 +441,14 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
                 println!("fluxd: daemon stopping");
                 ExitCode::SUCCESS
             }
-            Err(_) => {
-                // Idempotent by §10.3: stopping a stopped daemon succeeds.
-                println!("fluxd: daemon is not running");
-                ExitCode::SUCCESS
+            Err(message) => {
+                let lock_held = layout.instance_lock_held();
+                if lock_held {
+                    eprintln!("{message}");
+                } else {
+                    println!("fluxd: daemon is not running");
+                }
+                ExitCode::from(stop_unreachable_exit(lock_held))
             }
         },
 
@@ -436,7 +464,12 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             match ask(&layout, Request::Enable) {
                 Ok(response) => {
                     print_status(&response);
-                    ExitCode::SUCCESS
+                    let (code, warn) =
+                        authority_file_exit(response.ok, response.state == State::Active);
+                    if warn {
+                        eprintln!("fluxd: switch updated; runtime is not Active yet");
+                    }
+                    ExitCode::from(code)
                 }
                 Err(_) => match layout.set_enabled() {
                     Ok(()) => {
@@ -459,7 +492,12 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             match ask(&layout, Request::Disable) {
                 Ok(response) => {
                     print_status(&response);
-                    ExitCode::SUCCESS
+                    let (code, warn) =
+                        authority_file_exit(response.ok, response.state == State::Disabled);
+                    if warn {
+                        eprintln!("fluxd: switch updated; runtime has not reached Disabled yet");
+                    }
+                    ExitCode::from(code)
                 }
                 Err(_) => match layout.set_disabled() {
                     Ok(()) => {
@@ -517,5 +555,23 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
             eprint!("{}", usage());
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_is_failure_while_the_instance_lock_is_held() {
+        assert_eq!(stop_unreachable_exit(true), 1);
+        assert_eq!(stop_unreachable_exit(false), 0);
+    }
+
+    #[test]
+    fn enable_disable_succeed_once_the_authority_file_is_written() {
+        assert_eq!(authority_file_exit(true, false), (0, true));
+        assert_eq!(authority_file_exit(true, true), (0, false));
+        assert_eq!(authority_file_exit(false, false), (1, false));
     }
 }

@@ -23,6 +23,9 @@ pub(crate) const NLM_F_CREATE: u16 = 0x0400;
 const NLA_F_NESTED: u16 = 1 << 15;
 const NLA_TYPE_MASK: u16 = !(NLA_F_NESTED | (1 << 14));
 const MAX_DATAGRAM: usize = 1024 * 1024;
+/// Level-triggered drain budget. Exhaustion is treated as overrun so the
+/// reactor returns to epoll with a resync dirty bit (rc.3 R08).
+const DRAIN_MESSAGE_BUDGET: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -603,6 +606,9 @@ fn drain_messages(fd: RawFd) -> io::Result<(Vec<RawMessage>, bool)> {
                 return Ok((Vec::new(), true));
             }
             messages.push(message);
+            if messages.len() >= DRAIN_MESSAGE_BUDGET {
+                return Ok((Vec::new(), true));
+            }
         }
     }
 }

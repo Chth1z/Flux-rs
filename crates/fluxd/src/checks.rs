@@ -157,7 +157,7 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
                         selector.canonical(),
                         shared
                             .iter()
-                            .filter(|p| **p != selector.package)
+                            .filter(|p| *p != selector.package())
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -497,23 +497,23 @@ fn visit_json(
 }
 
 fn overlaps_v4(left: Ipv4Cidr, right: Ipv4Cidr) -> bool {
-    let prefix = left.prefix_len.min(right.prefix_len);
+    let prefix = left.prefix_len().min(right.prefix_len());
     let mask = match prefix {
         0 => 0,
         32 => u32::MAX,
         bits => u32::MAX << (32 - bits),
     };
-    u32::from(left.addr) & mask == u32::from(right.addr) & mask
+    u32::from(left.addr()) & mask == u32::from(right.addr()) & mask
 }
 
 fn overlaps_v6(left: Ipv6Cidr, right: Ipv6Cidr) -> bool {
-    let prefix = left.prefix_len.min(right.prefix_len);
+    let prefix = left.prefix_len().min(right.prefix_len());
     let mask = match prefix {
         0 => 0,
         128 => u128::MAX,
         bits => u128::MAX << (128 - bits),
     };
-    u128::from(left.addr) & mask == u128::from(right.addr) & mask
+    u128::from(left.addr()) & mask == u128::from(right.addr()) & mask
 }
 
 /// The subprocess half of the full check: builds a real effective config with
@@ -546,7 +546,7 @@ fn run_engine_check(spec: &EngineSpec, user: Option<&serde_json::Value>, report:
             return;
         }
     };
-    let result = engine::run_check(&spec.binary, &tmp);
+    let result = engine::run_check(spec, &tmp);
     let _ = std::fs::remove_file(&tmp);
     if let Err(e) = result {
         let mut message = format!("engine check: {}", e.token());

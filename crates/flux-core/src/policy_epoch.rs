@@ -195,8 +195,8 @@ pub fn epoch_peak_live_lpm(old_n: usize, new_n: usize) -> usize {
 fn lpm_v4(map: &BTreeMap<Ipv4Cidr, BypassTag>, addr: Ipv4Addr) -> Option<BypassTag> {
     let mut best: Option<(u8, BypassTag)> = None;
     for (cidr, tag) in map {
-        if v4_in(*cidr, addr) && best.map(|(len, _)| cidr.prefix_len > len).unwrap_or(true) {
-            best = Some((cidr.prefix_len, *tag));
+        if v4_in(*cidr, addr) && best.map(|(len, _)| cidr.prefix_len() > len).unwrap_or(true) {
+            best = Some((cidr.prefix_len(), *tag));
         }
     }
     best.map(|(_, tag)| tag)
@@ -205,8 +205,8 @@ fn lpm_v4(map: &BTreeMap<Ipv4Cidr, BypassTag>, addr: Ipv4Addr) -> Option<BypassT
 fn lpm_v6(map: &BTreeMap<Ipv6Cidr, BypassTag>, addr: Ipv6Addr) -> Option<BypassTag> {
     let mut best: Option<(u8, BypassTag)> = None;
     for (cidr, tag) in map {
-        if v6_in(*cidr, addr) && best.map(|(len, _)| cidr.prefix_len > len).unwrap_or(true) {
-            best = Some((cidr.prefix_len, *tag));
+        if v6_in(*cidr, addr) && best.map(|(len, _)| cidr.prefix_len() > len).unwrap_or(true) {
+            best = Some((cidr.prefix_len(), *tag));
         }
     }
     best.map(|(_, tag)| tag)
@@ -214,14 +214,14 @@ fn lpm_v6(map: &BTreeMap<Ipv6Cidr, BypassTag>, addr: Ipv6Addr) -> Option<BypassT
 
 fn v4_in(cidr: Ipv4Cidr, addr: Ipv4Addr) -> bool {
     let bits = u32::from(addr);
-    let net = u32::from(cidr.addr);
-    bits & mask32(cidr.prefix_len) == net
+    let net = u32::from(cidr.addr());
+    bits & mask32(cidr.prefix_len()) == net
 }
 
 fn v6_in(cidr: Ipv6Cidr, addr: Ipv6Addr) -> bool {
     let bits = u128::from(addr);
-    let net = u128::from(cidr.addr);
-    bits & mask128(cidr.prefix_len) == net
+    let net = u128::from(cidr.addr());
+    bits & mask128(cidr.prefix_len()) == net
 }
 
 fn mask32(prefix_len: u8) -> u32 {

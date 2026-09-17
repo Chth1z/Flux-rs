@@ -128,12 +128,25 @@ const ANDROID_CERT_DIRS: [&str; 3] = [
 /// A subscription is configuration input, so use the same defensive ceiling
 /// as the engine template rather than letting a server exhaust daemon memory.
 pub const MAX_SUBSCRIPTION_BYTES: usize = 8 * 1024 * 1024;
+/// Total raw bytes across one fetch batch, not `8 MiB × source count`.
+pub const MAX_SUBSCRIPTION_BATCH_BYTES: usize = MAX_SUBSCRIPTION_BYTES;
+/// Whole-batch wall clock. Per-source `timeout` still applies inside ureq.
+pub const MAX_FETCH_BATCH: Duration = Duration::from_secs(60);
 
 /// Immutable request handed to a blocking worker thread.
 #[derive(Debug, Clone)]
 pub struct FetchRequest {
     pub sources: Vec<RemoteSource>,
     pub policy: FetchConfig,
+    /// Coordinator epoch; a late result with a different epoch is discarded.
+    pub epoch: u64,
+}
+
+/// One completed request, including the URL whose result it represents.
+#[derive(Debug)]
+pub struct FetchResult {
+    pub sources: Vec<(RemoteSource, Result<Vec<u8>, FetchError>)>,
+    pub epoch: u64,
 }
 
 /// Stable fetch failure exposed through daemon status.
@@ -141,12 +154,6 @@ pub struct FetchRequest {
 pub struct FetchError {
     pub token: String,
     pub detail: String,
-}
-
-/// One completed request, including the URL whose result it represents.
-#[derive(Debug)]
-pub struct FetchResult {
-    pub sources: Vec<(RemoteSource, Result<Vec<u8>, FetchError>)>,
 }
 
 /// Accepted remote bytes waiting for the engine transaction that used them.
@@ -169,6 +176,7 @@ pub struct Coordinator {
     pub default_route_was_ready: bool,
     pub route_recovery_epoch: u64,
     pub fetch_route_epoch: u64,
+    pub fetch_epoch: u64,
 }
 
 impl Coordinator {
@@ -282,15 +290,37 @@ fn ensure_crypto_provider() {
 }
 
 fn fetch(request: FetchRequest) -> FetchResult {
+    let epoch = request.epoch;
+    let deadline = std::time::Instant::now() + MAX_FETCH_BATCH;
     let roots = load_android_roots();
     let agent = fetch_agent(
         &request.policy,
         roots.as_ref().map(Vec::as_slice).unwrap_or(&[]),
     );
+    let mut used = 0usize;
     let sources = request
         .sources
         .into_iter()
         .map(|source| {
+            if std::time::Instant::now() >= deadline {
+                return (
+                    source,
+                    Err(FetchError {
+                        token: "subscription_fetch_failed:deadline_exceeded".into(),
+                        detail: "the fetch batch reached its wall-clock limit".into(),
+                    }),
+                );
+            }
+            let remaining = MAX_SUBSCRIPTION_BATCH_BYTES.saturating_sub(used);
+            if remaining == 0 {
+                return (
+                    source,
+                    Err(FetchError {
+                        token: "subscription_fetch_failed:too_large".into(),
+                        detail: "the fetch batch exceeded the total body budget".into(),
+                    }),
+                );
+            }
             let result = match &roots {
                 Err(error)
                     if source
@@ -300,12 +330,15 @@ fn fetch(request: FetchRequest) -> FetchResult {
                 {
                     Err(error.clone())
                 }
-                _ => fetch_source(&agent, &source, request.policy.retries),
+                _ => fetch_source(&agent, &source, request.policy.retries, remaining),
             };
+            if let Ok(bytes) = &result {
+                used = used.saturating_add(bytes.len());
+            }
             (source, result)
         })
         .collect();
-    FetchResult { sources }
+    FetchResult { sources, epoch }
 }
 
 fn fetch_agent(policy: &FetchConfig, certs: &[Certificate<'static>]) -> ureq::Agent {
@@ -331,12 +364,13 @@ fn fetch_source(
     agent: &ureq::Agent,
     source: &RemoteSource,
     retries: u32,
+    remaining_batch: usize,
 ) -> Result<Vec<u8>, FetchError> {
     let attempts = u64::from(retries) + 1;
     for attempt in 1..=attempts {
-        match fetch_once(agent, source.url()) {
+        match fetch_once(agent, source.url(), remaining_batch) {
             Ok(bytes) => return Ok(bytes),
-            Err((reason, detail)) if attempt == attempts => {
+            Err((reason, detail)) if !retryable_fetch(reason, &detail) || attempt == attempts => {
                 return Err(FetchError {
                     token: format!("subscription_fetch_failed:{reason}"),
                     detail: format!("attempt {attempt}/{attempts}: {detail}"),
@@ -346,6 +380,14 @@ fn fetch_source(
         }
     }
     unreachable!("there is always at least one attempt")
+}
+
+fn retryable_fetch(reason: &str, detail: &str) -> bool {
+    match reason {
+        "too_large" | "url" => false,
+        "http" if detail.contains("HTTP status 4") => false,
+        _ => true,
+    }
 }
 
 /// Names the cause of a failed request (§23.1: `subscription_fetch_failed:<reason>`
@@ -393,15 +435,17 @@ fn classify_io(error: &io::Error) -> (&'static str, String) {
     }
 }
 
-fn fetch_once(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, (&'static str, String)> {
+fn fetch_once(
+    agent: &ureq::Agent,
+    url: &str,
+    remaining_batch: usize,
+) -> Result<Vec<u8>, (&'static str, String)> {
+    let cap = remaining_batch.min(MAX_SUBSCRIPTION_BYTES);
     let mut response = agent.get(url).call().map_err(|error| classify(&error))?;
     let bytes = response
         .body_mut()
         .with_config()
-        .limit(
-            u64::try_from(MAX_SUBSCRIPTION_BYTES + 1)
-                .expect("the 8 MiB subscription limit fits in u64"),
-        )
+        .limit(u64::try_from(cap.saturating_add(1)).expect("the subscription limit fits in u64"))
         .read_to_vec()
         .map_err(|_| {
             (
@@ -409,13 +453,10 @@ fn fetch_once(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, (&'static str, 
                 "subscription response body could not be read".to_string(),
             )
         })?;
-    if bytes.len() > MAX_SUBSCRIPTION_BYTES {
+    if bytes.len() > cap {
         Err((
             "too_large",
-            format!(
-                "subscription response exceeds the {}-byte limit",
-                MAX_SUBSCRIPTION_BYTES
-            ),
+            format!("subscription response exceeds the {cap}-byte remaining batch limit"),
         ))
     } else {
         Ok(bytes)
@@ -532,11 +573,10 @@ mod tests {
     }
 
     #[test]
-    fn other_io_stays_io() {
-        let error = io::Error::new(ErrorKind::ConnectionRefused, "connection refused");
-        assert_eq!(
-            classify_io(&error),
-            ("io", "I/O error: connection refused".to_string())
-        );
+    fn four_xx_and_oversize_are_not_retried() {
+        assert!(!super::retryable_fetch("http", "HTTP status 404"));
+        assert!(!super::retryable_fetch("too_large", "limit"));
+        assert!(super::retryable_fetch("http", "HTTP status 503"));
+        assert!(super::retryable_fetch("timeout", "timed out during send"));
     }
 }

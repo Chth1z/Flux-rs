@@ -169,7 +169,14 @@ impl MapSet {
             verify_info(spec(abi::MAP_CONTROL_LEAF), info)?;
         }
         let zero = 0u32.to_ne_bytes();
-        sys::update_map(leaf_fd, &zero, as_bytes(control), 0)?;
+        let control_bytes = as_bytes(control);
+        if control_bytes.len() != spec(abi::MAP_CONTROL_LEAF).value_size as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "control leaf value size mismatch",
+            ));
+        }
+        sys::update_map(leaf_fd, &zero, control_bytes, 0)?;
         sys::freeze_map(leaf_fd)?;
         sys::update_map(root_fd, &zero, &(leaf_fd as u32).to_ne_bytes(), 0)?;
 
@@ -342,6 +349,19 @@ impl MapSet {
     }
 
     fn update_one(&self, name: &str, key: &[u8], value: &[u8]) -> io::Result<()> {
+        let map = spec(name);
+        if !entry_fits(map, key, value) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{name}: entry size mismatch (key {}/{}, value {}/{})",
+                    key.len(),
+                    map.key_size,
+                    value.len(),
+                    map.value_size
+                ),
+            ));
+        }
         let fd = self.fd(name).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
         })?;
@@ -349,6 +369,17 @@ impl MapSet {
     }
 
     fn delete_one(&self, name: &str, key: &[u8]) -> io::Result<()> {
+        let map = spec(name);
+        if key.len() != map.key_size as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{name}: key size mismatch ({} / {})",
+                    key.len(),
+                    map.key_size
+                ),
+            ));
+        }
         let fd = self.fd(name).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("{name} map missing"))
         })?;
@@ -418,10 +449,27 @@ fn collect_typed_keys<T: Copy>(keys: Vec<Vec<u8>>) -> io::Result<Vec<T>> {
         .collect()
 }
 
-fn as_bytes<T>(value: &T) -> &[u8] {
-    // SAFETY: `value` remains alive for the returned slice and the byte view
-    // has exactly the size of T. Kernel ABI structs are copied, never retained.
+/// Closed set of kernel ABI records that may cross `bpf(2)` as bytes.
+/// A type that is not `MapPod` cannot be passed to [`as_bytes`].
+trait MapPod: Copy + 'static {}
+
+impl MapPod for Control {}
+impl MapPod for LpmV4Key {}
+impl MapPod for LpmV6Key {}
+impl MapPod for FaultKey {}
+impl MapPod for u32 {}
+impl MapPod for [u8; 4] {}
+impl MapPod for [u8; 16] {}
+impl MapPod for u8 {}
+
+fn as_bytes<T: MapPod>(value: &T) -> &[u8] {
+    // SAFETY: `T` is a closed POD set; `value` remains alive for the slice
+    // and the byte view has exactly the size of T.
     unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+}
+
+fn entry_fits(map: MapSpec, key: &[u8], value: &[u8]) -> bool {
+    key.len() == map.key_size as usize && value.len() == map.value_size as usize
 }
 
 fn possible_cpu_count() -> io::Result<usize> {
@@ -557,6 +605,38 @@ mod tests {
         assert_eq!(
             spec(abi::MAP_UID_POLICY_0).max_entries,
             spec(abi::MAP_UID_POLICY_1).max_entries
+        );
+        assert_eq!(
+            size_of::<Control>(),
+            spec(abi::MAP_CONTROL_LEAF).value_size as usize
+        );
+        assert_eq!(
+            size_of::<LpmV4Key>(),
+            spec(abi::MAP_BYPASS_V4_0).key_size as usize
+        );
+        assert_eq!(
+            size_of::<FaultKey>(),
+            spec(abi::MAP_FAULT_LATCH).key_size as usize
+        );
+        assert_eq!(spec(abi::MAP_UID_POLICY_0).key_size, 4);
+        assert_eq!(spec(abi::MAP_UID_POLICY_0).value_size, 1);
+    }
+
+    #[test]
+    fn mismatched_entry_sizes_cannot_reach_bpf() {
+        let control = spec(abi::MAP_CONTROL_LEAF);
+        assert!(!entry_fits(control, &[0; 4], &[0u8; 8]));
+        assert!(entry_fits(
+            control,
+            &0u32.to_ne_bytes(),
+            &vec![0u8; size_of::<Control>()]
+        ));
+        let uid = spec(abi::MAP_UID_POLICY_0);
+        assert!(!entry_fits(uid, &[0; 8], &[1]));
+        assert!(entry_fits(uid, &[0; 4], &[1]));
+        assert_eq!(
+            size_of::<LpmV6Key>(),
+            spec(abi::MAP_BYPASS_V6_0).key_size as usize
         );
     }
 }

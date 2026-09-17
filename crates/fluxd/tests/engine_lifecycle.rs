@@ -140,7 +140,7 @@ mod tests {
                 }
             }
         };
-        if let Err(e) = engine::run_check(&spec.binary, &candidate_path) {
+        if let Err(e) = engine::run_check(spec, &candidate_path) {
             let _ = fs::remove_file(&candidate_path);
             return GenerationOutcome {
                 engine: current,

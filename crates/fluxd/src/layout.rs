@@ -126,6 +126,17 @@ impl Layout {
         self.run_dir().join("daemon.lock")
     }
 
+    /// True when another process holds `daemon.lock`. Failure to inspect the
+    /// lock is treated as held: `stop` must not claim success without proof
+    /// the daemon is gone.
+    pub fn instance_lock_held(&self) -> bool {
+        match InstanceLock::acquire(self) {
+            Err(LockError::Held(_)) => true,
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    }
+
     /// Control socket (blueprint §10.3).
     pub fn control_socket(&self) -> PathBuf {
         self.run_dir().join("control.sock")
@@ -633,6 +644,7 @@ mod tests {
         layout.ensure().expect("create");
 
         let first = InstanceLock::acquire(&layout).expect("first lock");
+        assert!(layout.instance_lock_held());
         // flock is per open file description, so a second open of the same
         // path conflicts even inside one process.
         match InstanceLock::acquire(&layout) {
@@ -644,6 +656,7 @@ mod tests {
             other => panic!("expected Held with pid, got {other:?}"),
         }
         drop(first);
+        assert!(!layout.instance_lock_held());
         // Released on drop: a fresh acquire succeeds.
         InstanceLock::acquire(&layout).expect("re-acquire after drop");
         fs::remove_dir_all(layout.root()).unwrap();

@@ -262,6 +262,18 @@ Human-readable output uses the reachability wording throughout and **MUST NOT
 contain "first applicable"** — dump position never established this, and the
 earlier field name asserted that it did.
 
+### 27.3.4 Exit codes
+
+The process exit code is not `Response.ok`. Three outcomes stay distinct:
+
+| Result | Typical exit | Meaning |
+|---|---|---|
+| Request never reached the daemon | 1 | Socket missing, timeout, or protocol error. `stop` is 0 only when `daemon.lock` is **not** held |
+| Authority file updated | 0, with a warning if the runtime is not yet at the target | `enable`/`disable` wrote the C9 file; Active/Disabled may still be converging |
+| Runtime at the requested target | 0 | `reload`/`subscribe`/`check`/`status` follow `Response.ok` |
+
+`status` success is not Internet reachability. `stop` must not treat a communication failure as idempotent success while the lock is held.
+
 ---
 
 ## 27.4 Diagnostic bundle

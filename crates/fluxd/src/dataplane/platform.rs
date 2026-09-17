@@ -1887,17 +1887,16 @@ fn uid_modes_from_epoch(epoch: &PolicyEpoch) -> BTreeMap<u32, u8> {
 }
 
 fn lpm_v4_to_cidr(key: LpmV4Key) -> Ipv4Cidr {
-    Ipv4Cidr {
-        addr: Ipv4Addr::from(key.addr),
-        prefix_len: u8::try_from(key.prefixlen).unwrap_or(32).min(32),
-    }
+    Ipv4Cidr::from_octets(key.addr, u8::try_from(key.prefixlen).unwrap_or(32).min(32))
+        .unwrap_or_else(|_| Ipv4Cidr::from_octets([0; 4], 0).expect("0.0.0.0/0 is canonical"))
 }
 
 fn lpm_v6_to_cidr(key: LpmV6Key) -> Ipv6Cidr {
-    Ipv6Cidr {
-        addr: Ipv6Addr::from(key.addr),
-        prefix_len: u8::try_from(key.prefixlen).unwrap_or(128).min(128),
-    }
+    Ipv6Cidr::from_octets(
+        key.addr,
+        u8::try_from(key.prefixlen).unwrap_or(128).min(128),
+    )
+    .unwrap_or_else(|_| Ipv6Cidr::from_octets([0; 16], 0).expect("::/0 is canonical"))
 }
 
 fn inactive_control(

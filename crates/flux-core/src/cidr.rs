@@ -57,19 +57,15 @@ pub enum CidrError {
 /// A canonical IPv4 prefix: the address has no bits set below `prefix_len`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv4Cidr {
-    /// Network address, already masked to `prefix_len`.
-    pub addr: Ipv4Addr,
-    /// Prefix length in bits, `0..=32`.
-    pub prefix_len: u8,
+    addr: Ipv4Addr,
+    prefix_len: u8,
 }
 
 /// A canonical IPv6 prefix: the address has no bits set below `prefix_len`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv6Cidr {
-    /// Network address, already masked to `prefix_len`.
-    pub addr: Ipv6Addr,
-    /// Prefix length in bits, `0..=128`.
-    pub prefix_len: u8,
+    addr: Ipv6Addr,
+    prefix_len: u8,
 }
 
 /// A bypass prefix together with the semantic tag stored as its LPM value.
@@ -115,6 +111,28 @@ fn split_prefix(text: &str) -> Result<(&str, u8), CidrError> {
 }
 
 impl Ipv4Cidr {
+    /// Network address, already masked to `prefix_len`.
+    pub fn addr(self) -> Ipv4Addr {
+        self.addr
+    }
+
+    /// Prefix length in bits, `0..=32`.
+    pub fn prefix_len(self) -> u8 {
+        self.prefix_len
+    }
+
+    /// Reconstructs a prefix from octets. Rejects a non-canonical address.
+    pub fn from_octets(octets: [u8; 4], prefix_len: u8) -> Result<Self, CidrError> {
+        if prefix_len > 32 {
+            return Err(CidrError::PrefixTooLong(prefix_len));
+        }
+        let addr = Ipv4Addr::from(octets);
+        let bits = u32::from(addr);
+        if bits & !mask32(prefix_len) != 0 {
+            return Err(CidrError::HostBitsSet(format!("{addr}/{prefix_len}")));
+        }
+        Ok(Self { addr, prefix_len })
+    }
     /// Parses a canonical `a.b.c.d/n`.
     ///
     /// Rejects a missing prefix, a prefix above 32, a non-canonical address
@@ -169,6 +187,28 @@ impl std::fmt::Display for Ipv4Cidr {
 }
 
 impl Ipv6Cidr {
+    /// Network address, already masked to `prefix_len`.
+    pub fn addr(self) -> Ipv6Addr {
+        self.addr
+    }
+
+    /// Prefix length in bits, `0..=128`.
+    pub fn prefix_len(self) -> u8 {
+        self.prefix_len
+    }
+
+    /// Reconstructs a prefix from octets. Rejects a non-canonical address.
+    pub fn from_octets(octets: [u8; 16], prefix_len: u8) -> Result<Self, CidrError> {
+        if prefix_len > 128 {
+            return Err(CidrError::PrefixTooLong(prefix_len));
+        }
+        let addr = Ipv6Addr::from(octets);
+        let bits = u128::from(addr);
+        if bits & !mask128(prefix_len) != 0 {
+            return Err(CidrError::HostBitsSet(format!("{addr}/{prefix_len}")));
+        }
+        Ok(Self { addr, prefix_len })
+    }
     /// Parses a canonical `addr/n`. See [`Ipv4Cidr::parse`] for the rules.
     pub fn parse(text: &str) -> Result<Self, CidrError> {
         let (addr_str, prefix_len) = split_prefix(text)?;

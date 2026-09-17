@@ -108,6 +108,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The §26 table now drives the reactor. `plan` returns Commands with
   identities; the adapter executes them and does not call `converge` on
   every event. Capture-side drift reattaches locally and does not freeze.
+- `sing-box check` now uses the same working directory as `run`, so relative
+  resources in a candidate agree. CLI `stop` is no longer success on a dead
+  socket while `daemon.lock` is held. `enable`/`disable` warn when the runtime
+  has not yet reached Active/Disabled. A fetch batch has a 60s wall clock and
+  an 8 MiB total body budget. Map updates refuse a size that does not match
+  the spec; CIDR and selector fields are private.
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

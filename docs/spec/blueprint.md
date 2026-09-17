@@ -2641,7 +2641,7 @@ fixed bypass as `RESERVED` (D16, §6.1.1).
 
 ## 9.4 The engine candidate switch is the only commit point
 
-1. Allocate a new `generation`, monotonic and never reused within the boot, and two random ports. Write `run/sing-box.<generation>.json` with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fsync` it, mode `0600`, and run `sing-box check -c` against that exact immutable path. A write or check failure deletes only the candidate file; **the running engine is not touched at all**.
+1. Allocate a new `generation`, monotonic and never reused within the boot, and two random ports. Write `run/sing-box.<generation>.json` with `O_CREAT|O_EXCL|O_NOFOLLOW`, `fsync` it, mode `0600`, and run `sing-box check -c` against that exact immutable path **from the same working directory `run` uses**. A write or check failure deletes only the candidate file; **the running engine is not touched at all**.
 2. Keep the current control leaf and the current generation's file. Publish an `active=0` leaf for the *same* generation.
 3. Terminate the old child normally: `SIGTERM`, a short deadline, then `SIGKILL`, with pidfd confirming exit. **At most one sing-box runs at any instant.**
 4. While inactive, clear `fault_latch`. Start the candidate child and wait for the four sockets of the two inbounds to pass the PID and inode cross-check.
@@ -2743,7 +2743,7 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | `flux-core/subscription.rs`, `engine_config.rs` | Typed node sources and available provider responses form one ordered pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); runtime completion owns the two listener tuples and default cache path (§9.1, §9.6) |
 | `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
-| `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness is a preemptible ProbeReady; child exit is confirmed before a replacement starts (§9.4, §9.5) |
+| `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run, from the same working directory `run` uses; readiness is a preemptible ProbeReady; child exit is confirmed before a replacement starts (§9.4, §9.5) |
 | `fluxd/subscription.rs` | One immutable fetch batch/result and selection of pending or accepted source-addressed responses | At most one blocking worker; it cannot mutate reactor state, cache files or a generation. A matching pending response takes precedence over that source's disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
 | `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | Executes Planner Commands; `converge()` is an executor for activation and policy, not a second §26 table. Capture-side drift must not `PublishInactive` (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |

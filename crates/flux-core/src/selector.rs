@@ -51,13 +51,20 @@ pub struct Selection {
 /// Canonical form is `userId:packageName`; a bare `packageName` means user 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSelector {
-    /// Android user id, 0 for the primary user.
-    pub user_id: u32,
-    /// Package name, exactly as written.
-    pub package: String,
+    user_id: u32,
+    package: String,
 }
 
 impl AppSelector {
+    /// Android user id, 0 for the primary user.
+    pub fn user_id(&self) -> u32 {
+        self.user_id
+    }
+
+    /// Package name, exactly as written.
+    pub fn package(&self) -> &str {
+        &self.package
+    }
     /// Parses `"userId:packageName"` or a bare `"packageName"` (user 0).
     ///
     /// The user id is validated here because it needs no package database; the

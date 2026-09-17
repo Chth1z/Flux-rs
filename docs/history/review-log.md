@@ -773,3 +773,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** `note_stimulus` 只对 `IgnoreUnexpected` 打日志，从不执行 effects。enable/disable/reload/SIGHUP/debounce 一律 `converge()`。纯函数测试全绿不能证明运行代码遵循那张表。审计乙 A01 / rc.3 I1。
 
 **处置：** `plan(Model, Stimulus) -> (Model, Commands)`。reactor 执行 Commands；`converge()` 只是激活/策略执行器。capture-side drift 产出 `ReattachCaptureLocally`，不得 `PublishInactive`。删除 `note_stimulus`。不 bump ABI。不实现 TCX。
+
+### 0.6.24 EngineSpec / CLI / 订阅预算 / typed map（2026-09-17）
+
+**原说法：** check 与 run 是同一份候选；CLI stop 在 daemon 未响应时成功是幂等。
+
+**实际：** `spawn_check` 不 `chdir` 到 `EngineSpec.workdir`，相对资源 check≠run。`stop` 把任何通信错误当成功。订阅每源 8 MiB 且无批次墙钟。`as_bytes<T>` 接受任意 `Copy`。审计甲 R08 余 / R09–R12 / R16。
+
+**处置：** check 与 run 共用 workdir。`stop` 仅在锁未持有时对通信失败返回 0。fetch 批次 60s + 总正文 8 MiB；4xx/过大不重试；过期 epoch 丢弃。map 更新核对 spec 尺寸；`MapPod` 封闭 `as_bytes`。`Ipv4Cidr`/`Ipv6Cidr`/`AppSelector` 字段私有。不 bump ABI。不实现 TCX。

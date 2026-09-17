@@ -359,7 +359,7 @@ impl FluxConfig {
                 let mut users = self
                     .apps
                     .iter()
-                    .map(|selector| selector.user_id)
+                    .map(|selector| selector.user_id())
                     .collect::<BTreeSet<_>>();
                 users.insert(0);
                 let mut selected = BTreeSet::new();

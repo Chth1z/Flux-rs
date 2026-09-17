@@ -1146,6 +1146,14 @@ ABI bump 本身对已装模块是不兼容加载（magic 检查失败）。rc.3 
 
 ### 批 5：EngineSpec、CLI、订阅预算、typed map、R16（R08 余、R09–R12、R16）
 
+已落地 2026-09-17。
+
+- `spawn_check` 与 `run` 共用 `EngineSpec.workdir`。
+- CLI：`stop` 锁持有时通信失败非零；enable/disable 看文件操作，未收敛只 warning。
+- 订阅批次 60s + 总正文 8 MiB；4xx/过大不重试；过期 epoch 丢弃。
+- `MapPod` + spec 尺寸核对；`Ipv4Cidr`/`Ipv6Cidr`/`AppSelector` 字段私有。
+- stdout 读取次数与 rtnetlink drain 有预算。
+
 退出：相对资源 check==run；CLI 用例；订阅 deadline；错误尺寸写不进安全接口。
 
 ### 批 6：解析 l3_end、fragment 名、change_type、畸形语料（I8、B01–B04）

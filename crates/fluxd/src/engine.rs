@@ -48,6 +48,8 @@ pub const CHECK_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Bytes of engine output retained for diagnostics (per run).
 const OUTPUT_CAP: usize = 64 * 1024;
+/// Max `read` calls per drain, including bytes discarded after [`OUTPUT_CAP`].
+const OUTPUT_READ_BUDGET: u32 = 16;
 
 /// One asynchronously supervised `sing-box check -c` process.
 ///
@@ -74,9 +76,11 @@ impl EngineCheck {
     }
 
     /// Drains currently available output without waiting.
+    /// Saving stops at [`OUTPUT_CAP`]; reading stops at a bounded number of
+    /// `read`s so a flooding child cannot occupy the reactor (rc.3 R08).
     pub fn drain_output(&mut self) {
         let mut chunk = [0u8; 4096];
-        loop {
+        for _ in 0..OUTPUT_READ_BUDGET {
             // SAFETY: `output` is a valid non-blocking fd and `chunk` is a
             // valid writable buffer for the duration of the call.
             let n = unsafe {
@@ -189,6 +193,17 @@ impl EngineSpec {
             workdir: layout.root().to_path_buf(),
             listen_v4,
             listen_v6,
+        }
+    }
+
+    /// Check and run share this spec. Tests that only need `check` still pass
+    /// a workdir so relative resources resolve the same way as production.
+    pub fn for_binary(binary: PathBuf, workdir: PathBuf) -> Self {
+        Self {
+            binary,
+            workdir,
+            listen_v4: Ipv4Addr::UNSPECIFIED,
+            listen_v6: Ipv6Addr::UNSPECIFIED,
         }
     }
 
@@ -511,23 +526,26 @@ pub fn write_effective(
 }
 
 /// Starts §9.4 step 1's `sing-box check -c <exact path>` subprocess with a
-/// pidfd and one non-blocking merged output pipe.
-pub fn spawn_check(binary: &Path, config: &Path) -> Result<EngineCheck, EngineError> {
-    if !binary.exists() {
-        return Err(EngineError::BinaryMissing(binary.to_path_buf()));
+/// pidfd and one non-blocking merged output pipe. The child uses the same
+/// working directory as [`spawn`], so relative resources in the candidate
+/// resolve identically at check and at run.
+pub fn spawn_check(spec: &EngineSpec, config: &Path) -> Result<EngineCheck, EngineError> {
+    if !spec.binary.exists() {
+        return Err(EngineError::BinaryMissing(spec.binary.clone()));
     }
     let (output, writer) = pipe2_cloexec().map_err(EngineError::Io)?;
     let stdout = fs::File::from(writer);
     let stderr = stdout.try_clone().map_err(EngineError::Io)?;
-    let mut child = std::process::Command::new(binary)
+    let mut child = std::process::Command::new(&spec.binary)
         .arg("check")
         .arg("-c")
         .arg(config)
+        .current_dir(&spec.workdir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::from(stderr))
         .spawn()
-        .map_err(|e| EngineError::SpawnFailed(format!("{}: {e}", binary.display())))?;
+        .map_err(|e| EngineError::SpawnFailed(format!("{}: {e}", spec.binary.display())))?;
 
     let pid = i32::try_from(child.id()).map_err(|_| {
         let _ = child.kill();
@@ -550,8 +568,8 @@ pub fn spawn_check(binary: &Path, config: &Path) -> Result<EngineCheck, EngineEr
 
 /// Runs a check to completion for CLI/tests. The daemon uses
 /// [`spawn_check`] directly so its reactor never sleeps or waits.
-pub fn run_check(binary: &Path, config: &Path) -> Result<(), EngineError> {
-    let mut check = spawn_check(binary, config)?;
+pub fn run_check(spec: &EngineSpec, config: &Path) -> Result<(), EngineError> {
+    let mut check = spawn_check(spec, config)?;
     let deadline = Instant::now() + CHECK_DEADLINE;
     loop {
         if let Some(result) = check.finish()? {
@@ -956,7 +974,7 @@ pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readine
 pub fn drain_output_head(child: &mut EngineChild) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
-    loop {
+    for _ in 0..OUTPUT_READ_BUDGET {
         // SAFETY: valid fd and buffer; the fd is non-blocking.
         let n = unsafe {
             libc::read(
@@ -1099,7 +1117,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let missing = dir.join("no-such-engine");
-        match run_check(&missing, Path::new("/dev/null")) {
+        let missing_spec = EngineSpec::for_binary(missing.clone(), dir.clone());
+        match run_check(&missing_spec, Path::new("/dev/null")) {
             Err(EngineError::BinaryMissing(p)) => assert_eq!(p, missing),
             other => panic!("expected BinaryMissing, got {other:?}"),
         }
@@ -1110,13 +1129,27 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         perm.set_mode(0o755);
         fs::set_permissions(&fake, perm).unwrap();
-        match run_check(&fake, Path::new("/dev/null")) {
+        let fake_spec = EngineSpec::for_binary(fake, dir.clone());
+        match run_check(&fake_spec, Path::new("/dev/null")) {
             Err(EngineError::CheckFailed { exit, output_head }) => {
                 assert_eq!(exit, "code=1");
                 assert!(output_head.contains("bad config"));
             }
             other => panic!("expected CheckFailed, got {other:?}"),
         }
+
+        let cwd_bin = dir.join("cwd-engine");
+        fs::write(&cwd_bin, "#!/bin/sh\npwd > seen_cwd\nexit 0\n").unwrap();
+        fs::set_permissions(&cwd_bin, perm).unwrap();
+        let workdir = dir.join("work");
+        fs::create_dir_all(&workdir).unwrap();
+        let cwd_spec = EngineSpec::for_binary(cwd_bin, workdir.clone());
+        run_check(&cwd_spec, Path::new("/dev/null")).expect("cwd check");
+        let seen = fs::read_to_string(workdir.join("seen_cwd")).unwrap();
+        assert_eq!(
+            Path::new(seen.trim()).canonicalize().unwrap(),
+            workdir.canonicalize().unwrap()
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
