@@ -12,7 +12,7 @@
 
 | 范围 | 当前状态 | 主要证据 |
 |---|---|---|
-| Phase 0–8 | 已完成 | 见下方历史阶段；本树 Phase 4–6 已在 SM-S9180 于 rc.3 工作树重跑（§0.6.27），不替代候选 ZIP 的 §20 |
+| Phase 0–8 | 已完成 | 见下方历史阶段；本树 Phase 4–6 见 §0.6.27；WSL Phase 8 与 SM-S9180 KernelSU 开发 ZIP 升级见 §0.6.29，不替代签名候选的 §20 |
 | 1.0.0-rc.1 | 已并入 `main` | `0df947e`；产物记录 §0.6.17 |
 | rc.2 主题 1：§26 纯函数 | 已落地 | `crates/flux-core/src/runtime.rs`；`cargo test -p flux-core` |
 | rc.2 主题 2：ingress 快路径 | 已落地；5.15.211 Phase 4 加载通过 | `bpf/flux.bpf.c` `flx_in` I1b；ABI 未 bump；见 §0.6.19 |
@@ -43,7 +43,7 @@ rc.1 的产品缺口已处理。本轮把 §26 收成纯函数、reactor 降为 
 | 7：故障与已准入流 | 本树 Phase 6 含 DRAINING；未跑 Phase 7 | 候选重跑 Phase 6–7，含 ingress 快路径 |
 | 8：系统共存 | 内核对象管理策略未改 | 候选设备前后枚举 diff |
 | 9：卸载与残留 | 安装路径未改 | 候选卸载并重启后的残留检查 |
-| 10：三个管理器 | 只有历史 KernelSU 真机证据 | Magisk、KernelSU、APatch 各一次 smoke |
+| 10：三个管理器 | KernelSU 上 rc.3 开发 ZIP 升级通过（§0.6.29） | Magisk、APatch 各一次 smoke |
 | 11：可复现打包 | rc.1 双构建通过 | rc.3 冻结清单后再跑两次干净打包 |
 | 12：DNS 精度 | 历史 Q9 可查 | 候选验证被选与未选 DNS |
 | 13：用户边界说明 | 词表不因投影合并而改 | 所有者审核对外表述 |

@@ -813,3 +813,15 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** 所有者要求在本会话收尾命名。`[workspace.package] version` 改为 `1.0.0-rc.3`；`versionCode` 仍由公式派生（`10000003`）。未创建 Git tag、未推送、未签署正式 `1.0.0`。批 8 性能未做。
 
 **处置：** 蓝图页眉、`plan/implementation.md` §17.0、`plan/rc3.md` 身份表与 CHANGELOG 同步到该版本。Phase 8 宿主生命周期与候选 ZIP 设备升级的证据另记。不实现 TCX。
+
+### 0.6.29 rc.3 Phase 8 与 KernelSU 开发 ZIP 升级（2026-09-17）
+
+**原说法：** Phase 8 宿主脚本与这条 rc.3 树的模块 ZIP 升级仍待做。
+
+**实测：** WSL 非 root 跑 `shellcheck --shell=sh --severity=warning module/*.sh tools/phase8/module_lifecycle_test.sh` 与 `sh tools/phase8/module_lifecycle_test.sh`，结果 `module lifecycle test: OK`。fixture 的 `chown root` 报权限不足，不计作设备 root 或管理器安装验收。
+
+开发 ZIP `Flux-rs-v1.0.0-rc.3-g0fd405ea98ca3c80a5b414c9d9e27ea7c0ae2d65-arm64.zip`（源码 `0fd405e`），SHA-256 `9299ab55eacc94ba059fc1cc2aae6dfb74a8afa3bccd13782858b39918a54328`；包内 `module.prop` 为 `version=v1.0.0-rc.3`、`versionCode=10000003`；ZIP 恰 16 项 allowlist。
+
+SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。安装前生产为 rc.1、`Active` generation 1。`ksud module install` 走升级路径（customize.sh 未打印 fresh-install 禁用提示）；`config/flux.toml`、`advanced.toml`、`template.json` 的 SHA-256 与安装前一致；模块无 `disable`。重启后 `modules_update/Flux-rs` 被消费，现行 `module.prop` 为 rc.3 / 10000003，daemon 收敛到 `Active` generation 1，engine pid 3315、4/4 sockets verified，接口可 capture。
+
+**处置：** 记为这条开发 ZIP 的 KernelSU 升级证据，不是签名 tag、不是 §20、不是 Magisk/APatch。未跑 Phase 7，未做卸载残留。不实现 TCX。
