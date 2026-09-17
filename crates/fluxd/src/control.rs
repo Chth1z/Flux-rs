@@ -17,7 +17,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flux_core::control_wire::{self, Request, Response, MAX_REQUEST_BYTES};
 
@@ -192,6 +192,40 @@ impl ControlConn {
         let line = control_wire::to_line(response)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         send_once(&self.fd, line.as_bytes())
+    }
+}
+
+/// One accepted control connection. The reactor only multiplexes epoll;
+/// this enum is the session.
+pub(crate) enum PendingControl {
+    Reading {
+        conn: ControlConn,
+        deadline: Instant,
+    },
+    Writing {
+        conn: ControlConn,
+        response: Box<Response>,
+        deadline: Instant,
+        stop_after: bool,
+    },
+    Converging {
+        conn: ControlConn,
+        deadline: Instant,
+    },
+    Subscribing {
+        conn: ControlConn,
+        deadline: Instant,
+    },
+}
+
+impl PendingControl {
+    pub(crate) fn deadline(&self) -> Instant {
+        match self {
+            Self::Reading { deadline, .. }
+            | Self::Writing { deadline, .. }
+            | Self::Converging { deadline, .. }
+            | Self::Subscribing { deadline, .. } => *deadline,
+        }
     }
 }
 

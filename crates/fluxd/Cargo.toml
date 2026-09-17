@@ -53,5 +53,8 @@ libc = { workspace = true }
 ureq = { workspace = true }
 rustls = { workspace = true }
 
+[build-dependencies]
+flux-core = { workspace = true }
+
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"

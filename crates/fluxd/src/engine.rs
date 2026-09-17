@@ -17,7 +17,8 @@
 //!
 //! Liveness is pidfd only. There is no heartbeat, no polling of any kind; the
 //! bounded readiness backoff exists only during candidate startup and dies
-//! with the reactor transaction (§9.5).
+//! with the reactor transaction (§9.5). The §9.4 Checking → Waiting → Stopping
+//! machine lives here; the reactor only drives it from epoll.
 
 use std::fs;
 use std::io::{self, Write};
@@ -28,8 +29,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use flux_core::abi::{LISTEN_PORT_MAX, LISTEN_PORT_MIN, LISTEN_V4_STR, LISTEN_V6_STR};
-#[cfg(test)]
-use flux_core::engine_config::build_effective;
 use flux_core::engine_config::{EngineConfigError, EngineParams};
 
 use crate::layout::Layout;
@@ -297,6 +296,73 @@ impl EngineError {
             EngineError::BinaryMissing(_) | EngineError::NotReady { .. } => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct OldGeneration {
+    pub params: EngineParams,
+    pub effective: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct SwitchPlan {
+    pub generation: u64,
+    pub params: EngineParams,
+    pub candidate: PathBuf,
+    pub user: serde_json::Value,
+    pub old: Option<OldGeneration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckDisposition {
+    Normal,
+    TimedOut,
+    Cancelled,
+    SupervisionFailed,
+}
+
+#[derive(Debug)]
+pub(crate) enum WaitRole {
+    Candidate(SwitchPlan),
+    Recovery { candidate_error: EngineError },
+}
+
+#[derive(Debug)]
+pub(crate) enum StopNext {
+    StartCandidate(SwitchPlan),
+    Recover {
+        plan: SwitchPlan,
+        candidate_error: EngineError,
+    },
+    FinishRecoveryFailure {
+        candidate_error: EngineError,
+        recovery_error: EngineError,
+    },
+    Cancelled,
+}
+
+/// Event-driven §9.4 transaction. The reactor stores this and advances it
+/// from pidfd, stdout and timerfd; there is no sleeping product path.
+#[derive(Debug)]
+pub(crate) enum EngineTransaction {
+    Checking {
+        check: EngineCheck,
+        plan: SwitchPlan,
+        deadline: Instant,
+        disposition: CheckDisposition,
+    },
+    Waiting {
+        child: EngineChild,
+        role: WaitRole,
+        deadline: Instant,
+        backoff: Duration,
+    },
+    Stopping {
+        child: EngineChild,
+        next: StopNext,
+        deadline: Instant,
+        kill_sent: bool,
+    },
 }
 
 pub fn describe_config_error(e: &EngineConfigError) -> String {
@@ -856,34 +922,6 @@ pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readine
     }
 }
 
-// The four items below are the blocking harness the `engine_lifecycle`
-// integration test drives, compiled into that test by path. The reactor uses
-// the event-driven halves (`probe_ready`, the pidfd, the timers) instead, and
-// this crate's own unit tests never call them, hence `allow(dead_code)` on
-// exactly these four.
-
-/// §9.5: waits for the four exact sockets with a 10/20/40… ms backoff capped
-/// at 250 ms and a hard total deadline. Every found inode is cross-checked
-/// against `/proc/<pid>/fd`. This is not steady-state polling — it exists only
-/// between spawn and ready/failed, then stops forever.
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn wait_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), EngineError> {
-    let deadline = Instant::now() + READY_DEADLINE;
-    let mut backoff = Duration::from_millis(10);
-    loop {
-        let verified = match probe_ready(child, spec)? {
-            Readiness::Ready => return Ok(()),
-            Readiness::Pending { verified } => verified,
-        };
-        if Instant::now() + backoff > deadline {
-            return Err(EngineError::NotReady { verified });
-        }
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(Duration::from_millis(250));
-    }
-}
-
 /// Drains whatever the child has written so far, for error context.
 pub fn drain_output_head(child: &mut EngineChild) -> String {
     let mut buf = Vec::new();
@@ -939,258 +977,6 @@ pub fn terminate(child: &EngineChild, grace: Duration) -> io::Result<String> {
         }
     }
     Ok(reap(child))
-}
-
-/// The outcome of one §9.4 transaction.
-#[cfg(test)]
-#[allow(dead_code)]
-pub struct GenerationOutcome {
-    /// The running engine after the transaction: the promoted candidate, the
-    /// recovered old generation, or `None`.
-    pub engine: Option<EngineChild>,
-    /// The candidate's fate. `Ok` means the candidate was promoted.
-    pub result: Result<(), EngineError>,
-    /// The step-6 recovery result, when recovery was attempted.
-    pub recovery: Option<Result<(), EngineError>>,
-    /// Free-text events for the daemon log.
-    pub log: Vec<String>,
-}
-
-/// §9.4, the six-step generation transaction — the ONLY way an engine is ever
-/// started or replaced. `current == None` makes it the cold-start case.
-///
-/// Publish points (steps 2, 4-latch, 5) are no-ops until the data plane exists
-/// (Phase 4+); their positions in the sequence are already final.
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn run_generation_switch(
-    layout: &Layout,
-    spec: &EngineSpec,
-    user: &serde_json::Value,
-    current: Option<EngineChild>,
-    generation: u64,
-) -> GenerationOutcome {
-    let mut log = Vec::new();
-
-    // ---- step 1: candidate params, immutable effective file, engine check.
-    // Any failure here leaves the current engine COMPLETELY untouched.
-    let (port_v4, port_v6) = match draw_ports() {
-        Ok(ports) => ports,
-        Err(e) => {
-            return GenerationOutcome {
-                engine: current,
-                result: Err(EngineError::Io(e)),
-                recovery: None,
-                log,
-            }
-        }
-    };
-    let params = EngineParams {
-        generation,
-        port_v4,
-        port_v6,
-    };
-    let effective_json = match build_effective(user, &params) {
-        Ok(v) => v,
-        Err(e) => {
-            return GenerationOutcome {
-                engine: current,
-                result: Err(EngineError::ConfigInvalid(e)),
-                recovery: None,
-                log,
-            }
-        }
-    };
-    let candidate_path = match write_effective(layout, &effective_json, generation) {
-        Ok(p) => p,
-        Err(e) => {
-            return GenerationOutcome {
-                engine: current,
-                result: Err(e),
-                recovery: None,
-                log,
-            }
-        }
-    };
-    if let Err(e) = run_check(&spec.binary, &candidate_path) {
-        // Only the candidate file is deleted; the current engine is not
-        // touched in any way (§9.4 step 1).
-        let _ = fs::remove_file(&candidate_path);
-        return GenerationOutcome {
-            engine: current,
-            result: Err(e),
-            recovery: None,
-            log,
-        };
-    }
-    log.push(format!(
-        "generation {generation}: candidate checked (ports {port_v4}/{port_v6})"
-    ));
-
-    // ---- step 2: keep the current leaf and generation file; publish the
-    // same-generation `active=0` leaf. No data plane yet: no-op by design.
-
-    // ---- step 3: terminate the old child. Its generation file is never
-    // renamed or overwritten, so step 6 can restart from it byte-identically.
-    let old = match current {
-        None => None,
-        Some(old_child) => {
-            let old_params = old_child.params;
-            let old_path = old_child.effective.clone();
-            match terminate(&old_child, TERMINATE_GRACE) {
-                Ok(exit) => {
-                    log.push(format!(
-                        "generation {}: old engine stopped ({exit})",
-                        old_params.generation
-                    ));
-                    Some((old_params, old_path))
-                }
-                Err(e) => {
-                    log.push(format!(
-                        "generation {}: old engine termination error: {e}; candidate not started",
-                        old_params.generation
-                    ));
-                    let _ = fs::remove_file(&candidate_path);
-                    return GenerationOutcome {
-                        // Keep ownership even when termination is uncertain.
-                        // Starting a candidate here would violate the one-engine invariant.
-                        engine: Some(old_child),
-                        result: Err(EngineError::Io(e)),
-                        recovery: None,
-                        log,
-                    };
-                }
-            }
-        }
-    };
-
-    // ---- step 4: clear fault_latch while inactive (no-op, Phase 4+); start
-    // the candidate; verify the four sockets by PID + inode.
-    let candidate_result = match spawn(spec, &candidate_path, params) {
-        Err(e) => Err(e),
-        Ok(mut child) => match wait_ready(&mut child, spec) {
-            Ok(()) => Ok(child),
-            Err(e @ EngineError::Exited { .. }) => Err(e),
-            Err(e) => match terminate(&child, TERMINATE_GRACE) {
-                Ok(exit) => {
-                    log.push(format!(
-                        "generation {generation}: unready candidate stopped ({exit})"
-                    ));
-                    Err(e)
-                }
-                Err(stop_error) => {
-                    log.push(format!(
-                        "generation {generation}: unready candidate could not be stopped: \
-                         {stop_error}; recovery suppressed"
-                    ));
-                    let _ = fs::remove_file(&candidate_path);
-                    return GenerationOutcome {
-                        engine: Some(child),
-                        result: Err(e),
-                        recovery: Some(Err(EngineError::Io(stop_error))),
-                        log,
-                    };
-                }
-            },
-        },
-    };
-
-    match candidate_result {
-        Ok(child) => {
-            // ---- step 5: freeze + publish active=1 and the single
-            // control_root pointer swap — THE commit point (no-op until the
-            // data plane exists). Afterwards the old generation file is
-            // deleted best-effort; a deletion failure is a control-plane
-            // error only and never rolls back the committed switch.
-            log.push(format!(
-                "generation {generation}: 4/4 sockets verified by pid+inode, promoted \
-                 (pid {}, starttime {})",
-                child.pid, child.start_time
-            ));
-            if let Some((old_params, old_path)) = old {
-                if let Err(e) = fs::remove_file(&old_path) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        log.push(format!(
-                            "generation {}: old file not deleted: {e} (not rolled back)",
-                            old_params.generation
-                        ));
-                    }
-                }
-            }
-            GenerationOutcome {
-                engine: Some(child),
-                result: Ok(()),
-                recovery: None,
-                log,
-            }
-        }
-        Err(candidate_err) => {
-            // ---- step 6: stop the failed candidate, restart the old
-            // generation from its untouched file, and re-verify its sockets.
-            log.push(format!(
-                "generation {generation}: candidate failed: {}",
-                candidate_err.token()
-            ));
-            let _ = fs::remove_file(&candidate_path);
-            let (engine, recovery) = match old {
-                None => (None, None),
-                Some((old_params, old_path)) => {
-                    let recovered = match spawn(spec, &old_path, old_params) {
-                        Err(e) => Err(e),
-                        Ok(mut child) => match wait_ready(&mut child, spec) {
-                            Ok(()) => Ok(child),
-                            Err(e @ EngineError::Exited { .. }) => Err(e),
-                            Err(e) => match terminate(&child, TERMINATE_GRACE) {
-                                Ok(exit) => {
-                                    log.push(format!(
-                                        "generation {}: unready recovery stopped ({exit})",
-                                        old_params.generation
-                                    ));
-                                    Err(e)
-                                }
-                                Err(stop_error) => {
-                                    log.push(format!(
-                                        "generation {}: unready recovery could not be stopped: \
-                                         {stop_error}",
-                                        old_params.generation
-                                    ));
-                                    return GenerationOutcome {
-                                        engine: Some(child),
-                                        result: Err(candidate_err),
-                                        recovery: Some(Err(EngineError::Io(stop_error))),
-                                        log,
-                                    };
-                                }
-                            },
-                        },
-                    };
-                    match recovered {
-                        Ok(child) => {
-                            log.push(format!(
-                                "generation {}: old generation recovered, 4/4 sockets verified",
-                                old_params.generation
-                            ));
-                            (Some(child), Some(Ok(())))
-                        }
-                        Err(e) => {
-                            log.push(format!(
-                                "generation {}: recovery failed: {}",
-                                old_params.generation,
-                                e.token()
-                            ));
-                            (None, Some(Err(e)))
-                        }
-                    }
-                }
-            };
-            GenerationOutcome {
-                engine,
-                result: Err(candidate_err),
-                recovery,
-                log,
-            }
-        }
-    }
 }
 
 /// Graceful stop outside a switch: publish `active=0` first (no-op until the

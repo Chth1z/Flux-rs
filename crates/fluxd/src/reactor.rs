@@ -1,5 +1,4 @@
-//! Single-threaded epoll reactor: the event loop, the state machine and
-//! convergence.
+//! Single-threaded epoll adapter over `flux_core::runtime::step`.
 //!
 //! Implements blueprint §10.1, §10.4 and §26: event
 //! sources are signalfd, inotify, the control socket, child pidfds, child
@@ -8,6 +7,8 @@
 //! ring buffer are included. **There is no
 //! periodic polling anywhere** — that is a hard product constraint, not a
 //! preference; both timers here are one-shot and armed only by an event.
+//! Domain FSMs live in `engine`, `control` and `subscription`. This file turns
+//! epoll into Stimulus and Effect.
 //!
 //! Phase 6 publishes `active=1` only after policy preparation, four verified
 //! engine sockets and positively verified ingress/egress TC attachment.
@@ -28,22 +29,24 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::checks;
+use crate::control::{ControlServer, PendingControl};
+use crate::engine::{
+    self, CheckDisposition, EngineChild, EngineError, EngineSpec, EngineTransaction, OldGeneration,
+    StopNext, SwitchPlan, WaitRole,
+};
+use crate::layout::{InstanceLock, Layout, LockError};
+use crate::logger::Logger;
+use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
 use flux_core::config::{FluxConfig, ListMode, NodeConfig};
 use flux_core::control_wire::{
     Counters, EngineStatus, Request, Response, RootManagerStatus, SsidStatus, State,
 };
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
+use flux_core::runtime::{project, DisplayKind, Effect, Generations, Observation, Phase, Stimulus};
 use flux_core::selector::PackageIndex;
 use flux_core::ssid::ssid_verdict;
-use flux_core::subscription::RemoteSource;
-
-use crate::checks;
-use crate::control::{ControlConn, ControlServer};
-use crate::engine::{self, EngineChild, EngineError, EngineSpec};
-use crate::layout::{InstanceLock, Layout, LockError};
-use crate::logger::Logger;
-use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
 /// updates produce event bursts; one convergence per burst is enough.
@@ -84,21 +87,6 @@ const CONTROL_CONVERGE_TIMEOUT: Duration = Duration::from_secs(20);
 const CONTROL_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_CONNECTIONS: usize = 32;
 
-#[derive(Debug)]
-struct OldGeneration {
-    params: engine_config::EngineParams,
-    effective: std::path::PathBuf,
-}
-
-#[derive(Debug)]
-struct SwitchPlan {
-    generation: u64,
-    params: engine_config::EngineParams,
-    candidate: std::path::PathBuf,
-    user: serde_json::Value,
-    old: Option<OldGeneration>,
-}
-
 #[derive(Debug, Clone)]
 struct PolicyCandidate {
     flux: FluxConfig,
@@ -117,98 +105,72 @@ struct SsidTransport {
     family: crate::netlink::Nl80211Family,
 }
 
-#[derive(Debug)]
-struct PendingSubscription {
-    raw: std::collections::BTreeMap<RemoteSource, Vec<u8>>,
-    /// The engine generation built from `raw`, once candidate validation has
-    /// begun. This keeps an unrelated transaction failure from discarding a
-    /// fetched response that merely arrived while that transaction was live.
-    generation: Option<u64>,
+struct Reactor {
+    layout: Layout,
+    spec: EngineSpec,
+    logger: Logger,
+    epoll: OwnedFd,
+    signal_fd: OwnedFd,
+    inotify_fd: OwnedFd,
+    module_wd: i32,
+    config_wd: i32,
+    packages_wd: Option<i32>,
+    debounce_timer: OwnedFd,
+    backoff_timer: OwnedFd,
+    control_timer: OwnedFd,
+    engine_timer: OwnedFd,
+    tc_verify_timer: OwnedFd,
+    subscription_timer: OwnedFd,
+    subscription_worker: crate::subscription::Worker,
+    server: ControlServer,
+    dataplane: crate::dataplane::Manager,
+    control_conns: BTreeMap<u64, PendingControl>,
+    next_control_token: u64,
+    engine: Option<EngineChild>,
+    engine_transaction: Option<EngineTransaction>,
+    /// A socket-ready child waiting for the Phase 6 TC/control commit point.
+    activation_role: Option<WaitRole>,
+    engine_cancel_requested: bool,
+    shutdown_requested: bool,
+    /// Buffered partial line of engine output between reads.
+    engine_line: Vec<u8>,
+    /// Sole owner of next + committed (§6.5). No third u64 participates in fault comparison.
+    generations: Generations,
+    last_error: Option<String>,
+    last_error_detail: Option<String>,
+    policy_error: Option<(String, Option<String>)>,
+    subscription_error: Option<(String, Option<String>)>,
+    subscription: crate::subscription::Coordinator,
+    crash_count: u32,
+    /// Deadline of the one-shot crash retry, exposed as `backoff_seconds`.
+    /// `None` means no crash retry is armed; this is never a health poll.
+    backoff_until: Option<Instant>,
+    reload_requested: bool,
+    policy_changed: bool,
+    engine_config_changed: bool,
+    topology_changed: bool,
+    wifi_changed: bool,
+    dataplane_error_active: bool,
+    config_warnings: Vec<String>,
+    source_warnings: Vec<String>,
+    current_policy: Option<PolicyCandidate>,
+    current_engine_user: Option<serde_json::Value>,
+    ssid_transport: Option<SsidTransport>,
+    ssid_setup_failure: Option<SsidPolicy>,
+    ssid_status: Option<SsidStatus>,
+    ssid_paused: bool,
+    policy_retry_available: bool,
+    /// `None` when the page size is the required 4096; otherwise the actual
+    /// size. sing-box and the BPF maps both assume 4 KiB pages (§25).
+    bad_page_size: Option<i64>,
+    /// Root manager identity supplied by the sole boot entry, `service.sh`.
+    root_manager: RootManagerStatus,
+    /// Last status line written to `module.prop`, so an unchanged state does
+    /// not rewrite the manager's file on every event.
+    module_prop_status: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CheckDisposition {
-    Normal,
-    TimedOut,
-    Cancelled,
-    SupervisionFailed,
-}
-
-#[derive(Debug)]
-enum WaitRole {
-    Candidate(SwitchPlan),
-    Recovery { candidate_error: EngineError },
-}
-
-#[derive(Debug)]
-enum StopNext {
-    StartCandidate(SwitchPlan),
-    Recover {
-        plan: SwitchPlan,
-        candidate_error: EngineError,
-    },
-    FinishRecoveryFailure {
-        candidate_error: EngineError,
-        recovery_error: EngineError,
-    },
-    Cancelled,
-}
-
-#[derive(Debug)]
-enum EngineTransaction {
-    Checking {
-        check: engine::EngineCheck,
-        plan: SwitchPlan,
-        deadline: Instant,
-        disposition: CheckDisposition,
-    },
-    Waiting {
-        child: EngineChild,
-        role: WaitRole,
-        deadline: Instant,
-        backoff: Duration,
-    },
-    Stopping {
-        child: EngineChild,
-        next: StopNext,
-        deadline: Instant,
-        kill_sent: bool,
-    },
-}
-
-enum PendingControl {
-    Reading {
-        conn: ControlConn,
-        deadline: Instant,
-    },
-    Writing {
-        conn: ControlConn,
-        response: Box<Response>,
-        deadline: Instant,
-        stop_after: bool,
-    },
-    Converging {
-        conn: ControlConn,
-        deadline: Instant,
-    },
-    Subscribing {
-        conn: ControlConn,
-        deadline: Instant,
-    },
-}
-
-impl PendingControl {
-    fn deadline(&self) -> Instant {
-        match self {
-            Self::Reading { deadline, .. }
-            | Self::Writing { deadline, .. }
-            | Self::Converging { deadline, .. }
-            | Self::Subscribing { deadline, .. } => *deadline,
-        }
-    }
-}
-
-/// Runs the daemon in the foreground. Returns the process exit code.
+/// Foreground daemon body. The supervisor re-execs into this function.
 pub fn run_daemon() -> u8 {
     let layout = Layout::product();
     let repairs = match layout.ensure() {
@@ -255,80 +217,6 @@ pub fn run_daemon() -> u8 {
             1
         }
     }
-}
-
-struct Reactor {
-    layout: Layout,
-    spec: EngineSpec,
-    logger: Logger,
-    epoll: OwnedFd,
-    signal_fd: OwnedFd,
-    inotify_fd: OwnedFd,
-    module_wd: i32,
-    config_wd: i32,
-    packages_wd: Option<i32>,
-    debounce_timer: OwnedFd,
-    backoff_timer: OwnedFd,
-    control_timer: OwnedFd,
-    engine_timer: OwnedFd,
-    tc_verify_timer: OwnedFd,
-    subscription_timer: OwnedFd,
-    subscription_worker: crate::subscription::Worker,
-    server: ControlServer,
-    dataplane: crate::dataplane::Manager,
-    control_conns: BTreeMap<u64, PendingControl>,
-    next_control_token: u64,
-    engine: Option<EngineChild>,
-    engine_transaction: Option<EngineTransaction>,
-    /// A socket-ready child waiting for the Phase 6 TC/control commit point.
-    activation_role: Option<WaitRole>,
-    engine_cancel_requested: bool,
-    shutdown_requested: bool,
-    /// Buffered partial line of engine output between reads.
-    engine_line: Vec<u8>,
-    /// Monotonic candidate counter (§6.5); the NEXT candidate gets +1.
-    generation_counter: u64,
-    /// The generation currently (or last) promoted, 0 before the first.
-    generation: u64,
-    last_error: Option<String>,
-    last_error_detail: Option<String>,
-    policy_error: Option<(String, Option<String>)>,
-    subscription_error: Option<(String, Option<String>)>,
-    subscription_retry_on_route: bool,
-    default_route_was_ready: bool,
-    route_recovery_epoch: u64,
-    subscription_fetch_route_epoch: u64,
-    subscription_schedule: Option<(Vec<RemoteSource>, u64)>,
-    pending_subscription: Option<PendingSubscription>,
-    subscription_fetch_queued: bool,
-    subscription_reconfigure_queued: bool,
-    crash_count: u32,
-    /// Deadline of the one-shot crash retry, exposed as `backoff_seconds`.
-    /// `None` means no crash retry is armed; this is never a health poll.
-    backoff_until: Option<Instant>,
-    reload_requested: bool,
-    policy_changed: bool,
-    engine_config_changed: bool,
-    topology_changed: bool,
-    wifi_changed: bool,
-    dataplane_error_active: bool,
-    config_warnings: Vec<String>,
-    source_warnings: Vec<String>,
-    current_policy: Option<PolicyCandidate>,
-    current_engine_user: Option<serde_json::Value>,
-    ssid_transport: Option<SsidTransport>,
-    ssid_setup_failure: Option<SsidPolicy>,
-    ssid_status: Option<SsidStatus>,
-    ssid_paused: bool,
-    policy_retry_available: bool,
-    /// `None` when the page size is the required 4096; otherwise the actual
-    /// size. sing-box and the BPF maps both assume 4 KiB pages (§25).
-    bad_page_size: Option<i64>,
-    /// Root manager identity supplied by the sole boot entry, `service.sh`.
-    root_manager: RootManagerStatus,
-    /// Last status line written to `module.prop`, so an unchanged state does
-    /// not rewrite the manager's file on every event.
-    module_prop_status: Option<String>,
 }
 
 impl Reactor {
@@ -426,20 +314,12 @@ impl Reactor {
             engine_cancel_requested: false,
             shutdown_requested: false,
             engine_line: Vec::new(),
-            generation_counter: 0,
-            generation: 0,
+            generations: Generations::new(),
             last_error: None,
             last_error_detail: None,
             policy_error: None,
             subscription_error: None,
-            subscription_retry_on_route: false,
-            default_route_was_ready: false,
-            route_recovery_epoch: 0,
-            subscription_fetch_route_epoch: 0,
-            subscription_schedule: None,
-            pending_subscription: None,
-            subscription_fetch_queued: false,
-            subscription_reconfigure_queued: false,
+            subscription: crate::subscription::Coordinator::default(),
             crash_count: 0,
             backoff_until: None,
             reload_requested: false,
@@ -504,6 +384,18 @@ impl Reactor {
                     TOK_INOTIFY => self.handle_inotify(),
                     TOK_DEBOUNCE => {
                         drain_timer(&self.debounce_timer);
+                        if self.wifi_changed && !self.topology_changed {
+                            self.note_stimulus(if self.ssid_paused {
+                                Stimulus::SsidPause
+                            } else {
+                                Stimulus::SsidResume
+                            });
+                        } else if self.topology_changed {
+                            // Capture-side drift must not freeze (§26 invariant 4).
+                            self.note_stimulus(Stimulus::CaptureSideDrift);
+                        } else {
+                            self.note_stimulus(Stimulus::DebounceExpired);
+                        }
                         let topology_changed = self.topology_changed;
                         self.converge("debounced filesystem/network change");
                         if topology_changed {
@@ -581,19 +473,29 @@ impl Reactor {
         self.module_prop_status = Some(status);
     }
 
-    /// The one-line status the manager shows. Built from committed in-memory
-    /// state only — no BPF or netlink read — because it runs on every wakeup.
-    fn module_prop_line(&self) -> String {
-        let dataplane = self.dataplane.status();
-        if self.layout.disabled() || self.shutdown_requested {
-            return if self.engine.is_some() || self.convergence_busy() {
-                "😴 [STOPPING] 正在停止".into()
-            } else {
-                "😴 [STOPPED] 已停止".into()
-            };
+    /// Reconstructs the §26 phase from committed facts after I/O.
+    fn observation(&self) -> Observation {
+        Observation {
+            disable_present: self.layout.disabled(),
+            shutdown: self.shutdown_requested,
+            ssid_paused: self.ssid_paused,
+            engine_present: self.engine.is_some(),
+            dataplane_active: self.dataplane.status().active,
+            awaiting_commit: self.activation_role.is_some(),
+            convergence_busy: self.convergence_busy(),
         }
-        let error = self
-            .policy_error
+    }
+
+    fn phase(&self) -> Phase {
+        let mut observation = self.observation();
+        if observation.shutdown {
+            observation.disable_present = true;
+        }
+        Phase::observe(observation)
+    }
+
+    fn status_error(&self) -> Option<&str> {
+        self.policy_error
             .as_ref()
             .map(|(token, _)| token.as_str())
             .or_else(|| {
@@ -601,42 +503,67 @@ impl Reactor {
                     .as_ref()
                     .map(|(token, _)| token.as_str())
             })
-            .or(self.last_error.as_deref());
-        if let Some(child) = self
-            .engine
-            .as_ref()
-            .filter(|_| dataplane.active && self.activation_role.is_none() && !self.ssid_paused)
-        {
-            let ifaces = dataplane
-                .ifaces
-                .iter()
-                .filter(|iface| iface.status == "active")
-                .map(|iface| iface.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let selection = self
-                .current_policy
-                .as_ref()
-                .map(|policy| {
-                    let (mode, list) = match policy.flux.apps_mode {
-                        ListMode::Whitelist => ("白名单", "选择清单"),
-                        ListMode::Blacklist => ("黑名单", "排除清单"),
-                    };
-                    format!("{mode} · {list} {} 项", policy.flux.apps.len())
-                })
-                .unwrap_or_default();
-            let mut line = format!("🥰 [RUNNING] PID: {} · {selection} · {ifaces}", child.pid);
-            if let Some(error) = error {
-                line.push_str(&format!(" · 上次更新: {error}"));
+            .or(self.last_error.as_deref())
+    }
+
+    fn committed_view(&self) -> flux_core::runtime::CommittedView {
+        let mut view = project(self.phase(), self.status_error());
+        // SIGTERM without the disable file has always been Inactive on the
+        // wire and STOPPED on module.prop; keep both (GOV-1.2).
+        if !self.layout.disabled() && view.state == State::Disabled {
+            view.state = State::Inactive;
+        }
+        view
+    }
+
+    fn note_stimulus(&mut self, stimulus: Stimulus) {
+        let stepped = flux_core::runtime::step(self.phase(), stimulus);
+        if stepped.effects.contains(&Effect::IgnoreUnexpected) {
+            self.logger.log(&format!(
+                "ignoring unexpected {stimulus:?} in {:?}",
+                self.phase()
+            ));
+        }
+    }
+
+    /// The one-line status the manager shows. Built from committed in-memory
+    /// state only — no BPF or netlink read — because it runs on every wakeup.
+    fn module_prop_line(&self) -> String {
+        let dataplane = self.dataplane.status();
+        let view = self.committed_view();
+        let error = self.status_error();
+        match view.display {
+            DisplayKind::Stopping => "😴 [STOPPING] 正在停止".into(),
+            DisplayKind::Stopped => "😴 [STOPPED] 已停止".into(),
+            DisplayKind::Paused => "😴 [PAUSED] 当前 Wi-Fi 已排除".into(),
+            DisplayKind::Failed => format!("🤯 [FAILED] {}", error.expect("Failed implies token")),
+            DisplayKind::Starting => "🤔 [STARTING] 正在启动".into(),
+            DisplayKind::Running => {
+                let child = self.engine.as_ref().expect("Running implies engine");
+                let ifaces = dataplane
+                    .ifaces
+                    .iter()
+                    .filter(|iface| iface.status == "active")
+                    .map(|iface| iface.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let selection = self
+                    .current_policy
+                    .as_ref()
+                    .map(|policy| {
+                        let (mode, list) = match policy.flux.apps_mode {
+                            ListMode::Whitelist => ("白名单", "选择清单"),
+                            ListMode::Blacklist => ("黑名单", "排除清单"),
+                        };
+                        format!("{mode} · {list} {} 项", policy.flux.apps.len())
+                    })
+                    .unwrap_or_default();
+                let mut line = format!("🥰 [RUNNING] PID: {} · {selection} · {ifaces}", child.pid);
+                if let Some(error) = error {
+                    line.push_str(&format!(" · 上次更新: {error}"));
+                }
+                line
             }
-            return line;
-        }
-        if self.ssid_paused {
-            return "😴 [PAUSED] 当前 Wi-Fi 已排除".into();
-        }
-        match error {
-            Some(error) => format!("🤯 [FAILED] {error}"),
-            None => "🤔 [STARTING] 正在启动".into(),
         }
     }
 
@@ -690,6 +617,7 @@ impl Reactor {
             match info.ssi_signo as i32 {
                 libc::SIGHUP => {
                     self.logger.log("SIGHUP: reload");
+                    self.note_stimulus(Stimulus::Sighup);
                     self.reload_requested = true;
                     self.policy_retry_available = true;
                     self.converge("SIGHUP");
@@ -938,7 +866,7 @@ impl Reactor {
         self.complete_waiting_controls(false, None);
         if !self.subscription_worker.is_busy()
             && !self.convergence_busy()
-            && (self.pending_subscription.is_none() || !self.overall_ok())
+            && (self.subscription.pending.is_none() || !self.overall_ok())
         {
             self.complete_waiting_controls(true, None);
         }
@@ -1389,15 +1317,14 @@ impl Reactor {
                         self.logger.log("ignoring malformed BPF fault record");
                         continue;
                     };
-                    let is_current = event.generation == self.generation
-                        && self.dataplane.status().active
-                        && self
-                            .engine
-                            .as_ref()
-                            .is_some_and(|child| child.params.generation == event.generation)
+                    let is_current = self.generations.fault_is_current(
+                        event.generation,
+                        self.engine.as_ref().map(|child| child.params.generation),
+                    ) && self.dataplane.status().active
                         && !self.layout.disabled()
                         && !self.shutdown_requested;
                     if !is_current {
+                        self.note_stimulus(Stimulus::StaleOrDuplicateFault);
                         if let Err(error) = self.dataplane.delete_fault_latch(&key) {
                             self.logger
                                 .log(&format!("cannot clear ignored BPF fault latch: {error}"));
@@ -1409,6 +1336,7 @@ impl Reactor {
                         continue;
                     }
 
+                    self.note_stimulus(Stimulus::CurrentGenerationFault);
                     // §7.4/§26: leaving Active starts with one inactive control
                     // publication. Stopping the supervised child then funnels
                     // through the normal enabled convergence path, which
@@ -1633,7 +1561,7 @@ impl Reactor {
             self.fail_phase6_activation("activation commit", error);
             return;
         };
-        self.generation = child.params.generation;
+        self.generations.commit(child.params.generation);
         match self.activation_role.take() {
             Some(WaitRole::Candidate(plan)) => {
                 if let Some(old) = plan.old {
@@ -1731,12 +1659,7 @@ impl Reactor {
             );
             self.rearm_control_timer();
             disarm_timer(&self.subscription_timer);
-            self.subscription_schedule = None;
-            self.subscription_retry_on_route = false;
-            self.default_route_was_ready = false;
-            self.pending_subscription = None;
-            self.subscription_fetch_queued = false;
-            self.subscription_reconfigure_queued = false;
+            self.subscription.reset_on_disable();
             self.deactivate_runtime();
             return;
         }
@@ -1993,11 +1916,12 @@ impl Reactor {
         if want_engine
             && candidate_user.is_none()
             && self
-                .pending_subscription
+                .subscription
+                .pending
                 .as_ref()
                 .is_some_and(|pending| pending.generation.is_none())
         {
-            self.pending_subscription = None;
+            self.subscription.pending = None;
         }
         if let Some(policy) = candidate_policy {
             match self.dataplane.apply_policy(&policy.desired) {
@@ -2031,7 +1955,7 @@ impl Reactor {
                 }
             }
         }
-        if self.subscription_schedule.is_none() && self.current_policy.is_some() {
+        if self.subscription.schedule.is_none() && self.current_policy.is_some() {
             self.configure_subscription(false);
         }
         self.topology_changed = false;
@@ -2073,7 +1997,7 @@ impl Reactor {
                     self.last_error_detail = None;
                 }
             } else {
-                self.pending_subscription = None;
+                self.subscription.pending = None;
             }
             if let Some(params) = self.engine.as_ref().map(|child| child.params) {
                 self.start_phase6_attachment(params);
@@ -2084,8 +2008,7 @@ impl Reactor {
             return;
         };
 
-        self.generation_counter += 1;
-        let generation = self.generation_counter;
+        let generation = self.generations.allocate();
         self.cancel_backoff();
         self.logger.log(&format!(
             "generation {generation}: transaction start ({reason})"
@@ -2114,7 +2037,7 @@ impl Reactor {
 
     fn start_generation_check(&mut self, user: serde_json::Value, generation: u64) {
         if let (Some(pending), Some(policy)) = (
-            self.pending_subscription.as_mut(),
+            self.subscription.pending.as_mut(),
             self.current_policy.as_ref(),
         ) {
             pending.raw.retain(|source, _| {
@@ -2555,7 +2478,7 @@ impl Reactor {
     }
 
     fn begin_candidate_failure(&mut self, mut plan: SwitchPlan, error: EngineError) {
-        self.discard_pending_subscription_generation(plan.generation);
+        self.subscription.discard_generation(plan.generation);
         self.logger.log(&format!(
             "generation {}: candidate failed: {}",
             plan.generation,
@@ -2665,7 +2588,7 @@ impl Reactor {
             StopNext::FinishRecoveryFailure { .. } | StopNext::Cancelled => None,
         };
         if let Some(generation) = failed_generation {
-            self.discard_pending_subscription_generation(generation);
+            self.subscription.discard_generation(generation);
         }
         match &next {
             StopNext::StartCandidate(plan) => {
@@ -2688,7 +2611,7 @@ impl Reactor {
             self.logger
                 .log(&format!("cannot restore engine supervision tags: {e}"));
         }
-        self.generation = child.params.generation;
+        self.generations.commit(child.params.generation);
         self.engine = Some(child);
         self.engine_transaction = None;
         self.engine_cancel_requested = false;
@@ -2785,11 +2708,12 @@ impl Reactor {
         recovery_error: Option<EngineError>,
     ) {
         if self
-            .pending_subscription
+            .subscription
+            .pending
             .as_ref()
             .is_some_and(|pending| pending.generation.is_some())
         {
-            self.pending_subscription = None;
+            self.subscription.pending = None;
         }
         self.engine_transaction = None;
         disarm_timer(&self.engine_timer);
@@ -2867,19 +2791,20 @@ impl Reactor {
             ));
         }
         if self
-            .pending_subscription
+            .subscription
+            .pending
             .as_ref()
             .is_some_and(|pending| pending.generation.is_some())
         {
-            self.subscription_fetch_queued = true;
+            self.subscription.fetch_queued = true;
             return Ok(());
         }
         if self.subscription_worker.is_busy() {
             return Ok(());
         }
-        self.pending_subscription = None;
+        self.subscription.pending = None;
         self.refresh_default_route_observation("subscription fetch start");
-        self.subscription_fetch_route_epoch = self.route_recovery_epoch;
+        self.subscription.fetch_route_epoch = self.subscription.route_recovery_epoch;
         let request = crate::subscription::FetchRequest {
             sources: config.remote_sources().cloned().collect(),
             policy: config.fetch.clone(),
@@ -2914,7 +2839,7 @@ impl Reactor {
         let config = &flux.nodes;
         self.ensure_subscription_schedule(config);
         if self.layout.disabled() || config.remote_sources().next().is_none() {
-            self.pending_subscription = None;
+            self.subscription.pending = None;
             self.complete_waiting_controls(
                 true,
                 Some((
@@ -2926,11 +2851,12 @@ impl Reactor {
             return;
         }
         if self
-            .pending_subscription
+            .subscription
+            .pending
             .as_ref()
             .is_some_and(|pending| pending.generation.is_some())
         {
-            self.subscription_fetch_queued = true;
+            self.subscription.fetch_queued = true;
             self.rearm_subscription_timer();
             return;
         }
@@ -2943,7 +2869,7 @@ impl Reactor {
             .iter()
             .map(|(source, _)| source.clone())
             .collect();
-        self.subscription_fetch_queued |= config
+        self.subscription.fetch_queued |= config
             .remote_sources()
             .any(|source| !requested.contains(source));
         for (source, result) in completed.sources {
@@ -2972,12 +2898,12 @@ impl Reactor {
                 }
             }
         }
-        self.subscription_retry_on_route = transport_failed;
+        self.subscription.retry_on_route = transport_failed;
         if transport_failed {
             self.refresh_default_route_observation("subscription fetch failure");
-            if self.route_recovery_epoch != self.subscription_fetch_route_epoch {
-                self.subscription_retry_on_route = false;
-                self.subscription_fetch_queued = true;
+            if self.subscription.route_recovery_epoch != self.subscription.fetch_route_epoch {
+                self.subscription.retry_on_route = false;
+                self.subscription.fetch_queued = true;
             }
         }
         self.rearm_subscription_timer();
@@ -2996,12 +2922,12 @@ impl Reactor {
             self.clear_subscription_error();
         }
         if raw.is_empty() {
-            self.pending_subscription = None;
+            self.subscription.pending = None;
             self.resume_queued_subscription_work();
             self.complete_convergence_controls();
             return;
         }
-        self.pending_subscription = Some(PendingSubscription {
+        self.subscription.pending = Some(crate::subscription::Pending {
             raw,
             generation: None,
         });
@@ -3024,11 +2950,12 @@ impl Reactor {
         };
         if sources_changed
             && self
-                .pending_subscription
+                .subscription
+                .pending
                 .as_ref()
                 .is_some_and(|pending| pending.generation.is_some())
         {
-            self.subscription_reconfigure_queued = true;
+            self.subscription.reconfigure_queued = true;
             return;
         }
         self.ensure_subscription_schedule(&config);
@@ -3036,10 +2963,10 @@ impl Reactor {
             self.logger.log(&format!("source cache cleanup: {error}"));
         }
         if config.remote_sources().next().is_none() {
-            self.subscription_retry_on_route = false;
-            self.pending_subscription = None;
-            self.subscription_fetch_queued = false;
-            self.subscription_reconfigure_queued = false;
+            self.subscription.retry_on_route = false;
+            self.subscription.pending = None;
+            self.subscription.fetch_queued = false;
+            self.subscription.reconfigure_queued = false;
             self.clear_subscription_error();
             self.complete_waiting_controls(
                 true,
@@ -3055,25 +2982,27 @@ impl Reactor {
     fn ensure_subscription_schedule(&mut self, config: &NodeConfig) {
         let sources: Vec<_> = config.remote_sources().cloned().collect();
         if sources.is_empty() {
-            self.subscription_schedule = None;
+            self.subscription.schedule = None;
             disarm_timer(&self.subscription_timer);
             return;
         }
         let introduced_source = sources.iter().any(|source| {
-            self.subscription_schedule
+            self.subscription
+                .schedule
                 .as_ref()
                 .is_none_or(|(previous, _)| !previous.contains(source))
         });
         let schedule = (sources, config.fetch.interval);
-        if self.subscription_schedule.as_ref() != Some(&schedule) {
-            self.subscription_schedule = Some(schedule);
+        if self.subscription.schedule.as_ref() != Some(&schedule) {
+            self.subscription.schedule = Some(schedule);
             self.rearm_subscription_timer();
         }
         if introduced_source {
             let snapshots = crate::subscription::source_snapshots(
                 &self.layout,
                 config,
-                self.pending_subscription
+                self.subscription
+                    .pending
                     .as_ref()
                     .map(|pending| &pending.raw),
             );
@@ -3091,7 +3020,7 @@ impl Reactor {
         // This is the schedule derived from the latest valid configuration.
         // Re-reading current_policy here can see its predecessor while the
         // configuration transaction is still applying an interval change.
-        let Some((url, interval)) = self.subscription_schedule.as_ref() else {
+        let Some((url, interval)) = self.subscription.schedule.as_ref() else {
             disarm_timer(&self.subscription_timer);
             return;
         };
@@ -3121,12 +3050,14 @@ impl Reactor {
     }
 
     fn maybe_retry_subscription_on_route(&mut self) {
-        let recovery_epoch = self.route_recovery_epoch;
+        let recovery_epoch = self.subscription.route_recovery_epoch;
         self.refresh_default_route_observation("subscription route recovery");
-        if !self.subscription_retry_on_route || self.route_recovery_epoch == recovery_epoch {
+        if !self.subscription.retry_on_route
+            || self.subscription.route_recovery_epoch == recovery_epoch
+        {
             return;
         }
-        self.subscription_retry_on_route = false;
+        self.subscription.retry_on_route = false;
         self.start_scheduled_subscription_fetch("default route recovered");
     }
 
@@ -3140,25 +3071,26 @@ impl Reactor {
                 return;
             }
         };
-        if !self.default_route_was_ready && route_ready {
-            self.route_recovery_epoch = self.route_recovery_epoch.wrapping_add(1);
+        if !self.subscription.default_route_was_ready && route_ready {
+            self.subscription.route_recovery_epoch =
+                self.subscription.route_recovery_epoch.wrapping_add(1);
         }
-        self.default_route_was_ready = route_ready;
+        self.subscription.default_route_was_ready = route_ready;
     }
 
     fn resume_queued_subscription_work(&mut self) {
         if self.convergence_busy() {
             return;
         }
-        if self.subscription_reconfigure_queued {
-            self.subscription_reconfigure_queued = false;
-            self.subscription_fetch_queued = false;
+        if self.subscription.reconfigure_queued {
+            self.subscription.reconfigure_queued = false;
+            self.subscription.fetch_queued = false;
             self.engine_config_changed = true;
             self.configure_subscription(true);
             return;
         }
-        if self.subscription_fetch_queued {
-            self.subscription_fetch_queued = false;
+        if self.subscription.fetch_queued {
+            self.subscription.fetch_queued = false;
             if let Err((token, detail)) =
                 self.start_subscription_fetch("queued subscription refresh")
             {
@@ -3168,17 +3100,9 @@ impl Reactor {
     }
 
     fn commit_pending_subscription(&mut self, generation: Option<u64>) -> bool {
-        if !self
-            .pending_subscription
-            .as_ref()
-            .is_some_and(|pending| pending.generation == generation)
-        {
+        let Some(pending) = self.subscription.take_pending_if_generation(generation) else {
             return true;
-        }
-        let pending = self
-            .pending_subscription
-            .take()
-            .expect("matched pending batch");
+        };
         let Some(policy) = self.current_policy.as_ref() else {
             return true;
         };
@@ -3216,16 +3140,6 @@ impl Reactor {
                 Some(failures.join("; ")),
             );
             false
-        }
-    }
-
-    fn discard_pending_subscription_generation(&mut self, generation: u64) {
-        if self
-            .pending_subscription
-            .as_ref()
-            .is_some_and(|pending| pending.generation == Some(generation))
-        {
-            self.pending_subscription = None;
         }
     }
 
@@ -3376,7 +3290,8 @@ impl Reactor {
         let snapshots = crate::subscription::source_snapshots(
             &self.layout,
             &flux.nodes,
-            self.pending_subscription
+            self.subscription
+                .pending
                 .as_ref()
                 .map(|pending| &pending.raw),
         );
@@ -3528,33 +3443,26 @@ impl Reactor {
     /// Builds the §24.1 status response from committed runtime state.
     fn build_status(&self, ok: bool) -> Response {
         let disabled = self.layout.disabled();
-        let state = if disabled && self.engine.is_none() && !self.convergence_busy() {
-            State::Disabled
-        } else if !self.ssid_paused
-            && self.dataplane.status().active
-            && self.engine.is_some()
-            && self.activation_role.is_none()
-        {
-            State::Active
-        } else {
-            State::Inactive
-        };
+        let view = self.committed_view();
+        let state = view.state;
         // Only a promoted generation is reported as running. A candidate may
         // already have a pid and some sockets, but exposing it here would let
         // clients mistake partial readiness for the commit point.
-        let engine_status = match (&self.engine, &self.activation_role) {
-            (Some(child), None) => EngineStatus {
+        let engine_status = if view.engine_running {
+            let child = self.engine.as_ref().expect("engine_running implies child");
+            EngineStatus {
                 running: true,
                 pid: Some(child.pid as u32),
                 sockets_verified: child.sockets_verified,
                 effective_config: Some(child.effective.display().to_string()),
-            },
-            _ => EngineStatus {
+            }
+        } else {
+            EngineStatus {
                 running: false,
                 pid: None,
                 sockets_verified: 0,
                 effective_config: None,
-            },
+            }
         };
 
         let mut warnings = Vec::new();
@@ -3637,7 +3545,7 @@ impl Reactor {
             version: flux_core::VERSION.to_string(),
             abi_magic: format!("{:#010X}", flux_core::abi::FLUX_ABI_MAGIC),
             state,
-            generation: self.generation,
+            generation: self.generations.committed(),
             backoff_seconds: self.backoff_seconds(),
             root_manager: self.root_manager.clone(),
             engine: engine_status,

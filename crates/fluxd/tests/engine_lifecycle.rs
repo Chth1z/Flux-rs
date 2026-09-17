@@ -57,11 +57,252 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod tests {
+    use std::fs;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::{Duration, Instant};
 
-    use crate::engine::{self, EngineChild, EngineError, EngineSpec};
+    use crate::engine::{self, EngineChild, EngineError, EngineSpec, Readiness};
     use crate::layout::Layout;
     use crate::netlink::sock_diag::{find_inode, pid_owns_inode, SocketExpectation};
+    use flux_core::engine_config::{build_effective, EngineParams};
+
+    struct GenerationOutcome {
+        engine: Option<EngineChild>,
+        result: Result<(), EngineError>,
+        recovery: Option<Result<(), EngineError>>,
+        log: Vec<String>,
+    }
+
+    /// Test-local wait on the same `probe_ready` the reactor drives from timerfd.
+    fn wait_sockets(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), EngineError> {
+        let deadline = Instant::now() + engine::READY_DEADLINE;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            match engine::probe_ready(child, spec)? {
+                Readiness::Ready => return Ok(()),
+                Readiness::Pending { verified } => {
+                    if Instant::now() + backoff > deadline {
+                        return Err(EngineError::NotReady { verified });
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_millis(250));
+                }
+            }
+        }
+    }
+
+    /// Drives spawn / probe_ready / terminate — the event-driven primitives —
+    /// rather than a sleeping product bypass in engine.rs.
+    fn generation_switch(
+        layout: &Layout,
+        spec: &EngineSpec,
+        user: &serde_json::Value,
+        current: Option<EngineChild>,
+        generation: u64,
+    ) -> GenerationOutcome {
+        let mut log = Vec::new();
+        let (port_v4, port_v6) = match engine::draw_ports() {
+            Ok(ports) => ports,
+            Err(e) => {
+                return GenerationOutcome {
+                    engine: current,
+                    result: Err(EngineError::Io(e)),
+                    recovery: None,
+                    log,
+                }
+            }
+        };
+        let params = EngineParams {
+            generation,
+            port_v4,
+            port_v6,
+        };
+        let effective_json = match build_effective(user, &params) {
+            Ok(v) => v,
+            Err(e) => {
+                return GenerationOutcome {
+                    engine: current,
+                    result: Err(EngineError::ConfigInvalid(e)),
+                    recovery: None,
+                    log,
+                }
+            }
+        };
+        let candidate_path = match engine::write_effective(layout, &effective_json, generation) {
+            Ok(p) => p,
+            Err(e) => {
+                return GenerationOutcome {
+                    engine: current,
+                    result: Err(e),
+                    recovery: None,
+                    log,
+                }
+            }
+        };
+        if let Err(e) = engine::run_check(&spec.binary, &candidate_path) {
+            let _ = fs::remove_file(&candidate_path);
+            return GenerationOutcome {
+                engine: current,
+                result: Err(e),
+                recovery: None,
+                log,
+            };
+        }
+        log.push(format!(
+            "generation {generation}: candidate checked (ports {port_v4}/{port_v6})"
+        ));
+
+        let old = match current {
+            None => None,
+            Some(old_child) => {
+                let old_params = old_child.params;
+                let old_path = old_child.effective.clone();
+                match engine::terminate(&old_child, engine::TERMINATE_GRACE) {
+                    Ok(exit) => {
+                        log.push(format!(
+                            "generation {}: old engine stopped ({exit})",
+                            old_params.generation
+                        ));
+                        Some((old_params, old_path))
+                    }
+                    Err(e) => {
+                        log.push(format!(
+                            "generation {}: old engine termination error: {e}; candidate not started",
+                            old_params.generation
+                        ));
+                        let _ = fs::remove_file(&candidate_path);
+                        return GenerationOutcome {
+                            engine: Some(old_child),
+                            result: Err(EngineError::Io(e)),
+                            recovery: None,
+                            log,
+                        };
+                    }
+                }
+            }
+        };
+
+        let candidate_result = match engine::spawn(spec, &candidate_path, params) {
+            Err(e) => Err(e),
+            Ok(mut child) => match wait_sockets(&mut child, spec) {
+                Ok(()) => Ok(child),
+                Err(e @ EngineError::Exited { .. }) => Err(e),
+                Err(e) => match engine::terminate(&child, engine::TERMINATE_GRACE) {
+                    Ok(exit) => {
+                        log.push(format!(
+                            "generation {generation}: unready candidate stopped ({exit})"
+                        ));
+                        Err(e)
+                    }
+                    Err(stop_error) => {
+                        log.push(format!(
+                            "generation {generation}: unready candidate could not be stopped: \
+                             {stop_error}; recovery suppressed"
+                        ));
+                        let _ = fs::remove_file(&candidate_path);
+                        return GenerationOutcome {
+                            engine: Some(child),
+                            result: Err(e),
+                            recovery: Some(Err(EngineError::Io(stop_error))),
+                            log,
+                        };
+                    }
+                },
+            },
+        };
+
+        match candidate_result {
+            Ok(child) => {
+                log.push(format!(
+                    "generation {generation}: 4/4 sockets verified by pid+inode, promoted \
+                     (pid {}, starttime {})",
+                    child.pid, child.start_time
+                ));
+                if let Some((old_params, old_path)) = old {
+                    if let Err(e) = fs::remove_file(&old_path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            log.push(format!(
+                                "generation {}: old file not deleted: {e} (not rolled back)",
+                                old_params.generation
+                            ));
+                        }
+                    }
+                }
+                GenerationOutcome {
+                    engine: Some(child),
+                    result: Ok(()),
+                    recovery: None,
+                    log,
+                }
+            }
+            Err(candidate_err) => {
+                log.push(format!(
+                    "generation {generation}: candidate failed: {}",
+                    candidate_err.token()
+                ));
+                let _ = fs::remove_file(&candidate_path);
+                let (engine, recovery) = match old {
+                    None => (None, None),
+                    Some((old_params, old_path)) => {
+                        let recovered = match engine::spawn(spec, &old_path, old_params) {
+                            Err(e) => Err(e),
+                            Ok(mut child) => match wait_sockets(&mut child, spec) {
+                                Ok(()) => Ok(child),
+                                Err(e @ EngineError::Exited { .. }) => Err(e),
+                                Err(e) => {
+                                    match engine::terminate(&child, engine::TERMINATE_GRACE) {
+                                        Ok(exit) => {
+                                            log.push(format!(
+                                                "generation {}: unready recovery stopped ({exit})",
+                                                old_params.generation
+                                            ));
+                                            Err(e)
+                                        }
+                                        Err(stop_error) => {
+                                            log.push(format!(
+                                            "generation {}: unready recovery could not be stopped: \
+                                             {stop_error}",
+                                            old_params.generation
+                                        ));
+                                            return GenerationOutcome {
+                                                engine: Some(child),
+                                                result: Err(candidate_err),
+                                                recovery: Some(Err(EngineError::Io(stop_error))),
+                                                log,
+                                            };
+                                        }
+                                    }
+                                }
+                            },
+                        };
+                        match recovered {
+                            Ok(child) => {
+                                log.push(format!(
+                                    "generation {}: old generation recovered, 4/4 sockets verified",
+                                    old_params.generation
+                                ));
+                                (Some(child), Some(Ok(())))
+                            }
+                            Err(e) => {
+                                log.push(format!(
+                                    "generation {}: recovery failed: {}",
+                                    old_params.generation,
+                                    e.token()
+                                ));
+                                (None, Some(Err(e)))
+                            }
+                        }
+                    }
+                };
+                GenerationOutcome {
+                    engine,
+                    result: Err(candidate_err),
+                    recovery,
+                    log,
+                }
+            }
+        }
+    }
 
     pub fn run_all() {
         if !udp_diag_supported() {
@@ -152,7 +393,7 @@ mod tests {
         spec: &EngineSpec,
         user: &serde_json::Value,
     ) -> EngineChild {
-        let outcome = engine::run_generation_switch(layout, spec, user, None, 1);
+        let outcome = generation_switch(layout, spec, user, None, 1);
         for line in &outcome.log {
             println!("  cold start: {line}");
         }
@@ -193,7 +434,7 @@ mod tests {
     ) -> EngineChild {
         let old_pid = old.pid;
         let old_path = old.effective.clone();
-        let outcome = engine::run_generation_switch(layout, spec, user, Some(old), 2);
+        let outcome = generation_switch(layout, spec, user, Some(old), 2);
         for line in &outcome.log {
             println!("  hot switch: {line}");
         }
@@ -227,7 +468,7 @@ mod tests {
         let flag = layout.root().join("fail-once.flag");
         std::fs::write(&flag, b"1").expect("flag");
         std::env::set_var("FLUX_FAKE_FAIL_ONCE", &flag);
-        let outcome = engine::run_generation_switch(layout, spec, user, Some(old), 3);
+        let outcome = generation_switch(layout, spec, user, Some(old), 3);
         std::env::remove_var("FLUX_FAKE_FAIL_ONCE");
         for line in &outcome.log {
             println!("  recovery: {line}");
@@ -276,7 +517,7 @@ mod tests {
         user: &serde_json::Value,
     ) {
         std::env::set_var("FLUX_FAKE_CRASH", "1");
-        let outcome = engine::run_generation_switch(layout, spec, user, None, 4);
+        let outcome = generation_switch(layout, spec, user, None, 4);
         std::env::remove_var("FLUX_FAKE_CRASH");
         let err = outcome.result.expect_err("crashing engine must fail");
         assert_eq!(err.token(), "engine_exited:code=7");
@@ -301,7 +542,7 @@ mod tests {
         let pid_file = layout.root().join("never-ready.pid");
         std::env::set_var("FLUX_FAKE_NOT_READY", "1");
         std::env::set_var("FLUX_FAKE_PID_FILE", &pid_file);
-        let outcome = engine::run_generation_switch(layout, spec, user, None, 5);
+        let outcome = generation_switch(layout, spec, user, None, 5);
         std::env::remove_var("FLUX_FAKE_NOT_READY");
         std::env::remove_var("FLUX_FAKE_PID_FILE");
 

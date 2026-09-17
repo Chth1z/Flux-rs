@@ -2,7 +2,7 @@
 //!
 //! This module coordinates typed rtnetlink operations. It does not construct
 //! raw messages; the platform manager owns the BPF runtime and attachment
-//! lifecycle. See blueprint §7-§8 and implementation plan §17.6-§17.9.
+//! lifecycle (`attachment.rs` is the clsact/TCX insert point, §12.5.1).
 
 #![cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 

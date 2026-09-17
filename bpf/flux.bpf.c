@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Flux-rs 0.9.0 — the entire data plane.
+// Flux-rs data plane. Object identity is flux_object_abi_magic / FLUX_ABI_MAGIC.
 //
 // Build:
 //   clang -target bpf -O2 -g -Wall -Wextra -Werror -mcpu=v3 \
 //         -D__TARGET_ARCH_arm64 \
-//         -Ibpf/include \
+//         -Ibpf/include -I$OUT_DIR \
 //         -c bpf/flux.bpf.c -o $OUT_DIR/flux.bpf.o
 //
 // Dependencies: only the system HEADER-ONLY libbpf macros/helper prototypes
 // (bpf_helpers.h, bpf_helper_defs.h, bpf_endian.h) plus Linux UAPI. No libbpf
-// library, no libelf, no zlib, no vmlinux.h, no CO-RE relocations. The map
-// declarations below are documentation: crates/fluxd/src/bpf/maps.rs owns the
-// authoritative parameters and binds relocations by symbol name.
+// library, no libelf, no zlib, no vmlinux.h, no CO-RE relocations. Map
+// placeholders are generated from MAP_SPECS (crates/fluxd/src/bpf/map_table.rs)
+// into $OUT_DIR/flux_maps.generated.h; clang still emits ELF relocs by name.
 //
 // Contract reminders that the implementer MUST NOT relax:
 //   * egress "not taking over" is ALWAYS TC_ACT_UNSPEC, never TC_ACT_OK and
@@ -100,105 +100,10 @@ const __u32 flux_object_abi_magic SEC("flux_abi") = FLUX_ABI_MAGIC;
 #endif
 
 // ---------------------------------------------------------------------- maps
+// Placeholders generated from MAP_SPECS. control_leaf stays a named type (not
+// a SEC object) so control_root's inner map has a sized value, not a BTF FWD.
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLUX_UID_POLICY_MAX_ENTRIES);
-	__type(key, __u32);
-	__type(value, __u8);
-} uid_policy SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, FLUX_LPM_MAX_ENTRIES);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, struct flux_lpm_v4_key);
-	__type(value, __u8);
-} bypass_v4 SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, FLUX_LPM_MAX_ENTRIES);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, struct flux_lpm_v6_key);
-	__type(value, __u8);
-} bypass_v6 SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLUX_SELF_ADDR_MAX_ENTRIES);
-	__type(key, __u32);
-	__type(value, __u8);
-} self_addr_v4 SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLUX_SELF_ADDR_MAX_ENTRIES);
-	__type(key, __u8[16]);
-	__type(value, __u8);
-} self_addr_v6 SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, FLUX_UID_STATS_MAX_ENTRIES);
-	__type(key, __u32);
-	__type(value, struct flux_uid_stats);
-} uid_stats SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
-	__uint(max_entries, 0);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct flux_decision);
-} tcp_decision SEC(".maps");
-
-// The value size is spelled out rather than given as __type(value,
-// struct flux_control), and that is not a style choice. The program only ever
-// touches a flux_control through a pointer, so clang prunes it to a BTF forward
-// declaration -- confirmed on this object as "[95] FWD 'flux_control'". libbpf
-// parses this struct as the inner-map definition of control_root and cannot
-// size a FWD, so it refuses the whole object with:
-//
-//   map 'control_root.inner': can't determine value size for type [95]: -22
-//
-// which costs the project the ability to run `bpftool prog loadall` as a
-// verifier smoke test. The alternatives all add something unwanted: an
-// instantiated inner map the loader would have to ignore, or a dummy global
-// that turns into a .rodata/.bss map. An explicit size adds nothing, and
-// sizeof() still fails the build if the layout ever changes underneath it.
-struct control_leaf {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(struct flux_control));
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__array(values, struct control_leaf);
-} control_root SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLUX_FAULT_LATCH_MAX_ENTRIES);
-	__type(key, struct flux_fault_key);
-	__type(value, __u8);
-} fault_latch SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, FLUX_FAULT_RINGBUF_BYTES);
-} fault_events SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, FLUX_COUNTER_SLOTS);
-	__type(key, __u32);
-	__type(value, __u64);
-} counters SEC(".maps");
+#include "flux_maps.generated.h"
 
 // ------------------------------------------------------------------ helpers
 
@@ -601,6 +506,7 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 	if (d) {
 		if (d->magic != FLUX_DECISION_MAGIC || d->reserved[0] ||
 		    d->reserved[1] || d->reserved[2]) {
+			// reserved/mode damage, not a third business state.
 			cnt(FLUX_CNT_DROP_CORRUPT);
 			return TC_ACT_SHOT;
 		}
@@ -666,6 +572,9 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 		// collapse this into `cand.generation = capture ? c->generation
 		// : 0` -- the verifier cannot correlate the flag with the
 		// pointer and will reject the load.
+		// CREATE closes the decision. DIRECT ⇒ generation == 0;
+		// CAPTURED ⇒ generation == the committed snapshot. A later
+		// packet never rewrites either field.
 		struct flux_decision cand = {};
 		cand.magic = FLUX_DECISION_MAGIC;
 		cand.mode = FLUX_DEC_DIRECT;
@@ -776,6 +685,64 @@ int flx_cap_l3(struct __sk_buff *skb)
 	return cap_core(skb, 1);
 }
 
+// I1b: established TCP and fragments skip pull_headers + parse_pkt. Only a
+// bare SYN or UDP needs bpf_sk_assign, which still takes the slow path.
+// Returns the TC action, or -1 to continue. Never assigns here.
+static __always_inline int ingress_fast_path(struct __sk_buff *skb)
+{
+	void *data = (void *)(long)skb->data;
+	void *end = (void *)(long)skb->data_end;
+	struct ethhdr *eth = data;
+	if ((void *)(eth + 1) > end)
+		return -1;
+
+	if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+		struct iphdr *ip = (void *)(eth + 1);
+		if ((void *)(ip + 1) > end)
+			return -1;
+		if (ip->version != 4)
+			return -1;
+		__u16 frag = bpf_ntohs(ip->frag_off);
+		if ((frag & 0x1fff) != 0 || (frag & 0x2000) != 0) {
+			cnt(FLUX_CNT_IN_PASS_FRAGMENT);
+			return TC_ACT_OK;
+		}
+		// Options (ihl != 5) and non-TCP fall through so parse_pkt
+		// remains the single bounded decoder for assign.
+		if (ip->protocol != IPPROTO_TCP || ip->ihl != 5)
+			return -1;
+		struct tcphdr *th = (void *)(ip + 1);
+		if ((void *)(th + 1) > end)
+			return -1;
+		if (th->syn && !th->ack)
+			return -1;
+		cnt(FLUX_CNT_IN_PASS_ESTABLISHED);
+		return TC_ACT_OK;
+	}
+
+	if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
+		struct ipv6hdr *ip6 = (void *)(eth + 1);
+		if ((void *)(ip6 + 1) > end)
+			return -1;
+		if (ip6->version != 6)
+			return -1;
+		if (ip6->nexthdr == IPPROTO_FRAGMENT) {
+			cnt(FLUX_CNT_IN_PASS_FRAGMENT);
+			return TC_ACT_OK;
+		}
+		if (ip6->nexthdr != IPPROTO_TCP)
+			return -1;
+		struct tcphdr *th = (void *)(ip6 + 1);
+		if ((void *)(th + 1) > end)
+			return -1;
+		if (th->syn && !th->ack)
+			return -1;
+		cnt(FLUX_CNT_IN_PASS_ESTABLISHED);
+		return TC_ACT_OK;
+	}
+	return -1;
+}
+
 // Ingress on flxrs1. Only Flux redirects into this device, which is the
 // provenance boundary; no token, magic number or skb metadata is needed.
 //
@@ -814,6 +781,10 @@ int flx_in(struct __sk_buff *skb)
 		cnt(FLUX_CNT_IN_DROP_PARSE);
 		return TC_ACT_SHOT;
 	}
+
+	int fast = ingress_fast_path(skb);
+	if (fast >= 0)
+		return fast;
 
 	if (pull_headers(skb) < 0) {
 		cnt(FLUX_CNT_IN_DROP_PARSE);

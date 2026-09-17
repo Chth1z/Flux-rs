@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * Flux-rs 0.9.0 — data-plane ABI.
+ * Flux-rs data-plane ABI. Identity is FLUX_ABI_MAGIC below, not SemVer.
  *
  * This header is the ONLY source of truth for every byte exchanged between
  * bpf/flux.bpf.c and crates/fluxd. crates/flux-core/src/abi.rs mirrors it by

@@ -3,8 +3,8 @@
 //! The worker owns no daemon state. It reads Android's certificate stores,
 //! performs one bounded ureq transaction (including configured retries), sends
 //! the result through an in-process channel, and wakes epoll through eventfd.
-//! The reactor remains the only place that parses, caches, or applies a result
-//! (blueprint §28.3–§28.7).
+//! The coordinator owns schedule, pending batch and epoch state. The reactor
+//! is notified when a candidate should open (blueprint §28.3–§28.7).
 
 use std::fs;
 use std::io;
@@ -147,6 +147,61 @@ pub struct FetchError {
 #[derive(Debug)]
 pub struct FetchResult {
     pub sources: Vec<(RemoteSource, Result<Vec<u8>, FetchError>)>,
+}
+
+/// Accepted remote bytes waiting for the engine transaction that used them.
+#[derive(Debug)]
+pub struct Pending {
+    pub raw: BTreeMap<RemoteSource, Vec<u8>>,
+    /// Engine generation that began validating this batch, if any.
+    pub generation: Option<u64>,
+}
+
+/// Schedule, pending batch and route-recovery epochs. The reactor does not
+/// keep a second copy of these fields.
+#[derive(Debug, Default)]
+pub struct Coordinator {
+    pub schedule: Option<(Vec<RemoteSource>, u64)>,
+    pub pending: Option<Pending>,
+    pub fetch_queued: bool,
+    pub reconfigure_queued: bool,
+    pub retry_on_route: bool,
+    pub default_route_was_ready: bool,
+    pub route_recovery_epoch: u64,
+    pub fetch_route_epoch: u64,
+}
+
+impl Coordinator {
+    pub fn reset_on_disable(&mut self) {
+        self.schedule = None;
+        self.retry_on_route = false;
+        self.default_route_was_ready = false;
+        self.pending = None;
+        self.fetch_queued = false;
+        self.reconfigure_queued = false;
+    }
+
+    pub fn discard_generation(&mut self, generation: u64) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.generation == Some(generation))
+        {
+            self.pending = None;
+        }
+    }
+
+    pub fn take_pending_if_generation(&mut self, generation: Option<u64>) -> Option<Pending> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.generation == generation)
+        {
+            self.pending.take()
+        } else {
+            None
+        }
+    }
 }
 
 /// At most one blocking fetch in flight, with eventfd completion notification.

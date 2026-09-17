@@ -725,3 +725,19 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 - 依赖许可证清单包含本次批准的 `toml_edit`；未将本地 Cargo.lock 提交到仓库。当前主机没有 `cargo-deny`，本轮未运行它，供应链 CI 结果仍待补齐。
 
 最终 RC 的 Android all-targets Clippy 也通过。此处没有真机安装、BPF 运行、校园网络连通或三管理器设备验收证据；所有者审核和设备验证仍按 §17.0.3 保留为发布前动作。
+
+### 0.6.18 D23 导出半句与代码对齐（2026-09-17）
+
+**原说法：** D23（§0.3a）写“导出为 Prometheus 文本格式，但不开 HTTP 端口”。
+
+**实际：** `uid_stats` 在 captured E2 上更新（§7.3、§14.1）。仓库没有 Prometheus 文本导出路径，也没有为此打开的端口；`status` 没有 per-UID 字段。
+
+**处置：** 就地改正现行蓝图 §1.6.6：计数留在 map 里，不新开导出面。不把这句话算进 §0.6 的 8 次推翻（那张表只计测量轮）。不改 D23 原文。不 bump ABI。不实现 TCX。
+
+### 0.6.19 rc.2 I1b 在 5.15.211 过 verifier（2026-09-17）
+
+**原说法：** rc.2 落地 `flx_in` I1b 后，5.15 verifier 仍待真机。
+
+**实测：** SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。工作区 `1.0.0-rc.2` 的 Phase 4 `Runtime::load_embedded` 加载 12 maps + 4 未 attach 程序（含 `flx_in` tag `81e4c260027b3671`，612 input insns）后精确卸载。随后 `fluxd disable`，Phase 5 RAWIP/crash cleanup 与 Phase 6 官方 sing-box 双栈 origdst / uid_stats / DRAINING 通过；套件结束后无 `flxrs*`、无 pref 100、无 table 20260、无 `flx_` filter。再 `fluxd enable`。
+
+**处置：** 记为这条工作树的设备证据，不是候选 ZIP 的 §20，也不是正式 1.0.0。ABI 仍为 `0xF10C0904`。未跑 Phase 7，未装候选 ZIP。

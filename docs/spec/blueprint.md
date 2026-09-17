@@ -1,6 +1,6 @@
 # Flux-rs Design Blueprint
 
-- Specifies: **1.0.0 candidate, pending owner review**. This is the single normative blueprint and it is edited
+- Specifies: **1.0.0-rc.2 core deepening, pending owner review**. This is the single normative blueprint and it is edited
   in place; there are no incremental layers (`../authoring.md` AUTH-7.2).
 - Nature: **the implementation contract.** Where this document and the code
   disagree, the code is wrong. Where this document and `../philosophy.md`
@@ -633,7 +633,9 @@ why §8.5.4 uses a separate probe program instead.
 
 Deliberately absent: no destination address, no port, no time series. Only "how
 many bytes did this UID send through the proxy". **Nothing that could
-reconstruct a browsing history is recorded.**
+reconstruct a browsing history is recorded.** The map is the record. There is
+no Prometheus text exporter, no HTTP port, and `status` does not grow per-UID
+fields (GOV-3 correction of D23's unpublished export sentence; GOV-1.2).
 
 # Part 2: The data path and its failure semantics
 
@@ -1158,19 +1160,30 @@ Flux-rs/
 │   │       ├── engine_config.rs   # template validation and generated-config assembly
 │   │       ├── abi.rs             # Rust mirror of flux_abi.h, with layout assertions
 │   │       ├── control_wire.rs    # control protocol request/response types
+│   │       ├── runtime.rs         # §26 Phase / Stimulus / step / CommittedView
+│   │       ├── subscription.rs    # URI/JSON parse, refine, assemble_nodes
+│   │       ├── migration.rs       # install-time TOML reshape
+│   │       ├── ssid.rs            # [ssid] verdict, no SSID bytes on the wire
 │   │       └── version.rs         # SemVer to versionCode and artifact name
 │   └── fluxd/                     # the Linux/Android runtime: one product binary
-│       ├── build.rs               # compiles bpf/flux.bpf.c with clang into OUT_DIR
+│       ├── build.rs               # compiles bpf/flux.bpf.c; generates C map placeholders
 │       └── src/
 │           ├── main.rs            # CLI dispatch
 │           ├── layout.rs          # directories, permissions, single-instance lock
-│           ├── control.rs         # SOCK_SEQPACKET server and client
-│           ├── reactor.rs         # single-threaded epoll loop, state machine, convergence
+│           ├── control.rs         # SOCK_SEQPACKET server, client, session FSM
+│           ├── reactor.rs         # epoll adapter: Stimulus in, Effect out
 │           ├── packages.rs        # reads and parses /data/system/packages.list
 │           ├── netlink/           # rtnetlink: link/addr/route/rule/tc codecs and operations
 │           ├── bpf/               # minimal loader: syscalls, BTF blob, relocation, maps, ringbuf
 │           ├── dataplane.rs       # object lifecycle, control leaf publication, admission
-│           └── engine.rs          # config write-out, check, spawn, SOCK_DIAG readiness
+│           ├── dataplane/attachment.rs  # clsact attach, liveness, identity (TCX insert)
+│           ├── engine.rs          # config write-out, check, spawn, §9.4 transaction
+│           ├── subscription.rs    # fetch worker + schedule/pending coordinator
+│           ├── configuration.rs   # path I/O over flux-core parsers
+│           ├── install.rs         # one-shot upgrade migration
+│           ├── supervisor.rs      # fork/restart policy; no Flux state
+│           ├── logger.rs          # write-time log retention
+│           └── checks.rs          # fluxd check without mutating runtime
 ├── module/                        # the Magisk/KernelSU/APatch envelope
 └── xtask/                         # build, package, release; development host only
 ```
@@ -1182,10 +1195,22 @@ and text-processing dependencies are declared in `crates/flux-core/Cargo.toml`;
 and **no trait abstraction may be created for a single implementation.**
 
 Module dependencies inside `fluxd`:
-`main → reactor → {layout, control, packages, netlink, bpf, dataplane, engine}`,
-with no reverse edge back to `reactor`. The `Reactor` owns mutable coordination
-state and module-owned resources; the subscription worker owns only its request
-and transport. There is no mutable global coordination state.
+`main → {supervisor, reactor} → {layout, control, packages, netlink, bpf,
+dataplane, engine, subscription, configuration, install, logger}`,
+with no reverse edge back to `reactor`. The top-level Phase lives in
+`flux-core::runtime`; the reactor is the epoll adapter that turns events into
+Stimulus and Effect. Domain FSMs (engine generation, control sessions,
+subscription schedule, clsact attach) sit in their owning modules. The
+subscription worker owns only its request and transport. There is no mutable
+global coordination state.
+
+**TCX is not a second attach implementation in this revision.** The clsact
+attach, liveness probe and identity predicate live in
+`fluxd/src/dataplane/attachment.rs`. A later 6.6+ TCX path replaces that
+module's internals — `BPF_F_BEFORE`, fall back to clsact if the kernel rejects
+the anchor, never append-only TCX — without a `trait Attach` while only one
+adapter exists, and without changing the four BPF programs or the map set
+(§12.5.1, §22.2.1).
 
 **One boundary inherited from the previous repository.** The old over-design
 review found that writing raw rtnetlink messages directly in the daemon — the
@@ -1256,9 +1281,9 @@ Mixing them had concrete costs: the allow-list semantics were ambiguous (does a
 listener address belong in the user's allow list?), the fakeip check had to
 reason about a union, and listener addresses had to be written in two places.
 
-The value byte already exists and **has never been read**: the loader always
-writes `1` and the BPF side only tests for a non-NULL pointer. Tagging it costs
-no new map and no new lookup.
+The value byte is read. `bypass_hit()` in `bpf/flux.bpf.c` branches on
+`FLUX_BYPASS_RESERVED` versus `FLUX_BYPASS_POLICY` together with
+`flux_control.cidr_mode`. Tagging it costs no new map and no new lookup.
 
 ```c
 #define FLUX_BYPASS_RESERVED 1   /* mechanism invariant; always direct */
@@ -1458,9 +1483,12 @@ HANDOFF(c):
 Three properties this ordering buys:
 
 - **E2 precedes E3.** A steady-state packet on a captured flow parses no IP and
-  no TCP at all. The L2 path performs one storage lookup, two map lookups and one
-  redirect, **writing zero bytes** (D17); the L3 path adds one
-  `bpf_skb_change_head(14)` and one 2-byte EtherType write.
+  no TCP at all. The L2 path performs one storage lookup, the control snapshot
+  (two map lookups), one `uid_stats` lookup (D23) and one redirect, **writing
+  zero bytes** (D17); the L3 path adds one `bpf_skb_change_head(14)` and one
+  2-byte EtherType write. `uid_stats` stays on this path so TCP byte totals
+  count the flow, not only the admitting SYN. Unselected traffic still never
+  touches it.
 - **A retransmitted `SYN` meets the same immutable state.** `DIRECT` stays
   direct and `CAPTURED` keeps its generation. Only the allocation-failure edge,
   where no decision was ever installed, is decided again (the last item of
@@ -1478,13 +1506,13 @@ listener_alive(c, family, proto):
               daddr = c->listen_{v4,v6},       dport = c->listen_port_{v4,v6} }
     sk2 = proto == TCP ? bpf_sk_lookup_tcp(skb, &tuple, len, BPF_F_CURRENT_NETNS, 0)
                        : bpf_sk_lookup_udp(skb, &tuple, len, BPF_F_CURRENT_NETNS, 0)
-    if !sk2: fault_once(c, family, proto, LISTENER_MISS); return false
+    if !sk2: fault_once(c, family, proto, FLUX_FAULT_EGRESS_LISTENER); return false
     ok = sk2->family == (family == 4 ? AF_INET : AF_INET6)
       && (proto == TCP ? sk2->state == BPF_TCP_LISTEN : 1)
       && bound_addr_matches(sk2, c)          /* src_ip4 / src_ip6 == the listen address */
       && sk2->src_port == host_order(listen_port)
     bpf_sk_release(sk2)
-    if !ok: fault_once(c, family, proto, LISTENER_GUARD); 
+    if !ok: fault_once(c, family, proto, FLUX_FAULT_EGRESS_LISTENER);
     return ok
 ```
 
@@ -1526,9 +1554,11 @@ I1  /* cls_bpf already did __skb_push(mac_len) on ingress, so the Ethernet heade
     check eth readability; if fail                     -> cnt; SHOT
     if eth->h_proto ∉ {ETH_P_IP, ETH_P_IPV6}              -> cnt; SHOT
     /* no MAC comparison: the device itself is the provenance boundary (D3) */
-I2  parse L3 (the same bounded implementation as egress)
+I1b fast path (no full parse): IPv4/IPv6 fragment          -> cnt(PASS_FRAG); TC_ACT_OK
+    TCP && !(SYN && !ACK)                                 -> cnt(PASS_ESTABLISHED); TC_ACT_OK
+    /* IPv6 extension headers that are not a lone fragment fall through */
+I2  parse L3/L4 (the same bounded implementation as egress); needed only for assign
     if fragment                                           -> cnt(PASS_FRAG); TC_ACT_OK
-                                                             /* let the kernel ip_defrag reassemble, then the established lookup */
     parse L4; if !TCP && !UDP                             -> cnt; SHOT
 I3  if TCP:
         if SYN && !ACK:                                   /* retransmissions and TFO included */
@@ -3037,6 +3067,28 @@ Through rtnetlink, never the `tc` binary:
 - **Ownership check:** dump with `RTM_GETTFILTER` and compare every item of the §8.5 predicate. **Dump order establishes the ordering constraint, not reachability** — reachability comes from `flx_verify` (§8.5.4), and treating dump position as proof was the claim R091-05 overturned.
 - **Deletion:** `RTM_DELTFILTER`, carrying the exact `prio`, `protocol`, `handle` and `kind` (§8.9.5).
 
+### 12.5.1 Attach module; TCX insert point
+
+Userspace attach, pref selection, `flx_verify` liveness and the identity
+predicate live in `crates/fluxd/src/dataplane/attachment.rs`. The manager
+(`dataplane::Manager`) still exposes `begin_attachment`, `advance_attachment`,
+`detach_identity` and cleanup; callers do not see netlink framing.
+
+This revision implements **only the clsact path**, which remains the 5.15
+baseline and is not a fallback. TCX (6.6+) is still the highest-priority
+deferred attach upgrade (§22.2.1). When it is implemented it MUST:
+
+1. Probe with `BPF_LINK_CREATE` for `BPF_TCX_INGRESS` / `BPF_TCX_EGRESS`, never
+   by parsing `uname -r` (§16.3.5).
+2. Attach with `BPF_F_BEFORE` anchored on an existing entry (legacy clsact
+   counts as one). If the kernel rejects that combination, **fall back to this
+   clsact path**. An unordered TCX append is forbidden: it has neither pref
+   choice nor relative placement.
+3. Keep the four BPF programs, the map set, `TC_ACT_UNSPEC` for "not ours",
+   and §8.5.4 liveness on both paths.
+4. **Not** introduce a `trait Attach` while clsact is the only adapter
+   (Part 5: one adapter is a hypothetical seam).
+
 ## 12.6 Consuming the ringbuf
 
 The `fault_events` map fd registers directly with `epoll`, because a ringbuf map
@@ -3352,7 +3404,8 @@ No SBOM, signature, per-file hash or layered manifest is produced unless a real 
 | TCP holding a `DIRECT` decision | the above plus `bpf_sk_fullsock` and one SK_STORAGE lookup. **No parsing, no control read** |
 | First SYN of a selected-but-direct TCP flow | the above plus one control read (two map lookups), one LPM lookup, one listener lookup, one storage create. Nothing is written afterwards |
 | First SYN of a captured TCP flow | the above plus `bpf_redirect` — zero writes on L2, two bytes on L3 — then on ingress one `change_type`, one control read, one listener lookup and `bpf_sk_assign` |
-| Captured TCP, steady state, L2 | `bpf_sk_fullsock`, one storage lookup, one control read, `bpf_redirect`. **Zero packet writes, zero clone copies, zero parsing** |
+| Captured TCP ingress, established or fragment | after `PACKET_HOST` and ethertype: a minimal L3/TCP-flag or fragment check, then `TC_ACT_OK`. **No `pull_headers`, no full parse, no assign** (§7.5 I1b) |
+| Captured TCP, steady state, L2 | `bpf_sk_fullsock`, one storage lookup, one control read (two map lookups), one `uid_stats` lookup (D23), `bpf_redirect`. **Zero packet writes, zero clone copies, zero parsing** |
 | Captured TCP, steady state, L3 or rmnet | the above plus `bpf_skb_change_head(14)` and a two-byte EtherType write |
 | Selected UDP, per datagram | UID lookup, bounded parse, one control read, one LPM lookup, one listener lookup, redirect; on ingress one `change_type`, one control read, one lookup and assign |
 
@@ -3379,7 +3432,7 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
 ## 15.1 Static checks, and which platform proves what
 
 - `cargo fmt --check`; the high-value `cargo clippy` lints; `cargo build --target aarch64-linux-android`.
-- `cargo test -p flux-core`, which **MUST run on a Windows host**. That constraint is what keeps the pure logic free of libc and syscalls (§5).
+- `cargo test -p flux-core`, which **MUST run on a Windows host**. That constraint is what keeps the pure logic free of libc and syscalls (§5). The §26 table lives in `runtime.rs` on this crate.
 - BPF: compiles clean under `-Wall -Wextra -Werror`, and a real `BPF_PROG_LOAD` passes the verifier on the Linux CI runner.
 
   **Passing on a newer kernel does not mean passing on 5.15.** CI runs `ubuntu-latest`, whose kernel is far newer than the baseline, so this gate proves only that the programs hold under some modern verifier. **The baseline verifier evidence comes from the device**: the Phase 3-8 device suites load the same programs on SM-S9180 running 5.15.211, and that is the first-hand result for 5.15. The CI gate exists to fail early, not to be the verdict; both must pass (GOV-4.1).

@@ -1,9 +1,9 @@
-//! Pure logic for Flux-rs 0.9.0.
+//! Pure logic for Flux-rs.
 //!
 //! This crate holds everything that needs no syscall: configuration parsing,
 //! app selector resolution, CIDR canonicalisation, the data-plane ABI mirror,
-//! the control-protocol wire types, and version arithmetic. It therefore
-//! compiles and tests on any host, including Windows.
+//! the control-protocol wire types, the §26 lifecycle table, and version
+//! arithmetic. It therefore compiles and tests on any host, including Windows.
 //!
 //! Boundaries that must not erode (blueprint §5):
 //!
@@ -23,6 +23,7 @@ pub mod config;
 pub mod control_wire;
 pub mod engine_config;
 pub mod migration;
+pub mod runtime;
 pub mod selector;
 pub mod sha256;
 pub mod ssid;

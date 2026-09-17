@@ -12,6 +12,8 @@ mod btf;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod kernel;
 #[cfg(any(target_os = "linux", target_os = "android"))]
+mod map_table;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod maps;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod object;
@@ -25,16 +27,12 @@ use std::fmt;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::{AsRawFd, OwnedFd};
 
-#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
-use flux_core::abi::UidStats;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use flux_core::abi::{
-    BypassTag, Control, Counter, FaultKey, LpmV4Key, LpmV6Key, FLUX_ABI_MAGIC, PROG_SECTIONS,
-};
+use flux_core::abi::{FLUX_ABI_MAGIC, PROG_SECTIONS};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[allow(unused_imports)] // MapSpec is part of the Phase 4 device-test API.
-pub use maps::{MapIdentity, MapSpec};
+pub use maps::{MapIdentity, MapSet, MapSpec};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use ringbuf::RingBuffer;
 
@@ -76,6 +74,10 @@ impl LoadError {
             detail: error.to_string(),
             verifier_log: None,
         }
+    }
+
+    pub(crate) fn maps(stage: &str, error: std::io::Error) -> Self {
+        Self::syscall(stage, None, error)
     }
 
     fn program(name: &str, failure: sys::ProgramLoadFailure) -> Self {
@@ -227,12 +229,22 @@ impl Runtime {
         Self::load(object_bytes, FLUX_ABI_MAGIC)
     }
 
+    /// Map table owned by this runtime. Callers mutate maps through this
+    /// set; Runtime does not 1:1-forward each helper.
+    pub fn maps(&self) -> &maps::MapSet {
+        &self.maps
+    }
+
+    pub fn maps_mut(&mut self) -> &mut maps::MapSet {
+        &mut self.maps
+    }
+
     /// The full map inventory. Only the Phase 4 device test reads it, to prove
     /// loader parity and cleanup; the daemon addresses maps by name, and this
     /// crate's own unit tests never call it — hence the allowance.
     #[cfg(test)]
     #[allow(dead_code)]
-    pub fn maps(&self) -> Vec<MapIdentity> {
+    pub fn map_identities(&self) -> Vec<MapIdentity> {
         self.maps.identities()
     }
 
@@ -268,91 +280,6 @@ impl Runtime {
             .iter()
             .find(|program| program.identity.name == name)
             .map(|program| program.identity.clone())
-    }
-
-    pub fn publish_control(&mut self, control: &Control) -> Result<(), LoadError> {
-        self.maps
-            .publish_control(control)
-            .map_err(|error| LoadError::syscall("control_publish", None, error))
-    }
-
-    pub fn counter_sum(&self, counter: Counter) -> Result<u64, LoadError> {
-        self.maps
-            .counter_sum(counter)
-            .map_err(|error| LoadError::syscall("counter_read", None, error))
-    }
-
-    pub fn update_uid_mode(&self, uid: u32, mode: u8) -> Result<(), LoadError> {
-        self.maps
-            .update_uid_mode(uid, mode)
-            .map_err(|error| LoadError::syscall("uid_policy_update", None, error))
-    }
-
-    pub fn update_bypass_v4(&self, key: &LpmV4Key, tag: BypassTag) -> Result<(), LoadError> {
-        self.maps
-            .update_bypass_v4(key, tag)
-            .map_err(|error| LoadError::syscall("bypass_v4_update", None, error))
-    }
-
-    pub fn delete_bypass_v4(&self, key: &LpmV4Key) -> Result<(), LoadError> {
-        self.maps
-            .delete_bypass_v4(key)
-            .map_err(|error| LoadError::syscall("bypass_v4_delete", None, error))
-    }
-
-    pub fn update_bypass_v6(&self, key: &LpmV6Key, tag: BypassTag) -> Result<(), LoadError> {
-        self.maps
-            .update_bypass_v6(key, tag)
-            .map_err(|error| LoadError::syscall("bypass_v6_update", None, error))
-    }
-
-    pub fn delete_bypass_v6(&self, key: &LpmV6Key) -> Result<(), LoadError> {
-        self.maps
-            .delete_bypass_v6(key)
-            .map_err(|error| LoadError::syscall("bypass_v6_delete", None, error))
-    }
-
-    pub fn update_self_v4(&self, address: &[u8; 4]) -> Result<(), LoadError> {
-        self.maps
-            .update_self_v4(address)
-            .map_err(|error| LoadError::syscall("self_addr_v4_update", None, error))
-    }
-
-    pub fn delete_self_v4(&self, address: &[u8; 4]) -> Result<(), LoadError> {
-        self.maps
-            .delete_self_v4(address)
-            .map_err(|error| LoadError::syscall("self_addr_v4_delete", None, error))
-    }
-
-    pub fn update_self_v6(&self, address: &[u8; 16]) -> Result<(), LoadError> {
-        self.maps
-            .update_self_v6(address)
-            .map_err(|error| LoadError::syscall("self_addr_v6_update", None, error))
-    }
-
-    pub fn delete_self_v6(&self, address: &[u8; 16]) -> Result<(), LoadError> {
-        self.maps
-            .delete_self_v6(address)
-            .map_err(|error| LoadError::syscall("self_addr_v6_delete", None, error))
-    }
-
-    pub fn clear_fault_latch(&self) -> Result<(), LoadError> {
-        self.maps
-            .clear_fault_latch()
-            .map_err(|error| LoadError::syscall("fault_latch_clear", None, error))
-    }
-
-    pub fn delete_fault_latch(&self, key: &FaultKey) -> Result<(), LoadError> {
-        self.maps
-            .delete_fault_latch(key)
-            .map_err(|error| LoadError::syscall("fault_latch_delete", None, error))
-    }
-
-    #[cfg(test)]
-    pub fn uid_stats_sum(&self, uid: u32) -> Result<UidStats, LoadError> {
-        self.maps
-            .uid_stats_sum(uid)
-            .map_err(|error| LoadError::syscall("uid_stats_read", None, error))
     }
 }
 

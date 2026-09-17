@@ -1,157 +1,23 @@
-//! Authoritative Phase 4 map table and explicit `BPF_MAP_CREATE` sequence.
+//! Explicit `BPF_MAP_CREATE` sequence over [`super::map_table::MAP_SPECS`].
 
 use std::collections::BTreeMap;
 use std::io;
+#[cfg(test)]
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key, UidStats, MAP_NAMES};
+#[cfg(test)]
+use flux_core::abi::UidStats;
+use flux_core::abi::{self, Control, Counter, FaultKey, LpmV4Key, LpmV6Key, MAP_NAMES};
 
 use super::sys::{self, MapCreate, BPF_F_NO_PREALLOC};
 
-const MAP_TYPE_HASH: u32 = 1;
-const MAP_TYPE_ARRAY: u32 = 2;
-const MAP_TYPE_PERCPU_HASH: u32 = 5;
-const MAP_TYPE_PERCPU_ARRAY: u32 = 6;
-const MAP_TYPE_LPM_TRIE: u32 = 11;
-const MAP_TYPE_ARRAY_OF_MAPS: u32 = 12;
-const MAP_TYPE_SK_STORAGE: u32 = 24;
-const MAP_TYPE_RINGBUF: u32 = 27;
+pub use super::map_table::{MapSpec, MAP_SPECS};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapSpec {
-    pub name: &'static str,
-    pub map_type: u32,
-    pub key_size: u32,
-    pub value_size: u32,
-    pub max_entries: u32,
-    pub map_flags: u32,
-    pub needs_btf: bool,
-    pub needs_inner_map: bool,
-}
-
-pub const MAP_SPECS: [MapSpec; 12] = [
-    MapSpec {
-        name: abi::MAP_UID_POLICY,
-        map_type: MAP_TYPE_HASH,
-        key_size: 4,
-        value_size: 1,
-        max_entries: abi::UID_POLICY_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_BYPASS_V4,
-        map_type: MAP_TYPE_LPM_TRIE,
-        key_size: size_of::<LpmV4Key>() as u32,
-        value_size: 1,
-        max_entries: abi::LPM_MAX_ENTRIES,
-        map_flags: BPF_F_NO_PREALLOC,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_BYPASS_V6,
-        map_type: MAP_TYPE_LPM_TRIE,
-        key_size: size_of::<LpmV6Key>() as u32,
-        value_size: 1,
-        max_entries: abi::LPM_MAX_ENTRIES,
-        map_flags: BPF_F_NO_PREALLOC,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_SELF_ADDR_V4,
-        map_type: MAP_TYPE_HASH,
-        key_size: 4,
-        value_size: 1,
-        max_entries: abi::SELF_ADDR_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_SELF_ADDR_V6,
-        map_type: MAP_TYPE_HASH,
-        key_size: 16,
-        value_size: 1,
-        max_entries: abi::SELF_ADDR_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_UID_STATS,
-        map_type: MAP_TYPE_PERCPU_HASH,
-        key_size: 4,
-        value_size: size_of::<UidStats>() as u32,
-        max_entries: abi::UID_STATS_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_TCP_DECISION,
-        map_type: MAP_TYPE_SK_STORAGE,
-        key_size: 4,
-        value_size: size_of::<abi::Decision>() as u32,
-        max_entries: 0,
-        map_flags: BPF_F_NO_PREALLOC,
-        needs_btf: true,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_CONTROL_ROOT,
-        map_type: MAP_TYPE_ARRAY_OF_MAPS,
-        key_size: 4,
-        value_size: 4,
-        max_entries: 1,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: true,
-    },
-    MapSpec {
-        name: abi::MAP_CONTROL_LEAF,
-        map_type: MAP_TYPE_ARRAY,
-        key_size: 4,
-        value_size: size_of::<Control>() as u32,
-        max_entries: 1,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_FAULT_LATCH,
-        map_type: MAP_TYPE_HASH,
-        key_size: size_of::<FaultKey>() as u32,
-        value_size: 1,
-        max_entries: abi::FAULT_LATCH_MAX_ENTRIES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_FAULT_EVENTS,
-        map_type: MAP_TYPE_RINGBUF,
-        key_size: 0,
-        value_size: 0,
-        max_entries: abi::FAULT_RINGBUF_BYTES,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-    MapSpec {
-        name: abi::MAP_COUNTERS,
-        map_type: MAP_TYPE_PERCPU_ARRAY,
-        key_size: 4,
-        value_size: 8,
-        max_entries: abi::COUNTER_SLOTS,
-        map_flags: 0,
-        needs_btf: false,
-        needs_inner_map: false,
-    },
-];
+const _: () = assert!(
+    super::map_table::BPF_F_NO_PREALLOC == BPF_F_NO_PREALLOC,
+    "map table NO_PREALLOC must match bpf(2) BPF_F_NO_PREALLOC"
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapIdentity {

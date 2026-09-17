@@ -32,7 +32,7 @@ fn main() {
         process::exit(1);
     });
 
-    let maps = runtime.maps();
+    let maps = runtime.map_identities();
     assert_eq!(maps.len(), MAP_NAMES.len());
     assert_eq!(
         maps.iter().map(|map| map.spec.name).collect::<Vec<_>>(),

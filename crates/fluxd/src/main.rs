@@ -5,7 +5,7 @@
 //! ```text
 //! main -> {supervisor, reactor}
 //! reactor -> {supervisor's shared policy constants, layout, control, packages,
-//!             netlink, bpf, dataplane, engine}
+//!             netlink, bpf, dataplane, engine, subscription, configuration}
 //! ```
 //!
 //! Nothing below `reactor` depends back on it. All traffic and control state

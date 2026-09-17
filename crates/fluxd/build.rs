@@ -12,9 +12,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::{env, fs};
 
+#[path = "src/bpf/map_table.rs"]
+mod map_table;
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR always set by cargo"));
     let object = out_dir.join("flux.bpf.o");
+    let maps_header = out_dir.join("flux_maps.generated.h");
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let repo_root = manifest
@@ -23,13 +27,17 @@ fn main() {
         .expect("crates/fluxd is two levels below the repo root");
     let source = repo_root.join("bpf").join("flux.bpf.c");
     let include = repo_root.join("bpf").join("include");
+    let map_table = manifest.join("src").join("bpf").join("map_table.rs");
 
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", include.display());
+    println!("cargo:rerun-if-changed={}", map_table.display());
     println!("cargo:rerun-if-env-changed=CLANG");
     println!("cargo:rerun-if-env-changed=FLUX_BUILD_BPF");
     println!("cargo:rerun-if-env-changed=FLUX_COMMIT");
     println!("cargo:rustc-env=FLUX_BPF_OBJECT={}", object.display());
+
+    fs::write(&maps_header, map_table::emit_c_header()).expect("write generated BPF map header");
 
     if env::var_os("FLUX_BUILD_BPF").is_none() {
         // Emit an empty object so `include_bytes!` still resolves. The loader
@@ -60,7 +68,8 @@ fn main() {
         ])
         .arg(format!("-ffile-prefix-map={prefix_map}"))
         .arg(format!("-fdebug-prefix-map={prefix_map}"))
-        .arg(format!("-I{}", include.display()));
+        .arg(format!("-I{}", include.display()))
+        .arg(format!("-I{}", out_dir.display()));
     if let Some(system_include) = multiarch_include() {
         command.arg(format!("-I{}", system_include.display()));
     }
