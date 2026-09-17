@@ -454,26 +454,14 @@ impl RequestSocket {
         self.send(&request)?;
         let mut out = Vec::new();
         loop {
-            for message in self.recv(seq)? {
-                match message.kind {
-                    NLMSG_DONE => {
-                        return finish_dump(out, &message, false);
-                    }
-                    NLMSG_ERROR => parse_ack(&message.payload)?,
-                    NLMSG_OVERRUN => return Err(overrun()),
-                    NLMSG_NOOP => {}
-                    _ => {
-                        if message.flags & NLM_F_DUMP_INTR != 0 {
-                            return Err(dump_interrupted());
-                        }
-                        out.push(message);
-                    }
-                }
+            match feed_dump(out, &self.recv(seq)?, false)? {
+                DumpFeed::NeedMore(next) => out = next,
+                DumpFeed::Complete(done) => return Ok(done),
             }
         }
     }
 
-    fn send(&self, request: &[u8]) -> io::Result<()> {
+    pub(crate) fn send(&self, request: &[u8]) -> io::Result<()> {
         let kernel = netlink_address(0, 0);
         // SAFETY: buffers and destination sockaddr are valid for this call.
         let sent = unsafe {
@@ -502,6 +490,33 @@ impl RequestSocket {
         if self.nonblocking {
             wait_fd(self.fd.as_raw_fd(), libc::POLLIN)?;
         }
+        self.recv_matching(seq)
+    }
+
+    /// One datagram, no `poll`. `WouldBlock` means return to epoll (§9.5).
+    pub(crate) fn try_recv(&mut self, seq: u32) -> io::Result<Vec<RawMessage>> {
+        let pending = self.take_pending(seq);
+        if !pending.is_empty() {
+            return Ok(pending);
+        }
+        self.recv_matching(seq)
+    }
+
+    fn take_pending(&mut self, seq: u32) -> Vec<RawMessage> {
+        let mut matching = Vec::new();
+        let mut leftover = Vec::new();
+        for message in std::mem::take(&mut self.pending) {
+            if message.seq == seq {
+                matching.push(message);
+            } else {
+                leftover.push(message);
+            }
+        }
+        self.pending = leftover;
+        matching
+    }
+
+    fn recv_matching(&mut self, seq: u32) -> io::Result<Vec<RawMessage>> {
         let mut bytes = vec![0u8; MAX_DATAGRAM];
         let (read, truncated) = recv_datagram(self.fd.as_raw_fd(), &mut bytes)?;
         if truncated {
@@ -703,6 +718,39 @@ fn parse_done_status(payload: &[u8]) -> i32 {
     }
 }
 
+/// Incremental dump assembly. A datagram without `NLMSG_DONE` is not a
+/// successful empty dump: "not seen" is not "absent" (blueprint §8.5, §9.5).
+#[derive(Debug)]
+pub(crate) enum DumpFeed {
+    NeedMore(Vec<RawMessage>),
+    Complete(Vec<RawMessage>),
+}
+
+pub(crate) fn feed_dump(
+    mut items: Vec<RawMessage>,
+    messages: &[RawMessage],
+    truncated: bool,
+) -> io::Result<DumpFeed> {
+    if truncated {
+        return Err(dump_truncated());
+    }
+    for message in messages {
+        match message.kind {
+            NLMSG_DONE => return finish_dump(items, message, false).map(DumpFeed::Complete),
+            NLMSG_ERROR => parse_ack(&message.payload)?,
+            NLMSG_OVERRUN => return Err(overrun()),
+            NLMSG_NOOP => {}
+            _ => {
+                if message.flags & NLM_F_DUMP_INTR != 0 {
+                    return Err(dump_interrupted());
+                }
+                items.push(message.clone());
+            }
+        }
+    }
+    Ok(DumpFeed::NeedMore(items))
+}
+
 fn finish_dump(
     items: Vec<RawMessage>,
     done: &RawMessage,
@@ -831,5 +879,41 @@ mod tests {
     fn dump_truncation_is_incomplete() {
         let error = finish_dump(Vec::new(), &done_message(0, 0), true).unwrap_err();
         assert!(error.to_string().contains("truncated=true"));
+    }
+
+    fn data_message(kind: u16) -> RawMessage {
+        RawMessage {
+            kind,
+            flags: 0,
+            seq: 1,
+            pid: 0,
+            payload: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dump_without_done_is_need_more_not_complete() {
+        let item = data_message(16);
+        match feed_dump(Vec::new(), &[item], false).unwrap() {
+            DumpFeed::NeedMore(items) => assert_eq!(items.len(), 1),
+            DumpFeed::Complete(_) => panic!("a dump without NLMSG_DONE is not complete"),
+        }
+    }
+
+    #[test]
+    fn empty_datagram_is_need_more_not_absence() {
+        match feed_dump(Vec::new(), &[], false).unwrap() {
+            DumpFeed::NeedMore(items) => assert!(items.is_empty()),
+            DumpFeed::Complete(_) => panic!("silence is not a complete dump"),
+        }
+    }
+
+    #[test]
+    fn dump_done_after_items_is_complete() {
+        let item = data_message(16);
+        match feed_dump(vec![item], &[done_message(0, 0)], false).unwrap() {
+            DumpFeed::Complete(items) => assert_eq!(items.len(), 1),
+            DumpFeed::NeedMore(_) => panic!("NLMSG_DONE must complete a clean dump"),
+        }
     }
 }

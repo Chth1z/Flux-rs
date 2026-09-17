@@ -1177,7 +1177,7 @@ Flux-rs/
 │           ├── reactor.rs         # epoll adapter: Stimulus in, Effect out
 │           ├── watch.rs           # inotify WatchSet: parent dirs, rebuild on replace
 │           ├── packages.rs        # reads and parses /data/system/packages.list
-│           ├── netlink/           # rtnetlink: link/addr/route/rule/tc codecs and operations
+│           ├── netlink/           # rtnetlink codecs; SOCK_DIAG ProbeReady
 │           ├── bpf/               # minimal loader: syscalls, BTF blob, relocation, maps, ringbuf
 │           ├── dataplane.rs       # object lifecycle, control leaf publication, admission
 │           ├── dataplane/attachment.rs  # clsact attach, liveness, identity (TCX insert)
@@ -2641,6 +2641,8 @@ Flux does not use sing-box's `SIGHUP`, whose success cannot be confirmed synchro
 
 Enumerate the four exact sockets — two families by two protocols — through `NETLINK_SOCK_DIAG` (`SOCK_DIAG_BY_FAMILY`, `inet_diag`), and cross-check each socket's inode against `/proc/<candidate-pid>/fd/*`. This establishes control-plane evidence that the four sockets are held by the candidate **at the moment of promotion**, and nothing more. Admission during operation remains per-packet through BPF's `listener_alive()`; there is **no periodic diag polling**.
 
+The enumeration is a `ProbeReady` state machine on a non-blocking `NETLINK_SOCK_DIAG` socket in the reactor epoll set. Each datagram is fed through the dump-completeness gate of §8.5: a dump without `NLMSG_DONE`, or with `NLM_F_DUMP_INTR`, truncation or a negative DONE status, is Incomplete and MUST NOT be treated as "socket absent". The reactor MUST return to epoll after each datagram so disable, stop and pidfd remain serviceable during the probe. The 5 s timerfd is a cap on the whole probe, not a way to interrupt a blocking `recv`. `find_inode` is a bounded helper for tests; production readiness MUST NOT call it from the reactor thread.
+
 A timerfd MAY re-check with a bounded backoff while the candidate starts — 10, 20, 40 ms rising to a 250 ms cap, with a total deadline of 5 s — cancelled the moment readiness or failure is decided. It is not steady-state polling and MUST NOT be extended into a health probe.
 
 ## 9.6 The boundary around the user's engine configuration
@@ -2728,10 +2730,11 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | `flux-core/subscription.rs`, `engine_config.rs` | Typed node sources and available provider responses form one ordered pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); runtime completion owns the two listener tuples and default cache path (§9.1, §9.6) |
 | `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
-| `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness verifies all four sockets; child exit is confirmed before a replacement starts (§9.4) |
+| `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness is a preemptible ProbeReady; child exit is confirmed before a replacement starts (§9.4, §9.5) |
 | `fluxd/subscription.rs` | One immutable fetch batch/result and selection of pending or accepted source-addressed responses | At most one blocking worker; it cannot mutate reactor state, cache files or a generation. A matching pending response takes precedence over that source's disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
 | `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
+| `fluxd/netlink/sock_diag.rs` | Four listener dumps become inodes only after a complete dump | Incomplete dumps cannot conclude absence; the reactor returns to epoll between datagrams (§9.5) |
 | `flux-core/snapshot.rs` | Dump completeness evidence becomes a TrustedSnapshot; switch observation is Present / Absent / Unreadable | Incomplete dumps cannot be constructed as trusted; Unreadable is not Absent |
 | `fluxd/layout.rs` | State paths and bounded file operations | Callers share filesystem operations without depending on a diagnostic command; the switch is three-state (§11.1) |
 | `fluxd/watch.rs` | inotify watches on stable parent directories | MOVE_SELF / DELETE_SELF / IGNORED rebuild; overflow rereads every authority |
@@ -2777,6 +2780,7 @@ One thread, one epoll. The sources:
 | BPF ringbuf | deduplicated listener and assign faults |
 | signalfd | `SIGTERM` and `SIGINT` to stop, `SIGHUP` to reload |
 | control socket | CLI requests |
+| `NETLINK_SOCK_DIAG` (non-blocking) | listener readiness while Waiting (`ProbeReady`) |
 | timerfd | configuration debounce, readiness backoff, the 1/2/4/8/30 s crash backoff, and the subscription refresh of §29.3 |
 | child stdout pipe | output of `sing-box check`, **non-blocking**, with a deadline |
 | eventfd | completion of a subscription fetch on its worker thread (§28.3); the reactor never blocks on the network |
@@ -2784,7 +2788,7 @@ One thread, one epoll. The sources:
 
 **No per-second polling, no busy loop, no BPF timer, no periodic counter sampling, no heartbeat.** §29.3 records the one deliberate exception and why a one-shot timer is not polling. Backoff resets once a child has been stable for 60 s, and recovery continues at a low rate for as long as the switch is on: there is **no "failed N times, locked out permanently"** state, because a user who fixes the cause deserves the next attempt to succeed.
 
-**Every external command — `sing-box check` is the only one — MUST run as a child process read through an epoll pipe with a deadline. Blocking on `wait()` inside the reactor is forbidden**: one hung child would otherwise freeze every other event source, including the switch.
+**Every external command — `sing-box check` is the only one — MUST run as a child process read through an epoll pipe with a deadline. Blocking on `wait()` or on an unbounded netlink `recv` inside the reactor is forbidden**: one hung dump would otherwise freeze every other event source, including the switch.
 
 ### 10.4.1 Three hard rules for rtnetlink
 
@@ -3668,7 +3672,7 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
 | ringbuf: old-generation or duplicate fault | ignore | ignore | **clear the latch and ignore** — the handler is idempotent per generation |
 | timerfd: debounce expired | — | run the pending convergence | same |
 | timerfd: backoff expired | — | retry activation | retry starting the engine |
-| timerfd: readiness backoff | — | re-check SOCK_DIAG | same |
+| timerfd: readiness backoff | — | re-arm SOCK_DIAG ProbeReady | same |
 | `SIGHUP` | equivalent to `reload` | equivalent to `reload` | equivalent to `reload` |
 | `SIGTERM`, `SIGINT` | exit 0 | publish `active=0`, stop the engine, exit 0 | same |
 

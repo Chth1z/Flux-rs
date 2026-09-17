@@ -96,6 +96,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Disable and stop are no longer blocked by a SOCK_DIAG dump while the engine
+  candidate starts. Readiness is a non-blocking `ProbeReady` in epoll; an
+  incomplete dump is not treated as "socket absent"
+  (`docs/spec/blueprint.md` §9.5).
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

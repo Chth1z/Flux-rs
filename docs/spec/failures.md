@@ -42,7 +42,8 @@ Every possible failure point specifies **how it is detected, what action is take
 | Subscription content yields zero non-infrastructure outbounds | count after refinement (§28.4) | Refuse the candidate, keep the current generation | `"subscription_empty"` — an error page can be valid JSON and can pass `check` while containing no node |
 | `sing-box check` fails | Child exit code + stderr | Cold start: `Inactive`; hot update: retain the current generation | `"engine_check_failed"` + first several lines of stderr |
 | Engine fails to start | pidfd becomes readable immediately | Retry with backoff (1/2/4/8/30 s) | `"engine_exited:code=1"` |
-| The 4 sockets do not appear before the deadline | Timed-out SOCK_DIAG rechecks with backoff | Stop the candidate; `Inactive` | `"engine_not_ready:2/4 sockets"` |
+| The 4 sockets do not appear before the deadline | Timed-out SOCK_DIAG ProbeReady with backoff | Stop the candidate; `Inactive` | `"engine_not_ready:2/4 sockets"` |
+| SOCK_DIAG dump is incomplete (`NLMSG_DONE` missing, `NLM_F_DUMP_INTR`, truncated) | Completeness gate; retry until the readiness deadline | Do **not** treat as absent; disable and stop remain serviceable between datagrams | still Waiting, then `"engine_not_ready"` if the deadline expires |
 | Socket inode does not belong to the candidate pid | Cross-check `/proc/<pid>/fd` | Stop the candidate; `Inactive` | `"engine_socket_owner_mismatch"` |
 | `clsact` has a shared block | Dump contains `TCA_INGRESS_BLOCK`/`EGRESS_BLOCK`, or non-empty `TCA_OPTIONS` | **Exclude that interface**; continue with the others | That interface is `excluded(clsact_shared_block)` |
 | `clsact` dump carries an unknown or duplicated attribute | The allowlist parse of §8.5 fails | **Exclude that interface**; fail closed rather than adopt a qdisc Flux cannot fully read | That interface is `excluded(clsact_foreign)` |

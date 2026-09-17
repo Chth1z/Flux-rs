@@ -73,7 +73,8 @@ mod tests {
         log: Vec<String>,
     }
 
-    /// Test-local wait on the same `probe_ready` the reactor drives from timerfd.
+    /// Test-local wait on the bounded `probe_ready` helper. The reactor drives
+    /// the same ProbeReady machine from epoll instead of calling this.
     fn wait_sockets(child: &mut EngineChild, spec: &EngineSpec) -> Result<(), EngineError> {
         let deadline = Instant::now() + engine::READY_DEADLINE;
         let mut backoff = Duration::from_millis(10);

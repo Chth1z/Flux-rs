@@ -10,12 +10,18 @@
 
 use std::io;
 use std::net::IpAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::RawFd;
+use std::time::{Duration, Instant};
+
+use super::wire::{
+    feed_dump, DumpFeed, MessageBuilder, RawMessage, RequestSocket, NLM_F_DUMP, NLM_F_REQUEST,
+};
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
-const NLMSG_HDRLEN: usize = 16;
 const INET_DIAG_REQ_V2_LEN: usize = 56;
 const INET_DIAG_MSG_MIN_LEN: usize = 72;
+const FIND_INODE_DEADLINE: Duration = Duration::from_secs(3);
+const FIND_INODE_DATAGRAMS: u32 = 64;
 
 /// `BPF_TCP_LISTEN` — the state a TCP listener must be in. A UDP socket
 /// reports state 7 (`TCP_CLOSE`), which is why the state gate below applies
@@ -42,13 +48,138 @@ impl SocketExpectation {
     }
 }
 
+/// One non-blocking readiness dump of the four engine listeners (§9.5).
+///
+/// The reactor keeps this fd in epoll and returns between datagrams so
+/// disable, stop and pidfd stay serviceable. A dump without `NLMSG_DONE` is
+/// [`ProbeStep::Wait`], never "socket absent".
+pub struct ProbeReady {
+    socket: RequestSocket,
+    expectations: [SocketExpectation; 4],
+    index: usize,
+    seq: u32,
+    collected: Vec<RawMessage>,
+    inodes: [Option<u32>; 4],
+}
+
+/// Progress of one [`ProbeReady`] datagram.
+#[derive(Debug)]
+pub enum ProbeStep {
+    /// Need another readable event, or the next dump request was just sent.
+    Wait,
+    /// All four dumps completed; some listeners were not present.
+    Pending {
+        verified: u8,
+        inodes: [Option<u32>; 4],
+    },
+    /// All four dumps completed and matched.
+    Ready { inodes: [u32; 4] },
+}
+
+impl ProbeReady {
+    pub fn start(expectations: [SocketExpectation; 4]) -> io::Result<Self> {
+        let socket = RequestSocket::open_nonblocking(libc::NETLINK_SOCK_DIAG)?;
+        let mut probe = Self {
+            socket,
+            expectations,
+            index: 0,
+            seq: 0,
+            collected: Vec::new(),
+            inodes: [None; 4],
+        };
+        probe.send_current()?;
+        Ok(probe)
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.socket.as_raw_fd()
+    }
+
+    /// Consume one datagram. MUST NOT `poll`/`recv` in a loop.
+    pub fn on_readable(&mut self) -> io::Result<ProbeStep> {
+        let messages = match self.socket.try_recv(self.seq) {
+            Ok(messages) => messages,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(ProbeStep::Wait);
+            }
+            Err(error) => return Err(error),
+        };
+        match feed_dump(std::mem::take(&mut self.collected), &messages, false)? {
+            DumpFeed::NeedMore(items) => {
+                self.collected = items;
+                Ok(ProbeStep::Wait)
+            }
+            DumpFeed::Complete(items) => {
+                let exp = &self.expectations[self.index];
+                self.inodes[self.index] = items
+                    .iter()
+                    .find_map(|message| match_diag_msg(&message.payload, exp));
+                self.index += 1;
+                if self.index < self.expectations.len() {
+                    self.send_current()?;
+                    Ok(ProbeStep::Wait)
+                } else {
+                    Ok(self.finish_round())
+                }
+            }
+        }
+    }
+
+    fn send_current(&mut self) -> io::Result<()> {
+        self.seq = self.socket.next_seq();
+        self.collected.clear();
+        self.socket
+            .send(&dump_request(&self.expectations[self.index], self.seq))
+    }
+
+    fn finish_round(&self) -> ProbeStep {
+        let verified = self.inodes.iter().filter(|inode| inode.is_some()).count() as u8;
+        match self.inodes {
+            [Some(a), Some(b), Some(c), Some(d)] => ProbeStep::Ready {
+                inodes: [a, b, c, d],
+            },
+            inodes => ProbeStep::Pending { verified, inodes },
+        }
+    }
+}
+
 /// Finds the inode of the socket exactly matching `exp`, or `None` when no
 /// such socket exists right now. An error means the enumeration itself failed
-/// (netlink unavailable), not that the socket is absent.
+/// (netlink unavailable or the dump never completed), not that the socket is
+/// absent.
+///
+/// Bounded helper for tests and device checks. The reactor MUST drive
+/// [`ProbeReady`] from epoll instead of calling this.
 pub fn find_inode(exp: &SocketExpectation) -> io::Result<Option<u32>> {
-    let sock = diag_socket()?;
-    send_dump_request(&sock, exp)?;
-    read_matching_inode(&sock, exp)
+    let mut socket = RequestSocket::open_nonblocking(libc::NETLINK_SOCK_DIAG)?;
+    let seq = socket.next_seq();
+    socket.send(&dump_request(exp, seq))?;
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + FIND_INODE_DEADLINE;
+    let mut datagrams = 0u32;
+    loop {
+        if datagrams >= FIND_INODE_DATAGRAMS || Instant::now() >= deadline {
+            return Err(incomplete_diag());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !poll_readable(socket.as_raw_fd(), remaining)? {
+            return Err(incomplete_diag());
+        }
+        datagrams += 1;
+        let messages = match socket.try_recv(seq) {
+            Ok(messages) => messages,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
+        };
+        match feed_dump(std::mem::take(&mut collected), &messages, false)? {
+            DumpFeed::NeedMore(items) => collected = items,
+            DumpFeed::Complete(items) => {
+                return Ok(items
+                    .iter()
+                    .find_map(|message| match_diag_msg(&message.payload, exp)));
+            }
+        }
+    }
 }
 
 /// Whether `/proc/<pid>/fd` holds an fd whose target is `socket:[inode]`.
@@ -68,116 +199,56 @@ pub fn pid_owns_inode(pid: i32, inode: u32) -> io::Result<bool> {
     Ok(false)
 }
 
-fn diag_socket() -> io::Result<OwnedFd> {
-    // SAFETY: plain socket(2); the raw fd is immediately owned.
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_NETLINK,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            libc::NETLINK_SOCK_DIAG,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd was just returned by socket() and is not owned elsewhere.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+/// Incomplete dumps (`NLMSG_DONE` missing, interrupted, truncated) are retried
+/// until the readiness deadline. Hard errors (`ENOENT`, `EPERM`) are not.
+pub(crate) fn dump_retryable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::TimedOut
+    )
 }
 
 /// One `SOCK_DIAG_BY_FAMILY` dump request for `family × protocol`, all states.
 /// Matching on the exact address/port happens on the response side: dump
 /// filters via `idiag_states` only, and we want the code path identical for
 /// TCP and UDP.
-fn send_dump_request(sock: &OwnedFd, exp: &SocketExpectation) -> io::Result<()> {
-    let len = NLMSG_HDRLEN + INET_DIAG_REQ_V2_LEN;
-    let mut msg = [0u8; NLMSG_HDRLEN + INET_DIAG_REQ_V2_LEN];
-
-    // struct nlmsghdr
-    msg[0..4].copy_from_slice(&(len as u32).to_ne_bytes());
-    msg[4..6].copy_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
-    let flags = (libc::NLM_F_REQUEST | libc::NLM_F_DUMP) as u16;
-    msg[6..8].copy_from_slice(&flags.to_ne_bytes());
-    msg[8..12].copy_from_slice(&1u32.to_ne_bytes()); // seq
-    msg[12..16].copy_from_slice(&0u32.to_ne_bytes()); // pid
-
-    // struct inet_diag_req_v2 { family, protocol, ext, pad, states, sockid }
-    msg[16] = exp.family();
-    msg[17] = exp.protocol;
-    msg[20..24].copy_from_slice(&u32::MAX.to_ne_bytes()); // idiag_states: all
-                                                          // sockid stays zeroed: dump, not exact-lookup.
-
-    // SAFETY: the buffer is valid for `len` bytes for the duration of the call.
-    let sent = unsafe { libc::send(sock.as_raw_fd(), msg.as_ptr().cast(), len, 0) };
-    if sent != len as isize {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+fn dump_request(exp: &SocketExpectation, seq: u32) -> Vec<u8> {
+    let mut req = [0u8; INET_DIAG_REQ_V2_LEN];
+    req[0] = exp.family();
+    req[1] = exp.protocol;
+    req[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
+    MessageBuilder::new(SOCK_DIAG_BY_FAMILY, NLM_F_REQUEST | NLM_F_DUMP, seq, &req).finish()
 }
 
-fn read_matching_inode(sock: &OwnedFd, exp: &SocketExpectation) -> io::Result<Option<u32>> {
-    let mut found = None;
-    let mut buf = vec![0u8; 64 * 1024];
+fn incomplete_diag() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "incomplete sock_diag dump (no NLMSG_DONE)",
+    )
+}
+
+fn poll_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
     loop {
-        // SAFETY: buf is valid for its length for the duration of the call.
-        let received =
-            unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
-        if received < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(err);
+        // SAFETY: pfd is valid for the duration of the call.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc > 0 {
+            return Ok(true);
         }
-        let mut offset = 0usize;
-        let received = received as usize;
-        while offset + NLMSG_HDRLEN <= received {
-            let nl_len = u32::from_ne_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
-            let nl_type = u16::from_ne_bytes(buf[offset + 4..offset + 6].try_into().unwrap());
-            if nl_len < NLMSG_HDRLEN || offset + nl_len > received {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "truncated netlink message",
-                ));
-            }
-            match nl_type {
-                t if t == libc::NLMSG_DONE as u16 => {
-                    // NLMSG_DONE carries the dump's own status as an i32
-                    // payload. A negative value means the dump FAILED (e.g.
-                    // -ENOENT when the kernel lacks the udp_diag handler) and
-                    // must surface as an error, never as "socket absent".
-                    if nl_len >= NLMSG_HDRLEN + 4 {
-                        let status = i32::from_ne_bytes(
-                            buf[offset + NLMSG_HDRLEN..offset + NLMSG_HDRLEN + 4]
-                                .try_into()
-                                .unwrap(),
-                        );
-                        if status < 0 {
-                            return Err(io::Error::from_raw_os_error(-status));
-                        }
-                    }
-                    return Ok(found);
-                }
-                t if t == libc::NLMSG_ERROR as u16 => {
-                    let errno = if nl_len >= NLMSG_HDRLEN + 4 {
-                        i32::from_ne_bytes(
-                            buf[offset + NLMSG_HDRLEN..offset + NLMSG_HDRLEN + 4]
-                                .try_into()
-                                .unwrap(),
-                        )
-                    } else {
-                        0
-                    };
-                    return Err(io::Error::from_raw_os_error(-errno));
-                }
-                _ => {
-                    let payload = &buf[offset + NLMSG_HDRLEN..offset + nl_len];
-                    if let Some(inode) = match_diag_msg(payload, exp) {
-                        found = Some(inode);
-                    }
-                }
-            }
-            // NLMSG_ALIGN
-            offset += (nl_len + 3) & !3;
+        if rc == 0 {
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
@@ -215,6 +286,7 @@ fn match_diag_msg(payload: &[u8], exp: &SocketExpectation) -> Option<u32> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+    use std::time::{Duration, Instant};
 
     // The Q2 machinery, exercised against sockets this test itself owns:
     // enumerate by exact (family, protocol, addr, port), then prove the inode
@@ -284,5 +356,59 @@ mod tests {
             port,
         };
         assert_eq!(find_inode(&exp).expect("dump"), None);
+    }
+
+    fn unused_tcp_port() -> u16 {
+        let bound = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = bound.local_addr().unwrap().port();
+        drop(bound);
+        port
+    }
+
+    #[test]
+    fn probe_ready_reports_absence_only_after_done() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let present = SocketExpectation {
+            protocol: libc::IPPROTO_TCP as u8,
+            addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+        };
+        let missing = SocketExpectation {
+            protocol: libc::IPPROTO_TCP as u8,
+            addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: unused_tcp_port(),
+        };
+        let mut probe = ProbeReady::start([present, missing, missing, missing]).expect("start");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "ProbeReady did not finish four dumps"
+            );
+            if !poll_readable(
+                probe.as_raw_fd(),
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .expect("poll")
+            {
+                panic!("ProbeReady timed out waiting for sock_diag");
+            }
+            match probe.on_readable().expect("on_readable") {
+                ProbeStep::Wait => continue,
+                ProbeStep::Pending { verified, inodes } => {
+                    assert_eq!(verified, 1);
+                    assert!(inodes[0].is_some());
+                    assert!(inodes[1].is_none());
+                    assert!(inodes[2].is_none());
+                    assert!(inodes[3].is_none());
+                    break;
+                }
+                ProbeStep::Ready { .. } => {
+                    panic!("unused ports must not become Ready")
+                }
+            }
+        }
+        drop(listener);
     }
 }

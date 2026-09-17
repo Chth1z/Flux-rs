@@ -35,8 +35,8 @@ use crate::engine::{
     self, CheckDisposition, EngineChild, EngineError, EngineSpec, EngineTransaction, OldGeneration,
     StopNext, SwitchPlan, WaitRole,
 };
-use crate::layout::{InstanceLock, Layout, LockError};
 use crate::logger::Logger;
+use crate::netlink::sock_diag::{dump_retryable, ProbeReady, ProbeStep};
 use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
 use crate::watch::{WatchAction, WatchSet};
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
@@ -77,6 +77,7 @@ const TOK_BPF_RING: u64 = 16;
 const TOK_SUBSCRIPTION_RESULT: u64 = 17;
 const TOK_SUBSCRIPTION_TIMER: u64 = 18;
 const TOK_NL80211: u64 = 19;
+const TOK_SOCK_DIAG: u64 = 20;
 const TOK_CONTROL_CONN_BASE: u64 = 1_024;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -129,6 +130,8 @@ struct Reactor {
     engine_transaction: Option<EngineTransaction>,
     /// A socket-ready child waiting for the Phase 6 TC/control commit point.
     activation_role: Option<WaitRole>,
+    /// SOCK_DIAG ProbeReady while Waiting. Dropped on promote, fail, or cancel.
+    diag_probe: Option<ProbeReady>,
     engine_cancel_requested: bool,
     shutdown_requested: bool,
     /// Buffered partial line of engine output between reads.
@@ -307,6 +310,7 @@ impl Reactor {
             engine: None,
             engine_transaction: None,
             activation_role: None,
+            diag_probe: None,
             engine_cancel_requested: false,
             shutdown_requested: false,
             engine_line: Vec::new(),
@@ -418,6 +422,7 @@ impl Reactor {
                     TOK_CHECK_OUT => self.drain_check_output(),
                     TOK_RTNETLINK => self.handle_rtnetlink(),
                     TOK_NL80211 => self.handle_nl80211(),
+                    TOK_SOCK_DIAG => self.handle_sock_diag(),
                     TOK_TC_VERIFY => self.handle_tc_verify(),
                     TOK_BPF_RING => self.handle_bpf_faults(),
                     TOK_SUBSCRIPTION_RESULT => self.handle_subscription_result(),
@@ -2379,60 +2384,203 @@ impl Reactor {
             self.begin_stop(child, StopNext::Cancelled);
             return;
         }
-        match engine::probe_ready(&mut child, &self.spec) {
-            Ok(engine::Readiness::Ready) => self.promote_ready_child(child, role),
-            Ok(engine::Readiness::Pending { verified }) => {
-                if Instant::now() >= deadline {
-                    let error = EngineError::NotReady { verified };
-                    let next = match role {
-                        WaitRole::Candidate(plan) => StopNext::Recover {
-                            plan,
-                            candidate_error: error,
-                        },
-                        WaitRole::Recovery { candidate_error } => StopNext::FinishRecoveryFailure {
-                            candidate_error,
-                            recovery_error: error,
-                        },
-                    };
-                    self.begin_stop(child, next);
-                } else {
-                    let wait = backoff.min(deadline.saturating_duration_since(Instant::now()));
-                    self.engine_transaction = Some(EngineTransaction::Waiting {
-                        child,
-                        role,
-                        deadline,
-                        backoff: (backoff * 2).min(Duration::from_millis(250)),
-                    });
-                    arm_timer(&self.engine_timer, wait);
-                }
-            }
-            Err(error @ EngineError::Exited { .. }) => match role {
-                WaitRole::Candidate(plan) => {
-                    self.flush_engine_line(child.pid);
-                    self.begin_candidate_failure(plan, error);
-                }
-                WaitRole::Recovery { candidate_error } => {
-                    self.flush_engine_line(child.pid);
-                    self.finish_transaction_error(candidate_error, Some(error))
-                }
-            },
+        if engine::has_exited(&child.pidfd) {
+            self.finish_waiting_exit(child, role);
+            return;
+        }
+        if Instant::now() >= deadline {
+            self.fail_waiting(
+                child,
+                role,
+                EngineError::NotReady {
+                    verified: child.sockets_verified,
+                },
+            );
+            return;
+        }
+
+        match engine::verify_process_identity(&mut child, &self.spec) {
             Err(error) => {
-                let next = match role {
-                    WaitRole::Candidate(plan) => StopNext::Recover {
-                        plan,
-                        candidate_error: error,
-                    },
-                    WaitRole::Recovery { candidate_error } => StopNext::FinishRecoveryFailure {
-                        candidate_error,
-                        recovery_error: error,
-                    },
-                };
-                self.begin_stop(child, next);
+                self.fail_waiting(child, role, EngineError::Io(error));
+                return;
+            }
+            Ok(false) => {
+                self.drop_diag_probe();
+                self.rearm_waiting(child, role, deadline, backoff);
+                return;
+            }
+            Ok(true) => {}
+        }
+
+        if self.diag_probe.is_some() {
+            self.park_waiting(child, role, deadline, backoff);
+            return;
+        }
+
+        match ProbeReady::start(self.spec.expectations(&child.params)) {
+            Err(error) => self.fail_waiting(child, role, EngineError::Io(error)),
+            Ok(probe) => {
+                if let Err(error) = epoll_add(&self.epoll, probe.as_raw_fd(), TOK_SOCK_DIAG) {
+                    self.fail_waiting(child, role, EngineError::Io(error));
+                    return;
+                }
+                self.diag_probe = Some(probe);
+                self.park_waiting(child, role, deadline, backoff);
             }
         }
     }
 
+    fn handle_sock_diag(&mut self) {
+        let Some(mut probe) = self.diag_probe.take() else {
+            return;
+        };
+        let Some(EngineTransaction::Waiting {
+            mut child,
+            role,
+            deadline,
+            backoff,
+        }) = self.engine_transaction.take()
+        else {
+            self.detach_diag_probe(probe);
+            return;
+        };
+
+        if self.engine_cancel_requested {
+            self.detach_diag_probe(probe);
+            self.cleanup_cancelled_wait_role(&role);
+            self.begin_stop(child, StopNext::Cancelled);
+            return;
+        }
+        if engine::has_exited(&child.pidfd) {
+            self.detach_diag_probe(probe);
+            self.finish_waiting_exit(child, role);
+            return;
+        }
+        if Instant::now() >= deadline {
+            self.detach_diag_probe(probe);
+            self.fail_waiting(
+                child,
+                role,
+                EngineError::NotReady {
+                    verified: child.sockets_verified,
+                },
+            );
+            return;
+        }
+
+        match probe.on_readable() {
+            Ok(ProbeStep::Wait) => {
+                self.diag_probe = Some(probe);
+                self.park_waiting(child, role, deadline, backoff);
+            }
+            Ok(ProbeStep::Pending { inodes, .. }) => {
+                self.detach_diag_probe(probe);
+                match engine::verify_listener_inodes(&mut child, inodes) {
+                    Ok(engine::Readiness::Ready) => self.promote_ready_child(child, role),
+                    Ok(engine::Readiness::Pending { .. }) => {
+                        self.rearm_waiting(child, role, deadline, backoff);
+                    }
+                    Err(error) => self.fail_waiting(child, role, error),
+                }
+            }
+            Ok(ProbeStep::Ready { inodes }) => {
+                self.detach_diag_probe(probe);
+                match engine::verify_listener_inodes(&mut child, inodes.map(Some)) {
+                    Ok(engine::Readiness::Ready) => self.promote_ready_child(child, role),
+                    Ok(engine::Readiness::Pending { .. }) => {
+                        self.rearm_waiting(child, role, deadline, backoff);
+                    }
+                    Err(error) => self.fail_waiting(child, role, error),
+                }
+            }
+            Err(error) if dump_retryable(&error) => {
+                self.detach_diag_probe(probe);
+                self.rearm_waiting(child, role, deadline, backoff);
+            }
+            Err(error) => {
+                self.detach_diag_probe(probe);
+                self.fail_waiting(child, role, EngineError::Io(error));
+            }
+        }
+    }
+
+    fn park_waiting(
+        &mut self,
+        child: EngineChild,
+        role: WaitRole,
+        deadline: Instant,
+        backoff: Duration,
+    ) {
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        self.engine_transaction = Some(EngineTransaction::Waiting {
+            child,
+            role,
+            deadline,
+            backoff,
+        });
+        arm_timer(&self.engine_timer, wait);
+    }
+
+    fn rearm_waiting(
+        &mut self,
+        child: EngineChild,
+        role: WaitRole,
+        deadline: Instant,
+        backoff: Duration,
+    ) {
+        let wait = backoff.min(deadline.saturating_duration_since(Instant::now()));
+        self.engine_transaction = Some(EngineTransaction::Waiting {
+            child,
+            role,
+            deadline,
+            backoff: (backoff * 2).min(Duration::from_millis(250)),
+        });
+        arm_timer(&self.engine_timer, wait);
+    }
+
+    fn fail_waiting(&mut self, child: EngineChild, role: WaitRole, error: EngineError) {
+        let next = match role {
+            WaitRole::Candidate(plan) => StopNext::Recover {
+                plan,
+                candidate_error: error,
+            },
+            WaitRole::Recovery { candidate_error } => StopNext::FinishRecoveryFailure {
+                candidate_error,
+                recovery_error: error,
+            },
+        };
+        self.begin_stop(child, next);
+    }
+
+    fn finish_waiting_exit(&mut self, mut child: EngineChild, role: WaitRole) {
+        self.drop_diag_probe();
+        self.flush_engine_line(child.pid);
+        let output_head = engine::drain_output_head(&mut child);
+        let exit =
+            engine::terminate(&child, Duration::ZERO).unwrap_or_else(|e| format!("reap-error:{e}"));
+        let error = EngineError::Exited { exit, output_head };
+        match role {
+            WaitRole::Candidate(plan) => self.begin_candidate_failure(plan, error),
+            WaitRole::Recovery { candidate_error } => {
+                self.finish_transaction_error(candidate_error, Some(error));
+            }
+        }
+    }
+
+    fn drop_diag_probe(&mut self) {
+        if let Some(probe) = self.diag_probe.take() {
+            self.detach_diag_probe(probe);
+        }
+    }
+
+    fn detach_diag_probe(&self, probe: ProbeReady) {
+        let _ = epoll_del(&self.epoll, probe.as_raw_fd());
+    }
+
     fn promote_ready_child(&mut self, child: EngineChild, role: WaitRole) {
+        self.drop_diag_probe();
         if let Err(e) = self.retag_transaction_child(&child, TOK_ENGINE_PIDFD, TOK_ENGINE_OUT) {
             let next = match role {
                 WaitRole::Candidate(plan) => StopNext::Recover {
@@ -2501,6 +2649,7 @@ impl Reactor {
     }
 
     fn begin_stop(&mut self, child: EngineChild, next: StopNext) {
+        self.drop_diag_probe();
         if let Err(e) = self.retag_transaction_child(&child, TOK_TX_PIDFD, TOK_TX_OUT) {
             self.logger
                 .log(&format!("cannot retag engine supervision fds: {e}"));
@@ -2604,6 +2753,7 @@ impl Reactor {
     }
 
     fn cancel_engine_work(&mut self) {
+        self.drop_diag_probe();
         let Some(transaction) = self.engine_transaction.take() else {
             if let Some(role) = self.activation_role.take() {
                 self.cleanup_cancelled_wait_role(&role);
@@ -2665,6 +2815,7 @@ impl Reactor {
     }
 
     fn finish_cancelled(&mut self) {
+        self.drop_diag_probe();
         self.engine_transaction = None;
         disarm_timer(&self.engine_timer);
         if let Some(child) = self.engine.take() {

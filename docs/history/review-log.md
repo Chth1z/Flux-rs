@@ -749,3 +749,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** 更宽或更早都不是旧策略，也不是新策略。`cidr_mode` 对着新旧前缀并集发布时，黑名单 A → 白名单 B 会把 A\B 的目的误捕获；白名单 A → 黑名单 B 会把 A\B 误直连；新 UID 在新 bypass 写入前可见时，两端都该 Direct 的目的会被捕获。TCP 首 SYN 把该结果写入 `SK_STORAGE`，窗口短推不出影响短。审计甲 R01 / 审计乙 A02。
 
 **处置：** 就地改正 §10.5 / §6.4 / §7.2 / §8.5 TOCTOU；`flux-core::policy_epoch` 用四条反例固定合同。不把这句话算进 §0.6 的 8 次推翻（那张表只计测量轮）。生产路径本批不改；仍执行 add-then-subtract 的代码相对新合同是错的，由后续批次收口。不 bump ABI。不实现 TCX。
+
+### 0.6.21 SOCK_DIAG 阻塞 recv 不能被 disable 打断（2026-09-17）
+
+**原说法：** §9.5 的 5 s timerfd 加上“非阻塞、无 sleep”的 `probe_ready` 足以在候选启动期间保持 reactor 可抢占。
+
+**实际：** `find_inode` 每次打开阻塞、无超时的 `NETLINK_SOCK_DIAG` socket，`recv` 直到 `NLMSG_DONE`。timerfd 不能打断这次 `recv`；半份 dump 被当成“socket 不存在”。审计甲 R03 / rc.3 I6。
+
+**处置：** 就地改正 §9.5 / §10.4：`ProbeReady` 把非阻塞 SOCK_DIAG 放进 epoll，每个 datagram 走与 §8.5 相同的完整性门。没有 `NLMSG_DONE` 是 Incomplete，不是 absent。生产路径不再从 reactor 调用阻塞 `find_inode`。不 bump ABI。不实现 TCX。

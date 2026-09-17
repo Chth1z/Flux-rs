@@ -17,8 +17,10 @@
 //!
 //! Liveness is pidfd only. There is no heartbeat, no polling of any kind; the
 //! bounded readiness backoff exists only during candidate startup and dies
-//! with the reactor transaction (§9.5). The §9.4 Checking → Waiting → Stopping
-//! machine lives here; the reactor only drives it from epoll.
+//! with the reactor transaction (§9.5). SOCK_DIAG is a ProbeReady state
+//! machine on epoll; the reactor MUST NOT block in `recv`. The §9.4
+//! Checking → Waiting → Stopping machine lives here; the reactor only drives
+//! it from epoll.
 
 use std::fs;
 use std::io::{self, Write};
@@ -32,7 +34,7 @@ use flux_core::abi::{LISTEN_PORT_MAX, LISTEN_PORT_MIN, LISTEN_V4_STR, LISTEN_V6_
 use flux_core::engine_config::{EngineConfigError, EngineParams};
 
 use crate::layout::Layout;
-use crate::netlink::sock_diag::{find_inode, pid_owns_inode, SocketExpectation};
+use crate::netlink::sock_diag::{pid_owns_inode, ProbeReady, ProbeStep, SocketExpectation};
 
 /// Grace period between `SIGTERM` and `SIGKILL` on a normal stop (§9.4 step 3).
 pub const TERMINATE_GRACE: Duration = Duration::from_secs(3);
@@ -190,7 +192,7 @@ impl EngineSpec {
         }
     }
 
-    fn expectations(&self, params: &EngineParams) -> [SocketExpectation; 4] {
+    pub(crate) fn expectations(&self, params: &EngineParams) -> [SocketExpectation; 4] {
         [
             SocketExpectation {
                 protocol: libc::IPPROTO_TCP as u8,
@@ -887,25 +889,15 @@ pub enum Readiness {
     Ready,
 }
 
-/// One non-blocking readiness pass. The reactor drives repeated passes from a
-/// timerfd; no sleep or poll occurs here.
-pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readiness, EngineError> {
-    if has_exited(&child.pidfd) {
-        let exit = reap(child);
-        return Err(EngineError::Exited {
-            exit,
-            output_head: drain_output_head(child),
-        });
-    }
-    if !verify_process_identity(child, spec).map_err(EngineError::Io)? {
-        return Ok(Readiness::Pending { verified: 0 });
-    }
-
-    let expectations = spec.expectations(&child.params);
+/// Cross-check SOCK_DIAG inodes against `/proc/<pid>/fd`.
+pub fn verify_listener_inodes(
+    child: &mut EngineChild,
+    inodes: [Option<u32>; 4],
+) -> Result<Readiness, EngineError> {
     let mut verified = 0u8;
     let mut all_present = true;
-    for exp in &expectations {
-        match find_inode(exp).map_err(EngineError::Io)? {
+    for inode in inodes {
+        match inode {
             Some(inode) => match pid_owns_inode(child.pid, inode) {
                 Ok(true) => verified += 1,
                 Ok(false) => return Err(EngineError::SocketOwnerMismatch { inode }),
@@ -919,6 +911,44 @@ pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readine
         Ok(Readiness::Ready)
     } else {
         Ok(Readiness::Pending { verified })
+    }
+}
+
+/// One readiness pass for tests: identity, then a bounded ProbeReady.
+/// The reactor MUST NOT call this; it drives ProbeReady from epoll so a dump
+/// cannot block disable (§9.5).
+pub fn probe_ready(child: &mut EngineChild, spec: &EngineSpec) -> Result<Readiness, EngineError> {
+    if has_exited(&child.pidfd) {
+        let exit = reap(child);
+        return Err(EngineError::Exited {
+            exit,
+            output_head: drain_output_head(child),
+        });
+    }
+    if !verify_process_identity(child, spec).map_err(EngineError::Io)? {
+        return Ok(Readiness::Pending { verified: 0 });
+    }
+
+    let mut probe = ProbeReady::start(spec.expectations(&child.params)).map_err(EngineError::Io)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match probe.on_readable().map_err(EngineError::Io)? {
+            ProbeStep::Wait => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() || !poll_readable(probe.as_raw_fd(), remaining) {
+                    return Err(EngineError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "incomplete sock_diag dump (no NLMSG_DONE)",
+                    )));
+                }
+            }
+            ProbeStep::Pending { inodes, .. } => {
+                return verify_listener_inodes(child, inodes);
+            }
+            ProbeStep::Ready { inodes } => {
+                return verify_listener_inodes(child, inodes.map(Some));
+            }
+        }
     }
 }
 
