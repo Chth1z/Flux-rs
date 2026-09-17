@@ -105,7 +105,7 @@ pub enum Effect {
     ExitProcess,
     /// Re-validate configuration; change nothing in the data plane.
     RevalidateOnly,
-    /// Policy add-then-subtract; leave `active` untouched (§10.5).
+    /// Commit one PolicyEpoch; leave `active` untouched (§10.5).
     PolicyTransaction,
     /// Engine candidate switch (§9.4).
     EngineCandidateSwitch,
@@ -366,7 +366,8 @@ pub fn freezes_capture(effects: &[Effect]) -> bool {
 /// Observable facts used only to reconstruct [`Phase`] after I/O completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
-    /// Manager `disable` file is present.
+    /// Manager `disable` file is present **or unreadable**. Unreadable is
+    /// not enabled: capture must not start from this observation.
     pub disable_present: bool,
     /// SIGTERM/stop has been accepted.
     pub shutdown: bool,

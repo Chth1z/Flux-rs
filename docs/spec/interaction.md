@@ -10,8 +10,9 @@
 
 ```text
 /data/adb/modules/Flux-rs/disable
-present = desired disabled (MAY briefly be Inactive during convergence; Disabled on completion)
-absent = desired enabled (then MAY be Inactive or Active)
+present     = desired disabled (MAY briefly be Inactive during convergence; Disabled on completion)
+absent      = desired enabled (then MAY be Inactive or Active)
+unreadable  = not enabled: capture MUST NOT start; `status` reports the observation failure
 ```
 
 **This is the same file that Magisk / KernelSU / APatch creates and deletes when you toggle the module switch.** Flux no longer maintains a second switch: `/data/adb/flux-rs/disable` does not exist, and `flux.toml` has no `enabled` key.

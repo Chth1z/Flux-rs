@@ -16,6 +16,7 @@ pub(crate) const NLM_F_ACK: u16 = 0x0004;
 pub(crate) const NLM_F_ROOT: u16 = 0x0100;
 pub(crate) const NLM_F_MATCH: u16 = 0x0200;
 pub(crate) const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
+pub(crate) const NLM_F_DUMP_INTR: u16 = 0x0010;
 pub(crate) const NLM_F_EXCL: u16 = 0x0200;
 pub(crate) const NLM_F_CREATE: u16 = 0x0400;
 
@@ -110,6 +111,7 @@ pub(crate) struct TcMsg {
 #[derive(Debug, Clone)]
 pub(crate) struct RawMessage {
     pub kind: u16,
+    pub flags: u16,
     pub seq: u32,
     pub pid: u32,
     pub payload: Vec<u8>,
@@ -454,11 +456,18 @@ impl RequestSocket {
         loop {
             for message in self.recv(seq)? {
                 match message.kind {
-                    NLMSG_DONE => return Ok(out),
+                    NLMSG_DONE => {
+                        return finish_dump(out, &message, false);
+                    }
                     NLMSG_ERROR => parse_ack(&message.payload)?,
                     NLMSG_OVERRUN => return Err(overrun()),
                     NLMSG_NOOP => {}
-                    _ => out.push(message),
+                    _ => {
+                        if message.flags & NLM_F_DUMP_INTR != 0 {
+                            return Err(dump_interrupted());
+                        }
+                        out.push(message);
+                    }
                 }
             }
         }
@@ -494,19 +503,11 @@ impl RequestSocket {
             wait_fd(self.fd.as_raw_fd(), libc::POLLIN)?;
         }
         let mut bytes = vec![0u8; MAX_DATAGRAM];
-        // SAFETY: bytes is writable for its full capacity.
-        let read = unsafe {
-            libc::recv(
-                self.fd.as_raw_fd(),
-                bytes.as_mut_ptr().cast(),
-                bytes.len(),
-                0,
-            )
-        };
-        if read < 0 {
-            return Err(io::Error::last_os_error());
+        let (read, truncated) = recv_datagram(self.fd.as_raw_fd(), &mut bytes)?;
+        if truncated {
+            return Err(dump_truncated());
         }
-        bytes.truncate(read as usize);
+        bytes.truncate(read);
         let mut matching = Vec::new();
         for message in parse_datagram(&bytes)? {
             if message.seq != seq {
@@ -568,23 +569,23 @@ fn drain_messages(fd: RawFd) -> io::Result<(Vec<RawMessage>, bool)> {
     let mut messages = Vec::new();
     loop {
         let mut bytes = vec![0u8; MAX_DATAGRAM];
-        // SAFETY: bytes is writable for its full capacity; the descriptor
-        // was created non-blocking.
-        let read = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
-        if read < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
+        let (read, truncated) = match recv_datagram(fd, &mut bytes) {
+            Ok(pair) => pair,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 return Ok((messages, false));
             }
-            if error.raw_os_error() == Some(libc::ENOBUFS) {
-                return Ok((messages, true));
+            Err(error) if error.raw_os_error() == Some(libc::ENOBUFS) => {
+                return Ok((Vec::new(), true));
             }
-            return Err(error);
+            Err(error) => return Err(error),
+        };
+        if truncated {
+            return Ok((Vec::new(), true));
         }
-        bytes.truncate(read as usize);
+        bytes.truncate(read);
         for message in parse_datagram(&bytes)? {
             if message.kind == NLMSG_OVERRUN {
-                return Ok((messages, true));
+                return Ok((Vec::new(), true));
             }
             messages.push(message);
         }
@@ -617,6 +618,28 @@ fn wait_fd(fd: RawFd, events: libc::c_short) -> io::Result<()> {
     }
 }
 
+/// One datagram via `recvmsg` so `MSG_TRUNC` is visible (blueprint §8.5).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn recv_datagram(fd: RawFd, bytes: &mut [u8]) -> io::Result<(usize, bool)> {
+    let mut iov = libc::iovec {
+        iov_base: bytes.as_mut_ptr().cast(),
+        iov_len: bytes.len(),
+    };
+    // SAFETY: `msghdr` is a C struct of integer and pointer fields. A
+    // zeroed instance is an empty message; we fill `msg_iov` before the call.
+    let mut msg = unsafe { std::mem::zeroed::<libc::msghdr>() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    // SAFETY: `msg` points at one iovec covering `bytes`; the kernel writes
+    // at most `bytes.len()` and reports truncation in `msg_flags`.
+    let read = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    if read < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let truncated = msg.msg_flags & libc::MSG_TRUNC != 0;
+    Ok((read as usize, truncated))
+}
+
 fn parse_datagram(bytes: &[u8]) -> io::Result<Vec<RawMessage>> {
     let mut out = Vec::new();
     let mut offset = 0usize;
@@ -637,6 +660,7 @@ fn parse_datagram(bytes: &[u8]) -> io::Result<Vec<RawMessage>> {
         }
         out.push(RawMessage {
             kind: header.kind,
+            flags: header.flags,
             seq: header.seq,
             pid: header.pid,
             payload: bytes[offset + size_of::<NlMsgHdr>()..offset + len].to_vec(),
@@ -671,8 +695,49 @@ fn parse_ack(payload: &[u8]) -> io::Result<()> {
     }
 }
 
+fn parse_done_status(payload: &[u8]) -> i32 {
+    if payload.len() < 4 {
+        0
+    } else {
+        i32::from_ne_bytes(payload[0..4].try_into().expect("size checked"))
+    }
+}
+
+fn finish_dump(
+    items: Vec<RawMessage>,
+    done: &RawMessage,
+    truncated: bool,
+) -> io::Result<Vec<RawMessage>> {
+    let interrupted =
+        done.flags & NLM_F_DUMP_INTR != 0 || items.iter().any(|m| m.flags & NLM_F_DUMP_INTR != 0);
+    let done_status = parse_done_status(&done.payload);
+    flux_core::snapshot::TrustedSnapshot::try_from_parts(
+        items,
+        interrupted,
+        truncated,
+        false,
+        done_status,
+    )
+    .map(flux_core::snapshot::TrustedSnapshot::into_inner)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+}
+
 fn overrun() -> io::Error {
     io::Error::other("netlink dump overrun; a full resynchronization is required")
+}
+
+fn dump_interrupted() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Interrupted,
+        "netlink dump interrupted (NLM_F_DUMP_INTR)",
+    )
+}
+
+fn dump_truncated() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "netlink datagram truncated (MSG_TRUNC)",
+    )
 }
 
 #[cfg(test)]
@@ -709,5 +774,62 @@ mod tests {
         const LINUX_EEXIST: i32 = 17;
         let error = parse_ack(&(-LINUX_EEXIST).to_ne_bytes()).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(LINUX_EEXIST));
+    }
+
+    fn done_message(flags: u16, status: i32) -> RawMessage {
+        RawMessage {
+            kind: NLMSG_DONE,
+            flags,
+            seq: 1,
+            pid: 0,
+            payload: status.to_ne_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn parse_datagram_preserves_header_flags() {
+        let bytes = MessageBuilder::new(16, NLM_F_DUMP_INTR | NLM_F_REQUEST, 9, &[]).finish();
+        let messages = parse_datagram(&bytes).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].flags, NLM_F_DUMP_INTR | NLM_F_REQUEST);
+        assert_eq!(messages[0].seq, 9);
+    }
+
+    #[test]
+    fn dump_done_zero_is_complete() {
+        let out = finish_dump(Vec::new(), &done_message(0, 0), false).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dump_done_negative_is_incomplete() {
+        let error = finish_dump(Vec::new(), &done_message(0, -2), false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("done_status=-2"));
+    }
+
+    #[test]
+    fn dump_intr_flag_is_incomplete() {
+        let error = finish_dump(Vec::new(), &done_message(NLM_F_DUMP_INTR, 0), false).unwrap_err();
+        assert!(error.to_string().contains("interrupted=true"));
+    }
+
+    #[test]
+    fn dump_intr_on_a_data_message_is_incomplete() {
+        let item = RawMessage {
+            kind: 16,
+            flags: NLM_F_DUMP_INTR,
+            seq: 1,
+            pid: 0,
+            payload: Vec::new(),
+        };
+        let error = finish_dump(vec![item], &done_message(0, 0), false).unwrap_err();
+        assert!(error.to_string().contains("interrupted=true"));
+    }
+
+    #[test]
+    fn dump_truncation_is_incomplete() {
+        let error = finish_dump(Vec::new(), &done_message(0, 0), true).unwrap_err();
+        assert!(error.to_string().contains("truncated=true"));
     }
 }

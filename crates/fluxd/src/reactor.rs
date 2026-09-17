@@ -38,6 +38,7 @@ use crate::engine::{
 use crate::layout::{InstanceLock, Layout, LockError};
 use crate::logger::Logger;
 use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
+use crate::watch::{WatchAction, WatchSet};
 use flux_core::abi::{FaultEvent, FaultKey, FaultReason};
 use flux_core::config::{FluxConfig, ListMode, NodeConfig};
 use flux_core::control_wire::{
@@ -46,6 +47,7 @@ use flux_core::control_wire::{
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
 use flux_core::runtime::{project, DisplayKind, Effect, Generations, Observation, Phase, Stimulus};
 use flux_core::selector::PackageIndex;
+use flux_core::snapshot::Presence;
 use flux_core::ssid::ssid_verdict;
 
 /// Trailing debounce for config-directory churn: editors and `mv`-based
@@ -111,10 +113,7 @@ struct Reactor {
     logger: Logger,
     epoll: OwnedFd,
     signal_fd: OwnedFd,
-    inotify_fd: OwnedFd,
-    module_wd: i32,
-    config_wd: i32,
-    packages_wd: Option<i32>,
+    watches: WatchSet,
     debounce_timer: OwnedFd,
     backoff_timer: OwnedFd,
     control_timer: OwnedFd,
@@ -227,7 +226,7 @@ impl Reactor {
         let spec = EngineSpec::product(&layout);
         let epoll = epoll_create()?;
         let signal_fd = make_signalfd()?;
-        let (inotify_fd, module_wd, config_wd, packages_wd) = make_inotify(&layout)?;
+        let watches = WatchSet::open(&layout)?;
         let debounce_timer = make_timerfd()?;
         let backoff_timer = make_timerfd()?;
         let control_timer = make_timerfd()?;
@@ -269,7 +268,7 @@ impl Reactor {
 
         epoll_add(&epoll, signal_fd.as_raw_fd(), TOK_SIGNAL)?;
         epoll_add(&epoll, server.as_raw_fd(), TOK_CONTROL)?;
-        epoll_add(&epoll, inotify_fd.as_raw_fd(), TOK_INOTIFY)?;
+        epoll_add(&epoll, watches.as_raw_fd(), TOK_INOTIFY)?;
         epoll_add(&epoll, debounce_timer.as_raw_fd(), TOK_DEBOUNCE)?;
         epoll_add(&epoll, backoff_timer.as_raw_fd(), TOK_BACKOFF)?;
         epoll_add(&epoll, control_timer.as_raw_fd(), TOK_CONTROL_TIMEOUT)?;
@@ -293,10 +292,7 @@ impl Reactor {
             logger,
             epoll,
             signal_fd,
-            inotify_fd,
-            module_wd,
-            config_wd,
-            packages_wd,
+            watches,
             debounce_timer,
             backoff_timer,
             control_timer,
@@ -1004,58 +1000,44 @@ impl Reactor {
     }
 
     fn handle_inotify(&mut self) {
-        let mut buf = [0u8; 4096];
+        let actions = match self.watches.drain() {
+            Ok(actions) => actions,
+            Err(error) => {
+                self.logger.log(&format!(
+                    "inotify read failed: {error}; treating as overflow"
+                ));
+                vec![WatchAction::Overflow]
+            }
+        };
         let mut switch_changed = false;
         let mut policy_changed = false;
         let mut engine_config_changed = false;
-        loop {
-            // SAFETY: buf is a valid buffer for its length; the fd is our
-            // non-blocking inotify fd.
-            let n = unsafe {
-                libc::read(
-                    self.inotify_fd.as_raw_fd(),
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                )
-            };
-            if n <= 0 {
-                break;
-            }
-            let mut offset = 0usize;
-            let n = n as usize;
-            const EVENT_HEAD: usize = std::mem::size_of::<libc::inotify_event>();
-            while offset + EVENT_HEAD <= n {
-                // SAFETY: offset+EVENT_HEAD <= n, so the header is fully
-                // inside the buffer; read_unaligned handles any alignment.
-                let event = unsafe {
-                    std::ptr::read_unaligned(buf[offset..].as_ptr() as *const libc::inotify_event)
-                };
-                let name_len = event.len as usize;
-                let name_bytes = &buf[offset + EVENT_HEAD..(offset + EVENT_HEAD + name_len).min(n)];
-                let name = name_bytes
-                    .split(|b| *b == 0)
-                    .next()
-                    .map(|s| String::from_utf8_lossy(s).into_owned())
-                    .unwrap_or_default();
-                if event.mask & libc::IN_Q_OVERFLOW != 0 {
+        let mut rebuild = false;
+        for action in actions {
+            match action {
+                WatchAction::Switch => switch_changed = true,
+                WatchAction::Config => {
                     policy_changed = true;
                     engine_config_changed = true;
-                } else if event.wd == self.module_wd && name == "disable" {
-                    switch_changed = true;
-                } else if event.wd == self.config_wd && !name.is_empty() {
-                    // Every config child can affect policy, generation, or
-                    // both. Recompute both pure outputs; generated-byte
-                    // equality, not the filename, decides whether to rotate
-                    // the engine (blueprint §28.6, Batch C5).
-                    policy_changed = true;
-                    engine_config_changed = true;
-                } else if self.packages_wd == Some(event.wd) && name == "packages.list" {
-                    policy_changed = true;
                 }
-                offset += EVENT_HEAD + name_len;
+                WatchAction::Policy => policy_changed = true,
+                WatchAction::Rebuild => {
+                    rebuild = true;
+                    policy_changed = true;
+                    engine_config_changed = true;
+                }
+                WatchAction::Overflow => {
+                    rebuild = true;
+                    policy_changed = true;
+                    engine_config_changed = true;
+                }
             }
         }
-        // The switch acts immediately; config churn is debounced (§10.4).
+        if rebuild {
+            if let Err(error) = self.watches.rebuild(&self.layout) {
+                self.logger.log(&format!("inotify rebuild failed: {error}"));
+            }
+        }
         if switch_changed {
             self.converge("disable-file change");
         }
@@ -3466,33 +3448,42 @@ impl Reactor {
         };
 
         let mut warnings = Vec::new();
-        if disabled {
-            warnings.push(format!(
-                "disabled: the switch file {} exists; `fluxd enable` removes it",
-                self.layout.disable_file().display()
-            ));
-            if self.engine.is_some() || self.convergence_busy() {
-                warnings.push(
-                    "disable is pending: the engine has not confirmed termination".to_string(),
-                );
+        match self.layout.disable_presence() {
+            Presence::Present => {
+                warnings.push(format!(
+                    "disabled: the switch file {} exists; `fluxd enable` removes it",
+                    self.layout.disable_file().display()
+                ));
+                if self.engine.is_some() || self.convergence_busy() {
+                    warnings.push(
+                        "disable is pending: the engine has not confirmed termination".to_string(),
+                    );
+                }
             }
-        } else {
-            warnings.extend(self.dataplane.status().warnings.iter().cloned());
-            if state != State::Active && self.dataplane.status().attachment_ready {
-                warnings.push(
+            Presence::Unreadable => {
+                warnings.push(format!(
+                    "switch unreadable: {} could not be observed; capture is not enabled",
+                    self.layout.disable_file().display()
+                ));
+            }
+            Presence::Absent => {
+                warnings.extend(self.dataplane.status().warnings.iter().cloned());
+                if state != State::Active && self.dataplane.status().attachment_ready {
+                    warnings.push(
                     "traffic is NOT proxied yet: TC is attached but the Phase 6 active control commit is pending"
                         .to_string(),
-                );
-            } else if state != State::Active && self.dataplane.status().bpf_ready {
-                warnings.push(
+                    );
+                } else if state != State::Active && self.dataplane.status().bpf_ready {
+                    warnings.push(
                     "traffic is NOT proxied yet: the inactive BPF runtime is ready and TC liveness verification is pending"
                         .to_string(),
-                );
-            } else if state != State::Active && self.dataplane.status().topology_ready {
-                warnings.push(
+                    );
+                } else if state != State::Active && self.dataplane.status().topology_ready {
+                    warnings.push(
                     "traffic is NOT proxied yet: the network seam is ready but no BPF runtime is loaded"
                         .to_string(),
-                );
+                    );
+                }
             }
         }
         if let Some(detail) = &self.last_error_detail {
@@ -3660,7 +3651,7 @@ fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
     }
     if counters.drop_udp_frag > 0 {
         hints.push(
-            "fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"
+            "selected-app IP fragments with no TCP decision are dropped by design (§7.3); large DNS/QUIC payloads may fail"
                 .to_string(),
         );
     }
@@ -3779,62 +3770,6 @@ fn make_signalfd() -> io::Result<OwnedFd> {
         }
         Ok(OwnedFd::from_raw_fd(fd))
     }
-}
-
-/// Inotify on the manager's module directory (the switch), the config
-/// directory and the parent of packages.list.
-fn make_inotify(layout: &Layout) -> io::Result<(OwnedFd, i32, i32, Option<i32>)> {
-    use std::os::unix::ffi::OsStrExt;
-    // SAFETY: plain inotify_init1; the fd is immediately owned.
-    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: just returned by the kernel, not owned elsewhere.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-    let add = |dir: &Path, mask: u32| -> io::Result<i32> {
-        let path = std::ffi::CString::new(dir.as_os_str().as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
-        // SAFETY: valid fd and NUL-terminated path.
-        let wd = unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), mask) };
-        if wd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(wd)
-    };
-
-    // The manager creates and removes `disable` here when the user toggles the
-    // module, which is why the toggle takes effect without a reboot.
-    let module_wd = add(
-        layout.module_dir(),
-        libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM,
-    )?;
-    let config_wd = add(
-        &layout.config_dir(),
-        libc::IN_CLOSE_WRITE
-            | libc::IN_CREATE
-            | libc::IN_DELETE
-            | libc::IN_MOVED_TO
-            | libc::IN_MOVED_FROM,
-    )?;
-    // Linux development hosts do not have Android's /data/system. On Android,
-    // watching the parent rather than the inode catches atomic replacement.
-    let packages_wd = Path::new(crate::packages::PACKAGES_LIST_PATH)
-        .parent()
-        .filter(|parent| parent.exists())
-        .and_then(|parent| {
-            add(
-                parent,
-                libc::IN_CLOSE_WRITE
-                    | libc::IN_CREATE
-                    | libc::IN_DELETE
-                    | libc::IN_MOVED_TO
-                    | libc::IN_MOVED_FROM,
-            )
-            .ok()
-        });
-    Ok((fd, module_wd, config_wd, packages_wd))
 }
 
 fn make_timerfd() -> io::Result<OwnedFd> {
@@ -3998,7 +3933,9 @@ mod tests {
         assert!(hints
             .iter()
             .any(|hint| hint.starts_with("packets reached the veth")));
-        assert!(hints.iter().any(|hint| hint.starts_with("fragmented UDP")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.starts_with("selected-app IP fragments")));
 
         let empty = counter_hints(State::Active, &Counters::default());
         assert_eq!(empty.len(), 1);

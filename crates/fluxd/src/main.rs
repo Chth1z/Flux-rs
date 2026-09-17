@@ -55,6 +55,8 @@ mod subscription;
 mod supervisor;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod time;
+#[cfg(any(target_os = "linux", target_os = "android", test))]
+mod watch;
 
 use std::process::ExitCode;
 

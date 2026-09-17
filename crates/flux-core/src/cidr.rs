@@ -55,7 +55,7 @@ pub enum CidrError {
 }
 
 /// A canonical IPv4 prefix: the address has no bits set below `prefix_len`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv4Cidr {
     /// Network address, already masked to `prefix_len`.
     pub addr: Ipv4Addr,
@@ -64,7 +64,7 @@ pub struct Ipv4Cidr {
 }
 
 /// A canonical IPv6 prefix: the address has no bits set below `prefix_len`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv6Cidr {
     /// Network address, already masked to `prefix_len`.
     pub addr: Ipv6Addr,

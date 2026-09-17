@@ -66,7 +66,8 @@ Every possible failure point specifies **how it is detected, what action is take
 | Interface disappears | `RTM_DELLINK` | The kernel has also deleted its filter; remove it from the active set. If this was the last active capture interface, first publish `active=0` and enter `Inactive`; otherwise remain `Active` | Flows on that interface return to the Android path (R091-10) |
 | Interface appears | `RTM_NEWLINK` + admission | Attach after debounce; if zero coverage previously caused `Inactive`, publish `active=1` again after the admission + readiness loop closes | Direct during the window (R091-10) |
 | Netlink socket overflows | `ENOBUFS` / `NLMSG_OVERRUN` | **Discard the batch and perform a complete new dump** (§10.4.1 item 2) | None (control-plane internal) |
-| Map update fails during a policy hot update | errno from `bpf_map_update_elem` | Record the error and **enqueue one complete convergence again**; do not roll back a snapshot (§10.5) | New flows may observe a mixed policy during the window (benign) |
+| Map update fails during a policy hot update | errno from `bpf_map_update_elem` | Keep the live epoch unchanged; record the error and **enqueue one complete convergence again**; do not unwind by mutating the live bank (§10.5) | New flows keep seeing the **complete old epoch**. A mixed epoch is a defect, not a benign window |
+| The `disable` file metadata is neither success nor `NotFound` | `EIO` / `EACCES` / … | Treat as **Unreadable**: do not enable capture; `status` reports the path could not be observed (§11.1, §27.1.1) | Capture stays off. Not the same as "file absent" |
 | `uid_policy` exceeds 4096 or more than 1024 entries are simultaneously `SELECTED` | Count each separately | Reject the hot update and retain the current policy | No change |
 | Any bypass LPM exceeds 65536 | Count by address family; local addresses do not count toward the LPM | **Reject activation and report it**; do not silently discard entries | Direct |
 | Any self-address HASH exceeds 256 | Count exact addresses by address family | **Reject activation and report it**; do not silently discard entries | Direct |
@@ -200,7 +201,7 @@ The opposite of zero observability is not "print more numbers"; it is to **perfo
 | `egress_listener_miss > 0` and `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
 | `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check the [cidr] mode and list, and active"` |
 | All counters are 0 and `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
-| `drop_udp_frag > 0` | `"fragmented UDP from selected apps is dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
+| `drop_udp_frag > 0` | `"selected-app IP fragments with no TCP decision are dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
 | `in_pass_established` is much greater than `in_assign_tcp` | Normal (one assign and many passes per connection). **Produce no hint**; this row exists only to prevent a false positive |
 
 ---

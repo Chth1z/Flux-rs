@@ -1024,6 +1024,8 @@ impl Manager {
 
     /// Removes only objects that satisfy the complete ownership
     /// predicate. The plan is dumped twice before the first deletion.
+    /// Each dump is a TrustedSnapshot: an incomplete view cannot become a
+    /// deletion permit.
     fn cleanup_owned(&mut self) -> Result<(), DataplaneError> {
         let first = self.cleanup_plan()?;
         let second = self.cleanup_plan()?;

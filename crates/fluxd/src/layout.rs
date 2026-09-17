@@ -5,18 +5,16 @@
 //! kernel even on `SIGKILL` — there is no stale-lock recovery path to get wrong.
 //!
 //! The on/off switch is the presence of `disable` in the root manager's own
-//! module directory (owner decision C9, `docs/spec/interaction.md` §27.1): present = disabled,
-//! absent = enabled. That is the same file Magisk, KernelSU and APatch create
-//! when you toggle the module in their UI, so the manager toggle takes effect
-//! immediately through inotify instead of waiting for a reboot. There is
-//! exactly one switch; `fluxd enable`/`fluxd disable` write that same file.
+//! module directory (owner decision C9, `docs/spec/interaction.md` §27.1):
+//! present = disabled, absent = enabled, any other metadata failure =
+//! [`Presence::Unreadable`]. Unreadable MUST NOT be treated as enabled.
 
+use flux_core::snapshot::Presence;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
 
 /// Reads at most `cap` bytes; the caller's parser enforces its own limit, this
 /// only prevents an accidentally huge file from being slurped whole.
@@ -245,9 +243,21 @@ impl Layout {
         Ok(repairs)
     }
 
-    /// Whether the switch says "disabled" (file present).
+    /// Observation of the manager switch file (C9). Contents are never read.
+    pub fn disable_presence(&self) -> Presence {
+        match self.disable_file().symlink_metadata() {
+            Ok(_) => Presence::Present,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Presence::Absent,
+            Err(_) => Presence::Unreadable,
+        }
+    }
+
+    /// Whether capture must not be requested from the switch.
+    ///
+    /// True for both a present `disable` file and an unreadable path. Only
+    /// [`Presence::Absent`] permits capture (blueprint §11.1).
     pub fn disabled(&self) -> bool {
-        self.disable_file().symlink_metadata().is_ok()
+        !self.disable_presence().capture_permitted()
     }
 
     /// Creates the disable file (idempotent).
@@ -650,6 +660,25 @@ mod tests {
         layout.set_enabled().unwrap();
         layout.set_enabled().unwrap();
         assert!(!layout.disabled());
+        fs::remove_dir_all(layout.root()).unwrap();
+    }
+
+    #[test]
+    fn unreadable_disable_is_not_treated_as_enabled() {
+        let layout = tmp_layout("switch-unreadable");
+        layout.ensure().expect("create");
+        assert_eq!(layout.disable_presence(), Presence::Absent);
+        // Root can still search a 000 directory it owns, so the EACCES path
+        // is only asserted for an unprivileged uid.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            fs::remove_dir_all(layout.root()).unwrap();
+            return;
+        }
+        fs::set_permissions(layout.root(), fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(layout.disable_presence(), Presence::Unreadable);
+        assert!(layout.disabled(), "Unreadable must not collapse to enabled");
+        fs::set_permissions(layout.root(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(layout.root()).unwrap();
     }
 

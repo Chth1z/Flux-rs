@@ -720,7 +720,8 @@ datagram**, every pre-redirect failure below is Direct:
   boundary**, and a `DIRECT` storage entry is not admission. From here neither
   this packet nor any later parseable packet may go direct because of an internal
   Flux error;
-- a selected, active UDP fragment that missed the bypass;
+- a selected, active IP fragment with no TCP decision that missed the bypass
+  (historical counter name `drop_udp_frag`; L4 is not proven);
 - any failure after `bpf_skb_change_head()` has added the internal Ethernet
   header on a raw-IP interface;
 - any failure after the EtherType has been written at the L3 entry — the L2 entry
@@ -1157,6 +1158,8 @@ Flux-rs/
 │   │       ├── config.rs          # flux.toml parse, canonicalise, hard ceilings
 │   │       ├── selector.rs        # "userId:package" parse, UID maths, appId range
 │   │       ├── cidr.rs            # CIDR canonicalise, fixed bypass, LPM key encoding
+│   │       ├── policy_epoch.rs    # §10.5 epoch model and add-then-subtract counterexamples
+│   │       ├── snapshot.rs        # TrustedSnapshot + Presence (incomplete ≠ absent)
 │   │       ├── engine_config.rs   # template validation and generated-config assembly
 │   │       ├── abi.rs             # Rust mirror of flux_abi.h, with layout assertions
 │   │       ├── control_wire.rs    # control protocol request/response types
@@ -1172,6 +1175,7 @@ Flux-rs/
 │           ├── layout.rs          # directories, permissions, single-instance lock
 │           ├── control.rs         # SOCK_SEQPACKET server, client, session FSM
 │           ├── reactor.rs         # epoll adapter: Stimulus in, Effect out
+│           ├── watch.rs           # inotify WatchSet: parent dirs, rebuild on replace
 │           ├── packages.rs        # reads and parses /data/system/packages.list
 │           ├── netlink/           # rtnetlink: link/addr/route/rule/tc codecs and operations
 │           ├── bpf/               # minimal loader: syscalls, BTF blob, relocation, maps, ringbuf
@@ -1263,9 +1267,10 @@ in CI. **Changing any layout MUST change `FLUX_ABI_MAGIC` in the same commit.**
   keeps the ABI from forking on page size.
 - Maps are **not pinned**.
 - Forbidden: a `bpf_spin_lock` that would make selected packets contend
-  globally; per-packet telemetry; a per-flow map; and any claim that an `ARRAY`
-  update of a large struct is atomic. Adding a map requires stating its hot-path
-  and lifecycle cost.
+  globally; per-packet telemetry; a per-flow map; any claim that an `ARRAY`
+  update of a large struct is atomic; and putting `uid_policy` behind
+  `ARRAY_OF_MAPS` (unselected traffic would pay a map-in-map on E1, §14.1).
+  Adding a map requires stating its hot-path and lifecycle cost.
 
 ### 6.1.1 The bypass value distinguishes mechanism from policy
 
@@ -1371,13 +1376,27 @@ The leaf is frozen before publication and never modified in place. A single
 invocation therefore sees either the old or the new snapshot **whole**, and never
 a struct torn mid-`memcpy`.
 
+**Three layers of atomicity, which do not imply each other:**
+
+1. One `bpf_map_update_elem` of a single value is atomic in the kernel.
+2. Publishing a frozen control leaf through `control_root` is atomic: one
+   invocation sees the old leaf or the new leaf whole.
+3. Observable policy behaviour is atomic only when `cidr_mode` and the
+   UID / LPM / self-address sets belong to the same PolicyEpoch (§10.5)
+   — either because they live in that leaf, or because that leaf names the bank
+   that holds them.
+
+Layer 2 without layer 3 is how add-then-subtract produced a third state: a leaf
+swap changed `cidr_mode` while the tries still held the union. This contract
+requires layer 3. Do not put `uid_policy` behind `ARRAY_OF_MAPS`.
+
 **When a new leaf is created:** an engine generation switch, an `active` flip
-between 0 and 1, or a change to a topology field — an ifindex, a listener address
-or port. **A policy change to UIDs or CIDRs creates no new leaf and does not
-flip `active`** (D5), and the diagnostic counts above are refreshed only when the
-next legitimate leaf is published. BPF programs MUST NOT treat those counts as
-policy authority, and `status` computes live counts from the data plane's current
-set rather than reading them.
+between 0 and 1, a change to a topology field — an ifindex, a listener address
+or port — or a PolicyEpoch commit. **A PolicyEpoch commit MUST NOT flip `active`
+and MUST NOT increment `generation`** (D5). Diagnostic counts refresh on that
+publication. BPF programs MUST NOT treat those counts as policy authority, and
+`status` computes live counts from the data plane's current set rather than
+reading them.
 
 ## 6.5 generation
 
@@ -1403,8 +1422,8 @@ switch of §9.4 increments it.
   exactly one `bpf_sk_release()` on every branch. **`bpf_sk_assign()` does not
   release.** `bpf_sk_fullsock()` takes no reference and MUST NOT be released.
 - A socket pointer MUST NOT be stored in a map or passed between programs.
-- Every offset computation is preceded by a fixed bound and a `data_end` check
-  the verifier can see.
+- Every offset computation is preceded by a fixed bound and a check against
+  both `l3_end` and `data_end` the verifier can see (§7.2).
 - Writes to an skb MUST go through `bpf_skb_store_bytes()`. When `data_end` is
   insufficient before a deeper parse, call
   `bpf_skb_pull_data(skb, FLUX_MAX_PULL_BYTES)` once and re-read `data` and
@@ -1412,13 +1431,24 @@ switch of §9.4 increments it.
 
 ## 7.2 Parse bounds
 
-- **IPv4:** minimum header present, `version == 4`, `ihl ∈ [5,15]`, a plausible
-  `tot_len`. `MF` set or a non-zero fragment offset takes the fragment branch.
+**`l3_end` is the protocol length; `data_end` is the memory bound.** IPv4
+`tot_len` and IPv6 `payload_len` (plus the 40-byte IPv6 header) define
+`l3_end`. `skb->len` is the buffer size and may exceed `l3_end` (GSO,
+Ethernet padding). Every packet-header read MUST be `<= l3_end` **and**
+`<= data_end`. Equality `l3_end == skb->len` is not required and MUST NOT
+be used as a well-formedness test. A length that is plausible as an L3
+header but past `data_end` is truncated memory, not a shorter packet.
+
+- **IPv4:** minimum header present, `version == 4`, `ihl ∈ [5,15]`, `tot_len`
+  at least `ihl * 4`. `MF` set or a non-zero fragment offset takes the fragment
+  branch.
 - **IPv6:** at most 4 extension headers totalling at most 256 bytes. A Fragment
-  header takes the fragment branch; ESP, No-Next-Header, an unknown extension or
-  a jumbogram is Direct.
+  header takes the fragment branch **only when the full 8-byte header sits
+  inside both bounds**. ESP, No-Next-Header, an unknown extension or a
+  jumbogram is Direct.
 - Only `IPPROTO_TCP` and `IPPROTO_UDP` are accepted. TCP must expose its fixed
-  header and flags; UDP must have a complete 8-byte header.
+  header and flags; UDP must have a complete 8-byte header. Those L4 bytes
+  must also sit inside both `l3_end` and `data_end`.
 
 ## 7.3 The egress algorithm (`flx_cap_l2` / `flx_cap_l3`)
 
@@ -1440,13 +1470,16 @@ E2  /* a decision exists: no L4 parse, and fragments follow the decision */
         if d->generation != c->generation                 -> cnt(STALE_GEN); SHOT
         goto HANDOFF(c)
 E3  /* no decision yet */
-    parse L3 (bounded);  if unsupported                  -> UNSPEC
-    if fragment:
+    parse L3 (bounded by l3_end AND data_end); if unsupported -> UNSPEC
+    if fragment:   /* IPv6: only with a complete 8-byte Fragment header */
         if bypass_lookup(family, daddr)                   -> UNSPEC
         c = ctrl()
         if mode == SELECTED && c && c->active             -> cnt(UDP_FRAG_DROP); SHOT
         else                                              -> UNSPEC
-    parse L4 (bounded);  if !TCP && !UDP                 -> UNSPEC
+        /* UDP_FRAG_DROP is the historical ABI name. The condition is
+           selected + active + no TCP decision + IP fragment; L4 is not
+           proven. The published JSON key stays until the ABI bump. */
+    parse L4 (bounded by l3_end AND data_end); if !TCP && !UDP -> UNSPEC
 E4  if TCP:
         if !(SYN && !ACK)                                 -> UNSPEC   /* a connection established before capture pays no control cost */
         cand.magic = FLUX_DECISION_MAGIC
@@ -1497,6 +1530,10 @@ Three properties this ordering buys:
   `connect()` could flip between direct and proxied as bypass, `active` or a
   brief fault changed underneath them. The cost is 16 bytes of storage per
   selected-but-direct socket and no per-packet write.
+
+`uid_stats` increments `bytes` by `skb->len` on the captured path. That is
+per-skb, including GSO superframes, not an L4 segment count. The hot path
+MUST NOT split GSO to make the counter more precise.
 
 ## 7.4 `listener_alive()` and fault notification
 
@@ -1549,17 +1586,19 @@ guard that fails for reasons no log will explain.
 ```
 I0  c = ctrl(); if !c                                     -> SHOT
     if !c->active                                         -> SHOT
-    bpf_skb_change_type(skb, PACKET_HOST)                 /* see below; MUST precede ip_rcv */
+    if bpf_skb_change_type(skb, PACKET_HOST) != 0         -> cnt; SHOT
+                                                  /* MUST precede ip_rcv; failure is fail-closed on flxrs1 */
 I1  /* cls_bpf already did __skb_push(mac_len) on ingress, so the Ethernet header is readable */
     check eth readability; if fail                     -> cnt; SHOT
     if eth->h_proto ∉ {ETH_P_IP, ETH_P_IPV6}              -> cnt; SHOT
     /* no MAC comparison: the device itself is the provenance boundary (D3) */
-I1b fast path (no full parse): IPv4/IPv6 fragment          -> cnt(PASS_FRAG); TC_ACT_OK
+I1b fast path (no full parse): IPv4 fragment, or IPv6 with a complete 8-byte Fragment header
+                                                      -> cnt(PASS_FRAG); TC_ACT_OK
     TCP && !(SYN && !ACK)                                 -> cnt(PASS_ESTABLISHED); TC_ACT_OK
-    /* IPv6 extension headers that are not a lone fragment fall through */
-I2  parse L3/L4 (the same bounded implementation as egress); needed only for assign
+    /* IPv6 extension headers that are not a lone complete fragment fall through */
+I2  parse L3/L4 (l3_end AND data_end, same as egress); needed only for assign
     if fragment                                           -> cnt(PASS_FRAG); TC_ACT_OK
-    parse L4; if !TCP && !UDP                             -> cnt; SHOT
+    parse L4 (l3_end AND data_end); if !TCP && !UDP        -> cnt; SHOT
 I3  if TCP:
         if SYN && !ACK:                                   /* retransmissions and TFO included */
             sk = lookup_listener(c, family, TCP)
@@ -1869,9 +1908,13 @@ path marks the slot foreign and fails closed** — "it looks like ours, adopt it
 is forbidden.
 
 **A TOCTOU guard using two dumps.** Before deleting or adopting any filter, take
-two consecutive dumps and compare `{id, tag, name, flags}` item by item. A
-mismatch returns `ESTALE` and abandons this round; the next event tries again.
-This mirrors `clone/bpf2socks/bpf_util.c:411-454`, which does the same for
+two consecutive **complete** dumps and compare `{id, tag, name, flags}` item by
+item. A dump is complete only when header flags are preserved, `NLMSG_DONE`
+status is 0, the receive was not truncated, and there was no overrun. A
+mismatch, or either dump being incomplete, returns `ESTALE` and abandons this
+round; the next event tries again. Two incomplete-but-equal views are not a
+deletion permit: "not seen" is not "absent". This mirrors
+`clone/bpf2socks/bpf_util.c:411-454`, which does the same for
 `BPF_PROG_QUERY`.
 
 **When a `clsact` is foreign.** If the dump shows the `clsact` carrying
@@ -2667,8 +2710,8 @@ There are exactly three top-level states:
 
 | State | Meaning |
 |---|---|
-| `Disabled` | the `disable` file exists — the only switch, C9, §27.1. No engine is started and no data plane is created or activated. |
-| `Inactive` | the `disable` file is absent, but Flux is starting or restarting, is blocked by a definite error, or is paused by the `[ssid]` dimension (§29.5). control `active == 0`. |
+| `Disabled` | the `disable` file is **present** or **unreadable** — the only switch, C9, §27.1. No engine is started and no data plane is created or activated. Unreadable is not enabled. |
+| `Inactive` | the `disable` file is **absent**, but Flux is starting or restarting, is blocked by a definite error, or is paused by the `[ssid]` dimension (§29.5). control `active == 0`. |
 | `Active` | control `active == 1`, **and at least one interface has passed the liveness verification of §8.5.4**. An `active` flag with no reachable capture interface is not Active; it is Inactive with a reason. |
 
 An invalid hot candidate **keeps the current `Active` generation** and attaches the candidate error to it. It MUST NOT create a fourth persistent state — a state that exists only to describe a failed attempt is a state every transition afterwards has to account for. A daemon restart re-evaluates from the authority files alone.
@@ -2681,7 +2724,7 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 
 | Module | Input and ownership | Guarantee visible to its caller |
 |---|---|---|
-| `flux-core/config.rs`, `selector.rs`, `cidr.rs` | User configuration and package text become validated selections and prefix sets | Pure computation; root appId is excluded; the configured modes, shared UIDs and hard capacities retain the semantics of §1.4 and §11.2 |
+| `flux-core/config.rs`, `selector.rs`, `cidr.rs`, `policy_epoch.rs` | User configuration and package text become validated selections and prefix sets; a PolicyEpoch is one observable tuple | Pure computation; root appId is excluded; the configured modes, shared UIDs and hard capacities retain the semantics of §1.4 and §11.2; add-then-subtract is a named defect, not a commit protocol |
 | `flux-core/subscription.rs`, `engine_config.rs` | Typed node sources and available provider responses form one ordered pool, then combine with the user template | No I/O; provider cleanup never rewrites manual names; generation changes only permitted fields (§28.2); runtime completion owns the two listener tuples and default cache path (§9.1, §9.6) |
 | `fluxd/bpf/` | Owns loaded map/program FDs and the verified object identity | Kernel preflight precedes object creation; callers cannot bypass the LPM exclusion; control publication is one frozen-leaf pointer swap (§6.4, §12) |
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
@@ -2689,7 +2732,9 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | `fluxd/subscription.rs` | One immutable fetch batch/result and selection of pending or accepted source-addressed responses | At most one blocking worker; it cannot mutate reactor state, cache files or a generation. A matching pending response takes precedence over that source's disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
 | `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
-| `fluxd/layout.rs` | State paths and bounded file operations | Callers share filesystem operations without depending on a diagnostic command |
+| `flux-core/snapshot.rs` | Dump completeness evidence becomes a TrustedSnapshot; switch observation is Present / Absent / Unreadable | Incomplete dumps cannot be constructed as trusted; Unreadable is not Absent |
+| `fluxd/layout.rs` | State paths and bounded file operations | Callers share filesystem operations without depending on a diagnostic command; the switch is three-state (§11.1) |
+| `fluxd/watch.rs` | inotify watches on stable parent directories | MOVE_SELF / DELETE_SELF / IGNORED rebuild; overflow rereads every authority |
 
 No module outside the reactor may write its mutable state. Immutable request
 and completion values cross the subscription seam; kernel and child resources
@@ -2755,16 +2800,46 @@ The socket is `NETLINK_ROUTE | SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC`, and it 
 
 `flux.toml` (policy) and `config/template.json` with its generated output (engine) are two independent authority domains, and Flux **does not attempt a distributed transaction across them**. Changing one triggers only that flow. `reload` processes both in turn, promoting each independently and reporting both in `status`. One succeeding while the other keeps its old state is allowed; **half-writing a map or half-starting a generation is not.**
 
-**A policy update (D5) touches neither `active` nor the generation:**
+**A policy update (D5) touches neither `active` nor the generation.** The
+observable UID modes, `cidr_mode`, both-family bypass sets, and both-family
+self-address sets constitute one **PolicyEpoch**. The data plane MUST interpret
+exactly one epoch at any instant. A new `cidr_mode` MUST NOT be published
+against a union of old and new prefixes, and a newly selected UID MUST NOT
+become visible before the bypass and self-address sets that belong with it.
 
-1. Parse, canonicalise, resolve UIDs and check the hard ceilings entirely in memory. Any failure keeps the current policy and reports a candidate error.
-2. Compute the desired sets separately: `selected_uids`, the `RESERVED` and `POLICY` LPM prefixes, and the dynamic self-address set (§6.1.1).
-3. **Add first:** write the new `SELECTED` entries and insert the new LPM prefixes.
-4. **Subtract second:** change UIDs that were `SELECTED` and no longer are to `DRAINING` — **never delete them** (§7.6) — and remove LPM prefixes no longer needed.
-5. Leave the diagnostic counts in the control leaf alone. They refresh when the next legitimate leaf is published (§6.4); a frozen leaf is not rewritten, and `status` computes live counts from the data plane instead.
-6. If any map operation fails, record the error and **re-queue one complete convergence**. The reactor is level-triggered, so recomputing the desired state is both simpler and safer than unwinding a snapshot.
+1. Parse, canonicalise, resolve UIDs and check the hard ceilings entirely in
+   memory, including occupancy of the inactive bank. Any failure keeps the
+   current epoch and reports a candidate error.
+2. Compute the desired epoch separately: `selected_uids`, the `RESERVED` and
+   `POLICY` LPM prefixes, the dynamic self-address set (§6.1.1), and
+   `cidr_mode`.
+3. Write that desired epoch into the **inactive** policy bank. The live bank,
+   and therefore every in-flight classification, is unchanged.
+4. Publish one frozen control leaf that selects the inactive bank and carries
+   the new `cidr_mode`. That pointer swap is the sole commit. Diagnostic counts
+   in the leaf refresh on this publication; BPF programs MUST NOT treat those
+   counts as policy authority, and `status` computes live counts from the data
+   plane's current set.
+5. After the commit, the former live bank may be reused as the next inactive
+   bank. UID entries that leave `SELECTED` become `DRAINING` in the newly live
+   bank — **never deleted** within the boot (§7.6).
+6. If any step before the pointer swap fails, the data plane continues to
+   interpret the **complete old epoch**. Userspace may hold an uncommitted
+   inactive bank; BPF must not. Do not unwind by mutating the live bank. Record
+   the error and **re-queue one complete convergence**.
 
-Why the window is safe: adding before subtracting means that during it the policy either keeps the old behaviour more permissively or applies the new behaviour early. Both affect **only flows that have no decision yet**, because an existing `DIRECT` or `CAPTURED` decision is immutable (§6.2).
+Existing `DIRECT` or `CAPTURED` TCP decisions remain immutable (§6.2). That
+fact does **not** make a mixed epoch safe: a first SYN or a UDP datagram
+observes the maps as they are, and a wrong first SYN writes the wrong
+decision for the life of the socket.
+
+`uid_policy` stays a HASH keyed by UID. Making it a map-in-map so that
+unselected traffic pays an extra lookup is forbidden (§14.1 E1).
+
+The in-place order "add new keys, publish `cidr_mode`, then subtract" is a
+**contract defect**. It produces observable epochs equal to neither the old
+nor the new tuple. The four counterexamples live as tests in
+`flux-core::policy_epoch`. Code that still executes that order is wrong.
 
 ## 10.6 CLI
 
@@ -2788,7 +2863,7 @@ Why the window is safe: adding before subtracting means that during it the polic
 
 | Path | What it is authoritative for | On failure |
 |---|---|---|
-| `/data/adb/modules/Flux-rs/disable` | The only persistent switch: **present means disabled, absent means enabled** (C9, §27.1.1). It lives in the **module** directory, owned by the manager, and is watched by the existing inotify source so a toggle takes effect during the current boot | Existence is the whole signal; the contents are never read |
+| `/data/adb/modules/Flux-rs/disable` | The only persistent switch (C9, §27.1.1). **Present** means disabled; **absent** means enabled; **any other metadata failure** is Unreadable. Contents are never read. It lives in the **module** directory, owned by the manager, and is watched via the module directory so a toggle takes effect during the current boot | Unreadable MUST NOT be treated as enabled. Capture does not start. `status` reports that the switch could not be observed |
 | `config/flux.toml` and its referenced list files | app selection, CIDR policy, interface and SSID dimensions, and node sources | invalid at cold start means Direct; invalid on reload keeps the current policy |
 | `config/advanced.toml` | optional fetch, refinement, grouping and log-retention policy (§11.2.4) | absent uses defaults; invalid rejects the whole candidate |
 | `config/template.json` | the user-owned engine template (§28.1) | invalid at cold start means Direct; invalid on reload keeps the current generation |
@@ -3452,6 +3527,11 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
 7. Control protocol request and response round-trip.
 8. SemVer to `versionCode`, `module.prop` and the artifact name.
 
+The four PolicyEpoch third-state counterexamples of §10.5 live in
+`policy_epoch.rs`. They are not a ninth numbered host test in the original
+eight; they exist so the add-then-subtract algorithm cannot be reintroduced
+without a named red contrast against the commit that only shows old then new.
+
 ## 15.3 Deliberately not done
 
 Multi-day soaks; a qualification catalogue across dozens of OEMs; a three-manager device matrix on every commit; a mock kernel or platform framework; a production canary or proof daemon with packet-token self-consistency proofs; unused tests written for a future backend or compatibility layer; and performance thresholds turned into hard gates CI cannot reproduce stably.
@@ -3570,7 +3650,7 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
 | Bootstrap complete | stay Disabled | attempt the full activation sequence (§8.7) | — |
 | `enable`, deleting the `disable` file | attempt activation | idempotent, no action | idempotent, no action |
 | `disable`, creating the `disable` file | idempotent | stop the engine, go Disabled | publish `active=0`, stop the engine, go Disabled |
-| `reload` | re-validate the configuration and report; change nothing | attempt activation again | policy domain: the add-then-subtract of §10.5, **leaving `active` untouched**; engine domain: the candidate switch of §9.4 |
+| `reload` | re-validate the configuration and report; change nothing | attempt activation again | policy domain: commit a PolicyEpoch (§10.5), **leaving `active` untouched**; engine domain: the candidate switch of §9.4 |
 | `stop` | exit cleanly with 0 | publish `active=0`, stop the engine, exit 0 | as Inactive |
 | `status`, `check` | read-only | read-only | read-only |
 | rtnetlink: new interface | ignore | re-evaluate admission and activate if otherwise ready | debounce, admit, attach; a failure excludes only that interface |
@@ -3579,7 +3659,7 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
 | rtnetlink: **capture-side** drift — a physical interface's `clsact` or our egress filter was deleted | ignore | reconverge | **leave `active` untouched**: debounce, then re-attach the egress filter. If the `clsact` is gone, exclude the interface as `netd_clsact_missing` and wait for netd's `RTM_NEWQDISC` — Flux does not create it (§8.5). A failure removes only that interface from the active set |
 | rtnetlink: **core** drift — `flxrs0`/`flxrs1`, the ingress filter, the rule or the local route was deleted or altered | ignore | reconverge | **publish `active=0` first**, reconverge by the predicate, and set `active=1` only on success |
 | rtnetlink: `ENOBUFS` or overrun | ignore | full re-dump | full re-dump (§10.4.1 rule 2) |
-| inotify: `flux.toml` changed | update the validation result only | attempt activation again | policy transaction, add then subtract |
+| inotify: `flux.toml` changed | update the validation result only | attempt activation again | policy epoch commit (§10.5) |
 | inotify: `template.json` or a `@file` list changed | update the validation result only | attempt activation again | regenerate (§28.2), then the engine candidate switch |
 | inotify: `packages.list` changed | ignore | re-parse | re-parse, then a policy transaction |
 | nl80211: connect, roam or disconnect | ignore | re-read the SSID set (§29.2); if it no longer pauses, attempt activation | re-read the SSID set; if it now pauses, publish `active=0`, stop the engine, go Inactive (§29.5); otherwise no action |

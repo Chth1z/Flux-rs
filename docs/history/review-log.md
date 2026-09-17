@@ -741,3 +741,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实测：** SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。工作区 `1.0.0-rc.2` 的 Phase 4 `Runtime::load_embedded` 加载 12 maps + 4 未 attach 程序（含 `flx_in` tag `81e4c260027b3671`，612 input insns）后精确卸载。随后 `fluxd disable`，Phase 5 RAWIP/crash cleanup 与 Phase 6 官方 sing-box 双栈 origdst / uid_stats / DRAINING 通过；套件结束后无 `flxrs*`、无 pref 100、无 table 20260、无 `flx_` filter。再 `fluxd enable`。
 
 **处置：** 记为这条工作树的设备证据，不是候选 ZIP 的 §20，也不是正式 1.0.0。ABI 仍为 `0xF10C0904`。未跑 Phase 7，未装候选 ZIP。
+
+### 0.6.20 §10.5 窗口理论推翻（2026-09-17）
+
+**原说法：** 蓝图 §10.5 写 add-before-subtract 窗口是安全的，因为只影响尚无 decision 的流。
+
+**实际：** 更宽或更早都不是旧策略，也不是新策略。`cidr_mode` 对着新旧前缀并集发布时，黑名单 A → 白名单 B 会把 A\B 的目的误捕获；白名单 A → 黑名单 B 会把 A\B 误直连；新 UID 在新 bypass 写入前可见时，两端都该 Direct 的目的会被捕获。TCP 首 SYN 把该结果写入 `SK_STORAGE`，窗口短推不出影响短。审计甲 R01 / 审计乙 A02。
+
+**处置：** 就地改正 §10.5 / §6.4 / §7.2 / §8.5 TOCTOU；`flux-core::policy_epoch` 用四条反例固定合同。不把这句话算进 §0.6 的 8 次推翻（那张表只计测量轮）。生产路径本批不改；仍执行 add-then-subtract 的代码相对新合同是错的，由后续批次收口。不 bump ABI。不实现 TCX。
