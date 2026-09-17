@@ -157,8 +157,8 @@ pub(crate) fn check_selectors(config: &FluxConfig, report: &mut CheckReport) {
                         selector.canonical(),
                         shared
                             .iter()
-                            .filter(|p| *p != selector.package())
-                            .cloned()
+                            .copied()
+                            .filter(|&p| p != selector.package())
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));

@@ -35,6 +35,7 @@ use crate::engine::{
     self, CheckDisposition, EngineChild, EngineError, EngineSpec, EngineTransaction, OldGeneration,
     StopNext, SwitchPlan, WaitRole,
 };
+use crate::layout::{InstanceLock, Layout, LockError};
 use crate::logger::Logger;
 use crate::netlink::sock_diag::{dump_retryable, ProbeReady, ProbeStep};
 use crate::supervisor::{BACKOFF_RESET_AFTER, BACKOFF_STEPS, LOCK_HELD_EXIT_CODE};
@@ -2473,13 +2474,8 @@ impl Reactor {
             return;
         }
         if Instant::now() >= deadline {
-            self.fail_waiting(
-                child,
-                role,
-                EngineError::NotReady {
-                    verified: child.sockets_verified,
-                },
-            );
+            let verified = child.sockets_verified;
+            self.fail_waiting(child, role, EngineError::NotReady { verified });
             return;
         }
 
@@ -2542,13 +2538,8 @@ impl Reactor {
         }
         if Instant::now() >= deadline {
             self.detach_diag_probe(probe);
-            self.fail_waiting(
-                child,
-                role,
-                EngineError::NotReady {
-                    verified: child.sockets_verified,
-                },
-            );
+            let verified = child.sockets_verified;
+            self.fail_waiting(child, role, EngineError::NotReady { verified });
             return;
         }
 
@@ -3600,7 +3591,7 @@ impl Reactor {
                     let siblings = index
                         .shared_with(selection.uid % flux_core::abi::USER_ID_STRIDE)
                         .into_iter()
-                        .filter(|package| *package != selector.package())
+                        .filter(|&package| package != selector.package())
                         .collect::<Vec<_>>();
                     if !siblings.is_empty() {
                         warnings.push(format!(

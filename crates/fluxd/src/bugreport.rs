@@ -17,7 +17,8 @@
 //! not worth a governance §1.2 exception.
 
 use std::fs;
-use std::io::{self, Read};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -141,17 +142,20 @@ pub fn run(layout: &Layout, options: &BugreportOptions) -> io::Result<PathBuf> {
         "flux-rs-bugreport-{}-{commit}-{stamp}.zip",
         flux_core::VERSION
     );
-    let dir = options
-        .output_dir
-        .clone()
-        .unwrap_or_else(|| layout.run_dir());
+    let dir = match &options.output_dir {
+        Some(dir) => {
+            exclusive_create_dir(dir)?;
+            dir.clone()
+        }
+        None => layout.run_dir(),
+    };
     let path = dir.join(name);
     let comment = format!(
         "flux-rs {} commit {commit} {}",
         flux_core::VERSION,
         if redact_on { "redacted" } else { "RAW" }
     );
-    fs::write(&path, zip.finish(now, comment.as_bytes()))?;
+    write_exclusive_file(&path, &zip.finish(now, comment.as_bytes()))?;
     Ok(path)
 }
 
@@ -387,14 +391,254 @@ fn maybe_redact(text: &str, on: bool) -> String {
 // ------------------------------------------------------------------ redaction
 
 /// Masks IPv4 (keeping the first octet), MAC-like, IPv6-like and quoted
-/// decimal NFLOG-cookie tokens.
+/// decimal NFLOG-cookie tokens, plus URL userinfo/query, credential headers
+/// and node tags that are not the well-known routing names.
 /// Hand-rolled scanning: a regex crate is not worth a dependency exception.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
-        out.push_str(&redact_domains(&redact_line(line)));
+        out.push_str(&redact_domains(&redact_line(&redact_credentials(line))));
     }
     out
+}
+
+fn exclusive_create_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "bugreport -o directory {} already exists; refuse to reuse it",
+                    path.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_exclusive_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
+}
+
+/// URL userinfo / query, Authorization, assignment secrets, and node tags.
+fn redact_credentials(line: &str) -> String {
+    redact_tags(&redact_assignments(&redact_queries(&redact_userinfo(line))))
+}
+
+fn redact_userinfo(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"://") {
+            out.push_str("://");
+            i += 3;
+            let mut j = i;
+            let mut at = None;
+            while j < bytes.len() && bytes[j] != b'/' && !bytes[j].is_ascii_whitespace() {
+                if bytes[j] == b'@' {
+                    at = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(at) = at {
+                out.push_str("[userinfo-redacted]");
+                i = at;
+                continue;
+            }
+            continue;
+        }
+        let width = utf8_len(bytes[i]);
+        out.push_str(&line[i..(i + width).min(bytes.len())]);
+        i += width;
+    }
+    out
+}
+
+fn redact_queries(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let mut in_url = false;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            in_url = false;
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"://") {
+            in_url = true;
+        }
+        if in_url && bytes[i] == b'?' {
+            out.push_str("?[query-redacted]");
+            i += 1;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            in_url = false;
+            continue;
+        }
+        let width = utf8_len(bytes[i]);
+        out.push_str(&line[i..(i + width).min(bytes.len())]);
+        i += width;
+    }
+    out
+}
+
+const SECRET_KEYS: [&[u8]; 4] = [b"authorization", b"password", b"secret", b"token"];
+
+fn redact_assignments(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(key) = SECRET_KEYS
+            .iter()
+            .copied()
+            .find(|key| key_at(bytes, i, key))
+        {
+            out.push_str(&line[i..i + key.len()]);
+            i += key.len();
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < bytes.len() && matches!(bytes[i], b':' | b'=') {
+                out.push(bytes[i] as char);
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+                out.push_str("[credential-redacted]");
+                if key.eq_ignore_ascii_case(b"authorization") {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                    let quote = bytes[i];
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == quote {
+                        i += 1;
+                    }
+                } else {
+                    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+        let width = utf8_len(bytes[i]);
+        out.push_str(&line[i..(i + width).min(bytes.len())]);
+        i += width;
+    }
+    out
+}
+
+const SAFE_TAGS: [&str; 15] = [
+    "DIRECT", "REJECT", "PROXY", "GLOBAL", "AUTO", "dns-out", "dns-in", "block", "fakeip", "dns",
+    "HK", "TW", "JP", "SG", "US",
+];
+
+fn redact_tags(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if key_at(bytes, i, b"tag") {
+            let after_key = i + 3;
+            let mut j = after_key;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && matches!(bytes[j], b'=' | b':') {
+                out.push_str(&line[i..j + 1]);
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    out.push(bytes[j] as char);
+                    j += 1;
+                }
+                let quoted = j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'');
+                let quote = if quoted { Some(bytes[j]) } else { None };
+                if quoted {
+                    j += 1;
+                }
+                let start = j;
+                while j < bytes.len() && bytes[j] != b'\n' {
+                    if let Some(quote) = quote {
+                        if bytes[j] == quote {
+                            break;
+                        }
+                    } else if bytes[j].is_ascii_whitespace() || bytes[j] == b',' {
+                        break;
+                    }
+                    j += 1;
+                }
+                let tag = &line[start..j];
+                if SAFE_TAGS.contains(&tag) {
+                    if let Some(quote) = quote {
+                        out.push(quote as char);
+                    }
+                    out.push_str(tag);
+                    if let Some(quote) = quote {
+                        if j < bytes.len() && bytes[j] == quote {
+                            out.push(quote as char);
+                            j += 1;
+                        }
+                    }
+                } else {
+                    out.push_str("[node-redacted]");
+                    if let Some(quote) = quote {
+                        if j < bytes.len() && bytes[j] == quote {
+                            j += 1;
+                        }
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        let width = utf8_len(bytes[i]);
+        out.push_str(&line[i..(i + width).min(bytes.len())]);
+        i += width;
+    }
+    out
+}
+
+fn key_at(bytes: &[u8], i: usize, key: &[u8]) -> bool {
+    if i + key.len() > bytes.len() {
+        return false;
+    }
+    if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    if !bytes[i..i + key.len()].eq_ignore_ascii_case(key) {
+        return false;
+    }
+    let after = i + key.len();
+    after == bytes.len() || !bytes[after].is_ascii_alphanumeric()
 }
 
 /// Masks domain/package-like tokens so default engine-log tails cannot reveal
@@ -704,6 +948,45 @@ mod tests {
             out.contains("template.json"),
             "file names remain diagnostic: {out}"
         );
+    }
+
+    #[test]
+    fn canary_secret_does_not_survive_default_redaction() {
+        const CANARY: &str = "flux-canary-7f3a9c1b";
+        let input = format!(
+            "fetch https://user:{CANARY}@example.invalid/sub?token={CANARY}\n\
+             Authorization: Bearer {CANARY}\n\
+             tls handshake failed password={CANARY}\n\
+             outbound tag={CANARY} beside tag=DIRECT\n"
+        );
+        let out = redact(&input);
+        assert!(!out.contains(CANARY), "{out}");
+        assert!(out.contains("[userinfo-redacted]"), "{out}");
+        assert!(out.contains("[query-redacted]"), "{out}");
+        assert!(out.contains("[credential-redacted]"), "{out}");
+        assert!(out.contains("[node-redacted]"), "{out}");
+        assert!(out.contains("tag=DIRECT"), "{out}");
+    }
+
+    #[test]
+    fn user_output_dir_is_created_exclusively() {
+        let parent = std::env::temp_dir().join(format!(
+            "flux-bugreport-{}-{}",
+            std::process::id(),
+            "exclusive"
+        ));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let dir = parent.join("out");
+        exclusive_create_dir(&dir).unwrap();
+        assert!(exclusive_create_dir(&dir).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]

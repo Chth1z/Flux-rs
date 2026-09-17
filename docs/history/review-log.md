@@ -789,3 +789,19 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** 声明包尾之外的 skb 尾随字节可被当成 TCP/UDP 头。IPv6 快路径不要求 8 字节 `frag_hdr`。`bpf_skb_change_type` 失败后仍 assign。审计乙 B01–B04 / rc.3 I8。
 
 **处置：** 每个头同时 ≤ `l3_end` 与 `data_end`。IPv6 fragment 要完整 8 字节头。计数槽 6 改名为 `DROP_SELECTED_FRAGMENT` / JSON `drop_selected_fragment`。change_type 失败 `IN_DROP_PARSE` + `SHOT`。不 bump ABI。5.15 四 entry 与 Phase 6 设备重跑需 GOV-1.2。不实现 TCX。
+
+### 0.6.26 发行冻结与诊断 canary（2026-09-17）
+
+**原说法：** 开发跟踪 latest 与发行重建是同一条路；`release.yml` 是较短的 CI 子集；`bugreport -o` 写入已存在目录。
+
+**实际：** `cargo xtask package` 每次解析 `/releases/latest`。release job 再解析一次。工作流用 `@main`/`@master`。诊断 ZIP 不遮罩 URL userinfo / Authorization，用户指定目录可被覆盖。审计甲 R13–R15 / rc.3 I7。
+
+**处置：** `cargo xtask freeze` 写出 `dist/freeze/`（源码 SHA、Cargo.lock 副本、工具链、NDK、clang、engine URL+摘要、bpftool、Actions SHA）。`release` 只消费该清单。CI 与 release 共用 `verify.yml`。诊断 canary 用虚构秘密；`-o` 排他创建 `0700`。不提交仓库根 `Cargo.lock`。不 bump ABI。不实现 TCX。
+
+### 0.6.27 rc.3 本树 Phase 4–6 在 5.15.211 重跑（2026-09-17）
+
+**原说法：** PolicyEpoch 双 bank、更严 `l3_end` 解析、`change_type` fail-closed 之后，5.15 verifier 与 origdst 仍待真机。
+
+**实测：** SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。先 `fluxd disable` 再 `fluxd stop`。Phase 4 `Runtime::load_embedded` 加载 12 maps + 4 未 attach 程序（`flx_in` tag `81e4c260027b3671`，612 input insns）后精确卸载。Phase 5 RAWIP/crash cleanup 与 Phase 6 官方 sing-box 双栈 origdst / uid_stats / DRAINING / package_name route 通过。残留检查无 `flxrs*`、无 pref 100、无 table 20260、无 `flx_` filter。再 `fluxd enable` 并拉起 daemon，收敛到 `Active` generation 1。
+
+**处置：** 记为这条工作树的设备证据，不是候选 ZIP 的 §20，也不是正式 1.0.0。ABI 仍为 `0xF10C0905`。未跑 Phase 7，未装候选 ZIP。不实现 TCX。

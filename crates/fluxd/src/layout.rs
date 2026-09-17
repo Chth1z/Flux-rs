@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 /// Reads at most `cap` bytes; the caller's parser enforces its own limit, this
 /// only prevents an accidentally huge file from being slurped whole.

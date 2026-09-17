@@ -875,8 +875,18 @@ mod tests {
     }
 
     fn scenario_bugreport(env: &Env) {
+        const CANARY: &str = "flux-canary-7f3a9c1b";
+        std::fs::write(
+            env.root.join("run/fluxd.log"),
+            format!(
+                "fetch https://user:{CANARY}@example.invalid/sub?token={CANARY}\n\
+                 Authorization: Bearer {CANARY}\n\
+                 tls handshake failed password={CANARY}\n\
+                 outbound tag={CANARY}\n"
+            ),
+        )
+        .expect("canary log");
         let out_dir = env.root.join("reports");
-        std::fs::create_dir_all(&out_dir).expect("reports dir");
         let (code, stdout, stderr) = env.run(&[
             "bugreport",
             "-o",
@@ -913,6 +923,10 @@ mod tests {
         assert!(
             !contains(CONFIG_SENTINEL),
             "raw config CONTENT must never appear in a bug report"
+        );
+        assert!(
+            !contains(CANARY),
+            "fictional canary credential must not appear in the zip"
         );
         println!("PASS bugreport zip written, no logcat by default");
     }

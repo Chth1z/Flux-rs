@@ -1169,6 +1169,8 @@ ABI bump 本身对已装模块是不兼容加载（magic 检查失败）。rc.3 
 
 ### 批 7：发布冻结与诊断 canary（I7、R13–R15）
 
+已落地：`cargo xtask freeze` → `dist/freeze/`；`release` 只消费该清单；CI/`release.yml` 共用 `verify.yml`；Actions 钉 SHA；bugreport canary 与排他 `-o`。
+
 退出：release 工作流调用完整验证；freeze 清单；canary ZIP。
 
 ### 批 8：测量驱动的性能（可选）

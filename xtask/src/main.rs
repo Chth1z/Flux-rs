@@ -20,6 +20,7 @@ mod doc_check;
 mod elf;
 mod engine_release;
 mod fidelity;
+mod freeze;
 mod package;
 mod sha256;
 mod util;
@@ -33,7 +34,7 @@ use std::process::{Command, ExitCode};
 /// document or a workflow that no longer resolves — blueprint §15.4 rule 3
 /// orders that check, after an audit found CI invoking a task that had been
 /// deleted and documents listing retired ones.
-pub const TASKS: [&str; 10] = [
+pub const TASKS: [&str; 11] = [
     "ci",
     "abi-check",
     "btf-check",
@@ -43,6 +44,7 @@ pub const TASKS: [&str; 10] = [
     "build-bpf",
     "package",
     "verify-package",
+    "freeze",
     "release",
 ];
 
@@ -61,7 +63,8 @@ TASKS:
     build-bpf      compile bpf/flux.bpf.c with clang
     package        build the module ZIP from the allowlist
     verify-package package twice from clean cross-build state, assert equal hashes
-    release TAG    verify TAG/version, package reproducibly, add Corresponding Source
+    freeze         record candidate identity under dist/freeze/
+    release TAG    verify TAG/version against a freeze list, never /releases/latest
 "
 }
 
@@ -130,6 +133,7 @@ fn main() -> ExitCode {
         "build-bpf" => package::build_bpf(),
         "package" => package::run(),
         "verify-package" => package::verify(),
+        "freeze" => freeze::run(),
         "release" => match std::env::args().nth(2) {
             Some(tag) => package::release(&tag),
             None => Err("release requires the pushed v* tag as its only argument".into()),

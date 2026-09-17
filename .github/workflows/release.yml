@@ -5,15 +5,47 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
-  release:
-    name: signed tag / reproducible release
+  freeze:
+    name: require freeze list
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ndk_revision: ${{ steps.read.outputs.ndk_revision }}
+      bpftool_tag: ${{ steps.read.outputs.bpftool_tag }}
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+      - id: read
+        name: Read freeze sidecars
+        run: |
+          set -eu
+          test -f dist/freeze/manifest.toml
+          test -f dist/freeze/Cargo.lock
+          test -f dist/freeze/ndk-revision
+          test -f dist/freeze/bpftool-tag
+          {
+            printf 'ndk_revision=%s\n' "$(tr -d '\r\n' < dist/freeze/ndk-revision)"
+            printf 'bpftool_tag=%s\n' "$(tr -d '\r\n' < dist/freeze/bpftool-tag)"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: freeze
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify.yml
+    with:
+      ndk_revision: ${{ needs.freeze.outputs.ndk_revision }}
+      bpftool_tag: ${{ needs.freeze.outputs.bpftool_tag }}
+
+  publish:
+    name: signed tag / reproducible release
+    needs: [verify, freeze]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
         with:
           fetch-depth: 0
 
@@ -35,8 +67,10 @@ jobs:
             echo "GitHub did not verify the release-tag signature"; exit 1;
           }
 
-      - name: Set up NDK
+      - name: Set up NDK from freeze list
         id: setup-ndk
+        env:
+          FLUX_NDK_REVISION: ${{ needs.freeze.outputs.ndk_revision }}
         run: sh tools/ci/setup-ndk.sh
 
       - name: Install BPF build inputs
@@ -44,16 +78,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev
           sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
-
-      - name: Source and test gates
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
-          cargo xtask doc-check
-          cargo xtask template-check
 
       - name: Build release and Corresponding Source
         env:

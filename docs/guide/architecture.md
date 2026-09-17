@@ -50,7 +50,7 @@
 |---|---|---|
 | `flux-core` | 配置、selector、CIDR、ABI 镜像、wire 类型、版本算术、节点解析/组装、订阅精修、SSID 判定、§26 Planner | 无 `libc`、无系统调用、`unsafe` 禁止。测试在任何主机上跑 |
 | `fluxd` | reactor、netlink、BPF 加载器、网络对象、引擎监督、监督进程 | 唯一碰内核的 crate |
-| `xtask` | 构建、打包、发布、文档机检 | 只在开发主机上跑，不发布 |
+| `xtask` | 构建、打包、冻结清单、发布、文档机检 | 只在开发主机上跑，不发布 |
 
 `fluxd → flux-core`，`xtask → flux-core`，永不反向。没有 platform、testkit、backend-registry 这类 crate，也没有为单一实现准备的 trait 抽象层。
 
@@ -82,6 +82,8 @@ flowchart LR
 `run/` 跨重启保留，集中机器产物。sing-box 的工作目录仍是数据根；`check` 与 `run` 共用这份 cwd，只为未明确指定的已启用缓存补全绝对路径，避免改变用户原有相对路径的意义。
 
 CLI 退出码把三件事拆开（`docs/spec/interaction.md` §27.3.4）：请求未送达、权威开关文件已写、运行态已达目标。`stop` 仅在 `daemon.lock` 未持有时把通信失败当成幂等成功。
+
+开发打包仍解析当前官方 engine；候选/发行先 `cargo xtask freeze` 再构建，`release` 不在 job 里选 latest（§13.5）。
 
 ## 两个进程
 

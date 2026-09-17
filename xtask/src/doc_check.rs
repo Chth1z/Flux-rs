@@ -35,6 +35,13 @@ pub fn run() -> Result<(), String> {
     check_overturns(&root, &mut failures)?;
     let commands = check_xtask_commands(&root, &mut failures)?;
     println!("doc-check: commands — {commands} `cargo xtask` citations resolved");
+    match crate::freeze::collect_action_pins(&root) {
+        Ok(pins) => println!(
+            "doc-check: actions — {} workflow uses: pins are commit SHAs",
+            pins.len()
+        ),
+        Err(error) => failures.push(error),
+    }
     let agents = check_agents_budget(&root, &mut failures)?;
     println!("doc-check: routing — AGENTS.md is {agents} lines, budget 80");
     let cited = check_code_citations(&root, &mut failures)?;

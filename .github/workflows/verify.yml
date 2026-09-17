@@ -1,0 +1,244 @@
+name: Verify
+
+on:
+  workflow_call:
+    inputs:
+      ndk_revision:
+        description: Frozen NDK revision; empty follows the latest stable SDK channel
+        required: false
+        type: string
+        default: ""
+      bpftool_tag:
+        description: Frozen bpftool release tag; empty follows upstream latest
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  FLUX_NDK_REVISION: ${{ inputs.ndk_revision }}
+  FLUX_BPFTOOL_TAG: ${{ inputs.bpftool_tag }}
+
+jobs:
+  rust:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+
+      # The toolchain, including its components and the aarch64-linux-android
+      # target, follows stable through rust-toolchain.toml.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # 2026-09-17
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The four mechanical documentation checks of implementation.md 17.4:
+      # chapter map, relative links, FLUX_SEC_*/SEC_* identity, overturn
+      # numbering. Each has caught a real defect before it was automated.
+      - name: Doc check
+        run: cargo xtask doc-check
+
+      - name: Official sing-box template check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask template-check
+
+  # The host-safe half of the R091-15 gate matrix. flux-core is contractually
+  # pure logic (implementation.md 17.4 exit criterion 1): no I/O, no unsafe,
+  # no async, no platform dependencies. The fluxd BIN target is also host-safe
+  # because its Linux-only modules are cfg-gated; its integration tests are
+  # not, and deliberately are not run here. A Windows pass never substitutes
+  # for the Linux workspace gate or the on-device suite.
+  windows:
+    name: host-safe gate on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # 2026-09-17
+      - name: Test pure logic
+        run: cargo test -p flux-core
+      - name: Test packaging logic
+        run: cargo test -p xtask
+      - name: Test the daemon binary target
+        run: cargo test -p fluxd --bin fluxd
+      - name: Doc check
+        run: cargo xtask doc-check
+
+  bpf:
+    name: bpf object
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+
+      - name: Install clang and BPF headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev
+          # clang -target bpf does not search the x86_64 multiarch include
+          # directory, so <linux/types.h> cannot find <asm/types.h> without
+          # the conventional compatibility link.
+          sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # 2026-09-17
+
+      # Compile the real embedded object and exercise its loader contract.
+      # Kernel loading and attachment still require the verifier/device suites.
+      - name: Compile data plane and test embedded object
+        env:
+          FLUX_BUILD_BPF: "1"
+        run: cargo test -p fluxd --bin fluxd bpf::
+
+      # flux_abi.h is the sole source of truth; flux-core/src/abi.rs mirrors it
+      # by hand. This compares clang's offsets against the Rust mirror so the
+      # two can never drift silently.
+      - name: ABI offset cross-check
+        run: cargo xtask abi-check
+
+      # The SK_STORAGE value BTF is hand-written for kernel-5.15 stability.
+      # Compare its normalized struct layout against clang's actual .BTF
+      # section so a C ABI edit cannot leave the loader blob stale.
+      - name: BTF layout cross-check
+        run: cargo xtask btf-check
+
+      # Ubuntu's /usr/sbin/bpftool shim refuses to run when the hosted runner's
+      # Azure kernel is newer than the linux-tools archive. A freeze list names
+      # the tag; development CI follows upstream latest.
+      - name: Install bpftool
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sudo apt-get install -y build-essential libelf-dev zlib1g-dev libcap-dev
+          BPFTMP=$(mktemp -d)
+          if [ -n "${FLUX_BPFTOOL_TAG:-}" ]; then
+            BPFTOOL_TAG="$FLUX_BPFTOOL_TAG"
+          else
+            BPFTOOL_TAG=$(gh api repos/libbpf/bpftool/releases/latest --jq .tag_name)
+          fi
+          git clone --depth 1 --branch "$BPFTOOL_TAG" --recurse-submodules --shallow-submodules \
+            https://github.com/libbpf/bpftool.git "$BPFTMP/bpftool"
+          make -C "$BPFTMP/bpftool/src" -j"$(nproc)"
+          sudo install -m 0755 "$BPFTMP/bpftool/src/bpftool" /usr/local/bin/bpftool
+          sudo bpftool version
+          echo "BPFTOOL=/usr/local/bin/bpftool" >> "$GITHUB_ENV"
+
+      # The cheapest gate the project has, and it has already earned its place:
+      # the run that first exercised it found that every program carried an ELF
+      # section name libbpf refuses (SEC("tc/cap_l2") and friends), so not one
+      # of them could be loaded at all. Compiling had not noticed, because
+      # compiling never does. See docs/history/phase0.md section 16.8.
+      #
+      # bpftool builds maps from the BTF declarations, whereas fluxd builds them
+      # explicitly in maps.rs (blueprint 12.2). So a pass here means the PROGRAM
+      # LOGIC verifies, not that the map parameters are right -- and the runner's
+      # kernel is x86_64 and newer than the arm64 5.15 baseline, so this
+      # supplements on-device verification rather than replacing it. A verifier
+      # rejection here is still real and worth failing the build over.
+      - name: Verifier gate
+        run: |
+          set -eu
+          obj=$(find target -name 'flux.bpf.o' -print -quit)
+          if [ -z "$obj" ]; then
+            echo "flux.bpf.o not produced by the build step above"; exit 1
+          fi
+          echo "object: $obj"
+          sudo "$BPFTOOL" prog loadall "$obj" /sys/fs/bpf/fluxci
+          echo "--- loaded:"
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l2
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_cap_l3
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_in
+          sudo "$BPFTOOL" prog show pinned /sys/fs/bpf/fluxci/flx_verify
+          sudo rm -rf /sys/fs/bpf/fluxci
+
+  android:
+    name: aarch64-linux-android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # 2026-09-17
+
+      - name: Set up NDK
+        id: setup-ndk
+        run: sh tools/ci/setup-ndk.sh
+
+      # verify-package embeds the BPF object, so this job needs the same BPF
+      # build inputs as the bpf job.
+      - name: Install clang and BPF headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev
+          sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+
+      # GITHUB_PATH only takes effect in SUBSEQUENT steps, so appending to it
+      # and invoking cargo in the same step left the NDK linker
+      # (aarch64-linux-android31-clang) unreachable and the build failing with
+      # "linker not found". Export PATH for this shell directly instead.
+      - name: Cross build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          command -v aarch64-linux-android31-clang
+          cargo build --workspace --target aarch64-linux-android
+
+      # Blueprint 13.4 / implementation.md 17.4 exit criteria 4 and 5: two
+      # clean packaging runs must produce byte-identical archives, with the
+      # one resolved upstream release shared by both builds and their host check.
+      - name: Reproducible package
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask verify-package
+
+      # A short-lived CI artifact is for device acceptance only. It is not a
+      # release channel; signed v* tags are published by release.yml.
+      - name: Upload device-acceptance package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 2026-09-17
+        with:
+          name: flux-rs-module-${{ github.sha }}
+          path: |
+            dist/Flux-rs-v*-arm64.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  supply-chain:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+      - uses: EmbarkStudios/cargo-deny-action@9c67a826e39827395bfa619cd85cb2aaeb43cfaa # 2026-09-17
+        with:
+          command: check
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # 2026-09-17
+      - name: Check module scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          # Module scripts run under BusyBox ash, so target sh, not bash.
+          shellcheck --shell=sh --severity=warning module/*.sh tools/ci/*.sh
+
+      - name: Module lifecycle contract
+        run: sh tools/phase8/module_lifecycle_test.sh

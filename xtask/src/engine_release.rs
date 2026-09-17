@@ -104,6 +104,42 @@ impl Release {
         })
     }
 
+    /// Rebuild an official release from a freeze list. Never contacts
+    /// `/releases/latest`.
+    pub fn from_freeze(engine: &toml::Value) -> Result<Self, String> {
+        let tag = freeze_string(engine, "tag")?;
+        let version = freeze_string(engine, "version")?;
+        let commit = freeze_string(engine, "commit")?;
+        if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("freeze engine commit is not a 40-character SHA".into());
+        }
+        Ok(Self {
+            tag: tag.to_string(),
+            version: version.to_string(),
+            commit: commit.to_string(),
+            android: Asset::from_freeze(
+                engine
+                    .get("android")
+                    .ok_or("freeze engine has no android asset")?,
+            )?,
+            host: Asset::from_freeze(
+                engine
+                    .get("host")
+                    .ok_or("freeze engine has no host asset")?,
+            )?,
+        })
+    }
+
+    pub fn freeze_table(&self) -> toml::Value {
+        toml::Value::Table(toml::Table::from_iter([
+            ("tag".into(), self.tag.clone().into()),
+            ("version".into(), self.version.clone().into()),
+            ("commit".into(), self.commit.clone().into()),
+            ("android".into(), self.android.freeze_table()),
+            ("host".into(), self.host.freeze_table()),
+        ]))
+    }
+
     pub fn source_url(&self) -> String {
         format!(
             "https://github.com/SagerNet/sing-box/archive/{}.tar.gz",
@@ -220,6 +256,42 @@ impl Asset {
         }
         Ok(())
     }
+
+    pub(crate) fn freeze_table(&self) -> toml::Value {
+        toml::Value::Table(toml::Table::from_iter([
+            ("name".into(), self.name.clone().into()),
+            ("url".into(), self.url.clone().into()),
+            ("size".into(), (self.size as i64).into()),
+            ("sha256".into(), self.digest.clone().into()),
+        ]))
+    }
+
+    pub(crate) fn from_freeze(value: &toml::Value) -> Result<Self, String> {
+        let name = freeze_string(value, "name")?.to_string();
+        let url = freeze_string(value, "url")?.to_string();
+        if url.contains("/releases/latest") {
+            return Err(format!(
+                "freeze asset {name} still names /releases/latest; freeze must pin a download URL"
+            ));
+        }
+        let digest = freeze_string(value, "sha256")?.to_ascii_lowercase();
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("freeze asset {name} SHA-256 is not 64 hex digits"));
+        }
+        let size = value
+            .get("size")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| format!("freeze asset {name} has no integer size"))?;
+        if size < 0 {
+            return Err(format!("freeze asset {name} size is negative"));
+        }
+        Ok(Self {
+            name,
+            url,
+            size: size as u64,
+            digest,
+        })
+    }
 }
 
 fn validate_source_members(listing: &str, commit: &str) -> Result<(), String> {
@@ -241,13 +313,20 @@ fn validate_source_members(listing: &str, commit: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn freeze_string<'a>(value: &'a toml::Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("freeze table has no string {key}"))
+}
+
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
     value[key]
         .as_str()
         .ok_or_else(|| format!("official release metadata has no string {key}"))
 }
 
-fn api_json(url: &str) -> Result<Value, String> {
+pub(crate) fn api_json(url: &str) -> Result<Value, String> {
     let mut command = Command::new("curl");
     command.args([
         "-fsSL",
@@ -345,6 +424,29 @@ mod tests {
             validate_source_members(&format!("{listing}sing-box-{commit}/../other\n"), commit)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn freeze_reconstructs_the_release_and_rejects_latest() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let digest = sha256::hex(&sha256::digest(b"abc"));
+        let engine: toml::Value = toml::from_str(&format!(
+            "tag = \"v1.2.3\"\nversion = \"1.2.3\"\ncommit = \"{commit}\"\n\
+             [android]\nname = \"sing-box-1.2.3-android-arm64.tar.gz\"\n\
+             url = \"https://example.invalid/android.tar.gz\"\nsize = 3\nsha256 = \"{digest}\"\n\
+             [host]\nname = \"sing-box-1.2.3-linux-amd64.tar.gz\"\n\
+             url = \"https://example.invalid/host.tar.gz\"\nsize = 3\nsha256 = \"{digest}\"\n"
+        ))
+        .unwrap();
+        let release = Release::from_freeze(&engine).unwrap();
+        assert_eq!(release.tag, "v1.2.3");
+        assert!(release.source_url().contains(commit));
+        release.android.verify(b"abc").unwrap();
+
+        let mut latest = engine.clone();
+        latest["android"]["url"] =
+            toml::Value::String("https://github.com/SagerNet/sing-box/releases/latest".into());
+        assert!(Release::from_freeze(&latest).is_err());
     }
 
     #[test]

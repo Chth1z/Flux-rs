@@ -285,7 +285,10 @@ By default, `fluxd bugreport` generates a redacted ZIP:
 - Applies stable redaction to sensitive address and interface values by default;
 - Excludes logcat by default; only `--with-logcat` explicitly includes it and emits a warning;
 - `--raw` disables address redaction and emits a warning;
-- Writes under `/data/adb/flux-rs/run/` unless `-o <dir>` says otherwise. The default is not the process working directory: a root shell's cwd is `/`, which is read-only.
+- Default redaction also masks URL userinfo and query, `Authorization` /
+  password / token assignments, and node tags other than the well-known
+  routing names. It does not claim to anonymise arbitrary third-party text;
+- Writes under `/data/adb/flux-rs/run/` unless `-o <dir>` says otherwise. The default is not the process working directory: a root shell's cwd is `/`, which is read-only. A user-specified `-o` directory is created exclusively with mode `0700`; an existing path is refused.
 
 The diagnostic bundle MUST NOT claim "cleaned" unless a fresh actual enumeration proves that the objects are absent.
 

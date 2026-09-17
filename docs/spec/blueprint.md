@@ -3499,9 +3499,31 @@ directory; cleanup is confined to that run's directory. Cargo documents
 `verify-package` resolves upstream once and reuses those inputs for both clean
 builds. Reproducibility means equal inputs produce equal bytes; two builds that
 resolve different upstream releases need not be identical. `release` retains
-that same result when obtaining the engine's source archive.
+that same result when obtaining the engine's source archive, and it obtains
+that result from the freeze list of §13.5 rather than from `/releases/latest`.
 
 No SBOM, signature, per-file hash or layered manifest is produced unless a real distribution channel actually requires one.
+
+## 13.5 Freeze the candidate, then build it
+
+Everyday development tracks current stables: Cargo requirements stay open,
+`Cargo.lock` is generated locally and is not committed at the repository root,
+CI follows the current stable NDK channel, and `cargo xtask package` /
+`verify-package` / `template-check` resolve the current official engine
+release. That is a development service.
+
+A rebuild of one issued candidate is a different service. `cargo xtask freeze`
+writes `dist/freeze/`: the source commit, a `Cargo.lock` copy, `rustc -vV`,
+the NDK revision, host / Android / BPF clang identities, the official engine
+asset URLs and SHA-256 digests, bpftool's tag and commit, the GitHub Actions
+commit SHAs, and the build commands. Workflows MUST pin `uses:` to a
+40-character commit SHA; `@main` and `@master` are defects. `cargo xtask
+release` consumes that list and MUST NOT contact `/releases/latest`. The
+release workflow calls the same verify workflow as CI (`workflow_call`) and
+only the publish job has `contents: write`.
+
+The freeze directory may be committed with a signed tag so a later rebuild
+has the inputs. It is not an everyday lockfile.
 
 ---
 
@@ -3548,6 +3570,7 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
 
   **Passing on a newer kernel does not mean passing on 5.15.** CI runs `ubuntu-latest`, whose kernel is far newer than the baseline, so this gate proves only that the programs hold under some modern verifier. **The baseline verifier evidence comes from the device**: the Phase 3-8 device suites load the same programs on SM-S9180 running 5.15.211, and that is the first-hand result for 5.15. The CI gate exists to fail early, not to be the verdict; both must pass (GOV-4.1).
 
+- CI and release share `.github/workflows/verify.yml` through `workflow_call`. A release is not a shorter subset of CI: it needs the Windows host-safe job, the BPF verifier / ABI / BTF jobs, `cargo-deny`, and shellcheck / `module_lifecycle_test.sh` before it packages. Development CI may follow current stables; a tagged release passes the freeze list's NDK revision and bpftool tag into that same workflow (§13.5).
 - Shell: CI runs `shellcheck --shell=sh --severity=warning` over `module/*.sh`. **The target runtime is BusyBox `ash` and shellcheck is not `ash`**, so it checks portability rather than what the target interpreter accepts. Scripts under `tools/**` are outside that scope and are executed by hand on a development host or a device.
 - ELF checks: every `LOAD` segment of `fluxd` has `p_align >= 0x4000`; the official engine's measured alignment supports the product's page size and its asset digest matches the selected upstream release.
 - Clean staging from the allowlist, version consistency, and two packaging runs hashing identically.

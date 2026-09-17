@@ -12,13 +12,13 @@
 
 | 范围 | 当前状态 | 主要证据 |
 |---|---|---|
-| Phase 0–8 | 已完成 | 见下方历史阶段；本树 Phase 4–6 已在 SM-S9180 重跑，不替代候选 ZIP 的 §20 |
+| Phase 0–8 | 已完成 | 见下方历史阶段；本树 Phase 4–6 已在 SM-S9180 于 rc.3 工作树重跑（§0.6.27），不替代候选 ZIP 的 §20 |
 | 1.0.0-rc.1 | 已并入 `main` | `0df947e`；产物记录 §0.6.17 |
 | rc.2 主题 1：§26 纯函数 | 已落地 | `crates/flux-core/src/runtime.rs`；`cargo test -p flux-core` |
 | rc.2 主题 2：ingress 快路径 | 已落地；5.15.211 Phase 4 加载通过 | `bpf/flux.bpf.c` `flx_in` I1b；ABI 未 bump；见 §0.6.19 |
 | rc.2 主题 3：attach 模块 | 已落地 | `crates/fluxd/src/dataplane/attachment.rs`；MAP_SPECS 生成 C 占位 |
 | 发布剩余 | **尚未具备正式发布结论** | §20 验收见 §17.0.3；签在 rc.2 之后 |
-| 1.0.0-rc.3 设计 | 批 0–6 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady、PolicyEpoch 双 bank、Planner Commands、EngineSpec cwd、CLI 退出码、订阅批次预算、typed map、l3_end 解析、fragment 计数名）；批 7 未做 | `docs/plan/rc3.md` |
+| 1.0.0-rc.3 设计 | 批 0–7 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady、PolicyEpoch 双 bank、Planner Commands、EngineSpec cwd、CLI 退出码、订阅批次预算、typed map、l3_end 解析、fragment 计数名、freeze 清单、诊断 canary）；批 8 可选 | `docs/plan/rc3.md` |
 
 ### 17.0.1 设计哲学返工清单
 

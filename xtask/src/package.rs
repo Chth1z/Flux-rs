@@ -6,6 +6,8 @@
 //!    (single version source; `module.prop` is generated, never maintained).
 //! 2. Resolve one official stable release, verify its archives, measure the
 //!    ELF binaries and check the generated template with its host asset.
+//!    Everyday `package` / `verify-package` resolve `/releases/latest`.
+//!    `release` consumes `dist/freeze/` instead (§13.5).
 //! 3. Cross-build `fluxd` (`aarch64-linux-android`, embedded BPF object,
 //!    16 KiB max-page-size link flags) and require `p_align >= 0x4000`.
 //! 4. Stage the §13.1 allowlist — never "everything except" — with LF line
@@ -16,7 +18,7 @@
 //! state and asserts the two archives hash identically (§17.4 exit
 //! criterion 4).
 
-use crate::{elf, engine_release, sha256, util, zip};
+use crate::{elf, engine_release, freeze, sha256, util, zip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -104,7 +106,9 @@ pub fn release(tag: &str) -> Result<(), String> {
             "release tag `{tag}` does not equal workspace version tag `{expected}`"
         ));
     }
-    let inputs = prepare_inputs(&root)?;
+    let freeze = freeze::load(&root)?;
+    freeze.install_lockfile(&root)?;
+    let inputs = prepare_inputs_from(&root, freeze.engine()?)?;
     let provenance = git_provenance_from_tree(&root)?;
     if provenance.ends_with("-dirty") {
         return Err("release requires a clean working tree".into());
@@ -228,7 +232,10 @@ struct Inputs {
 }
 
 fn prepare_inputs(root: &Path) -> Result<Inputs, String> {
-    let release = engine_release::Release::resolve()?;
+    prepare_inputs_from(root, engine_release::Release::resolve()?)
+}
+
+fn prepare_inputs_from(root: &Path, release: engine_release::Release) -> Result<Inputs, String> {
     let cache = util::target_dir(root)?
         .join("xtask/engine")
         .join(&release.tag);

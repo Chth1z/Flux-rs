@@ -732,7 +732,7 @@ impl Manager {
             .self_v4
             .iter()
             .copied()
-            .map(Ipv4Addr::octets)
+            .map(|addr| addr.octets())
             .collect();
         for address in &desired_self_v4 {
             maps.update_self_v4(bank, address)
@@ -752,7 +752,7 @@ impl Manager {
             .self_v6
             .iter()
             .copied()
-            .map(Ipv6Addr::octets)
+            .map(|addr| addr.octets())
             .collect();
         for address in &desired_self_v6 {
             maps.update_self_v6(bank, address)

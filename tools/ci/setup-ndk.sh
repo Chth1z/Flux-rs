@@ -1,13 +1,18 @@
 #!/bin/sh
-# Resolve the stable SDK channel once; every later step uses this installation.
+# Resolve an NDK installation. A freeze list may name the revision; otherwise
+# follow the current stable SDK channel (development service, blueprint §13.5).
 set -eu
 
-packages=$(sdkmanager --list --channel=0)
-package=$(printf '%s\n' "$packages" | awk '
+if [ -n "${FLUX_NDK_REVISION:-}" ]; then
+  package="ndk;$FLUX_NDK_REVISION"
+else
+  packages=$(sdkmanager --list --channel=0)
+  package=$(printf '%s\n' "$packages" | awk '
     /^Available Packages:/ { available = 1; next }
     /^[^[:space:]].*:/ { available = 0 }
     available && /^[[:space:]]*ndk;[0-9]/ { print $1 }
-' | sort -Vu | tail -n 1)
+    ' | sort -Vu | tail -n 1)
+fi
 [ -n "$package" ] || { echo "No stable NDK package in the official SDK channel" >&2; exit 1; }
 yes | sdkmanager --channel=0 "$package"
 revision=${package#ndk;}

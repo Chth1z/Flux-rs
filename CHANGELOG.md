@@ -118,6 +118,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   IPv6 fragments need the 8-byte Fragment header. `bpf_skb_change_type`
   failure is fail-closed on the veth. The JSON counter is
   `drop_selected_fragment`.
+- `cargo xtask freeze` records a candidate's identity under `dist/freeze/`.
+  Everyday `package` / `verify-package` still resolve the current official
+  engine; `cargo xtask release` consumes only that list. CI and release share
+  one verify workflow; Actions are pinned to commit SHAs.
+- `fluxd bugreport -o` creates the output directory exclusively (mode `0700`)
+  and refuses an existing path. Default redaction masks URL userinfo/query,
+  credential headers, and non-reserved node tags. A fictional canary secret
+  must not appear in the zip.
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

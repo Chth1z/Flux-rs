@@ -44,9 +44,9 @@ sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 sudo apt-get install -y shellcheck unzip curl bpftool
 ```
 
-`bpftool` 只用于验证器门（`bpftool prog loadall`）；Ubuntu 的 `/usr/sbin/bpftool` 在 WSL 内核上通常能用，CI 从上游获取当前版本构建，本机不必。
+`bpftool` 只用于验证器门（`bpftool prog loadall`）；Ubuntu 的 `/usr/sbin/bpftool` 在 WSL 内核上通常能用。开发 CI 从上游获取当前版本构建；发行工作流改读 freeze 清单里的 tag。本机不必装与 CI 相同的版本。
 
-**NDK**：Android 交叉构建使用 `ANDROID_NDK_HOME` 指向的安装，需提供 API 31 的 arm64 编译器；不检查固定修订号。CI 获取最新稳定版，本机使用自己安装的版本。例如本机已有目录如下，按实际安装路径修改：
+**NDK**：Android 交叉构建使用 `ANDROID_NDK_HOME` 指向的安装，需提供 API 31 的 arm64 编译器；不检查固定修订号。开发 CI 获取最新稳定版；发行 CI 使用 freeze 清单里的修订。本机使用自己安装的版本。例如本机已有目录如下，按实际安装路径修改：
 
 ```sh
 export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/27.3.13750724
@@ -77,10 +77,11 @@ export FLUX_BUILD_BPF=1
 cargo xtask abi-check        # clang 的 offset 对照 abi.rs 镜像
 cargo xtask btf-check        # 手写 BTF 对照 clang 的 .BTF
 cargo xtask template-check   # 官方 sing-box 校验默认模板
+cargo xtask freeze           # 写出 dist/freeze/；发行重建只消费这份清单
 cargo xtask verify-package   # 两次干净交叉构建，字节一致才算过；产物在 dist/
 ```
 
-`verify-package` 每次顶层操作解析一次官方 sing-box 最新稳定发布，两次干净构建共用这次解析。下载按实际发布缓存；包内 `build-info.toml` 记录引擎来源、摘要和构建工具，`licenses/DEPENDENCIES.md` 记录本次 Rust 依赖。不同时间解析到不同上游版本时，产物不要求相同；验证的是同样输入的可复现性。
+`verify-package` 每次顶层操作解析一次官方 sing-box 最新稳定发布，两次干净构建共用这次解析。下载按实际发布缓存；包内 `build-info.toml` 记录引擎来源、摘要和构建工具，`licenses/DEPENDENCIES.md` 记录本次 Rust 依赖。不同时间解析到不同上游版本时，产物不要求相同；验证的是同样输入的可复现性。`cargo xtask release` 不走这条路：它只消费 `dist/freeze/`。
 
 ## 真机
 
@@ -96,4 +97,4 @@ cargo xtask verify-package   # 两次干净交叉构建，字节一致才算过�
 
 ## 发布
 
-发布只由签名的 `v*` tag 触发（`.github/workflows/release.yml`），tag 去掉 `v` 后必须等于 `Cargo.toml` 的 `[workspace.package] version`。签名密钥归所有者，不在任何机器的仓库目录里。发布前的十四条门禁见 `../spec/blueprint.md` §20。
+发布只由签名的 `v*` tag 触发（`.github/workflows/release.yml`），tag 去掉 `v` 后必须等于 `Cargo.toml` 的 `[workspace.package] version`。tag 树里必须带 `dist/freeze/`（`cargo xtask freeze` 的产物）。签名密钥归所有者，不在任何机器的仓库目录里。发布前的十四条门禁见 `../spec/blueprint.md` §20。
