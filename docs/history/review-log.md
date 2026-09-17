@@ -805,3 +805,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实测：** SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。先 `fluxd disable` 再 `fluxd stop`。Phase 4 `Runtime::load_embedded` 加载 12 maps + 4 未 attach 程序（`flx_in` tag `81e4c260027b3671`，612 input insns）后精确卸载。Phase 5 RAWIP/crash cleanup 与 Phase 6 官方 sing-box 双栈 origdst / uid_stats / DRAINING / package_name route 通过。残留检查无 `flxrs*`、无 pref 100、无 table 20260、无 `flx_` filter。再 `fluxd enable` 并拉起 daemon，收敛到 `Active` generation 1。
 
 **处置：** 记为这条工作树的设备证据，不是候选 ZIP 的 §20，也不是正式 1.0.0。ABI 仍为 `0xF10C0905`。未跑 Phase 7，未装候选 ZIP。不实现 TCX。
+
+### 0.6.28 工作区命名为 1.0.0-rc.3（2026-09-17）
+
+**原说法：** rc.3 批 0–7 已落地，但 workspace 仍写 `1.0.0-rc.2`，因此没有可引用的 rc.3 版本身份。
+
+**实际：** 所有者要求在本会话收尾命名。`[workspace.package] version` 改为 `1.0.0-rc.3`；`versionCode` 仍由公式派生（`10000003`）。未创建 Git tag、未推送、未签署正式 `1.0.0`。批 8 性能未做。
+
+**处置：** 蓝图页眉、`plan/implementation.md` §17.0、`plan/rc3.md` 身份表与 CHANGELOG 同步到该版本。Phase 8 宿主生命周期与候选 ZIP 设备升级的证据另记。不实现 TCX。

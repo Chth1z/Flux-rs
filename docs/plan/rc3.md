@@ -12,13 +12,15 @@
 
 | 项 | 值 |
 |---|---|
-| 工作区版本 | `1.0.0-rc.2` |
-| 提交 | `a0a41bc`（`refactor: deepen the 1.0 core without widening the product`） |
-| 设备旁证 | SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0；本树 Phase 4–6 通过，见 `history/review-log.md` §0.6.19 |
-| ABI | `FLUX_ABI_MAGIC = 0xF10C0904`；`struct flux_control` 96 字节 |
+| 设计对照版本 | `1.0.0-rc.2` |
+| 设计对照提交 | `a0a41bc`（`refactor: deepen the 1.0 core without widening the product`） |
+| 落地后工作区 | `1.0.0-rc.3`（批 0–7 已提交；当前进度见 `implementation.md` §17.0） |
+| 设备旁证 | SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0；本树 Phase 4–6 通过，见 `history/review-log.md` §0.6.19、§0.6.27 |
+| 设计对照 ABI | `FLUX_ABI_MAGIC = 0xF10C0904`；`struct flux_control` 96 字节 |
+| 落地后 ABI | `FLUX_ABI_MAGIC = 0xF10C0905`（结构仍 96 字节） |
 | 未完成的正式 1.0.0 门 | 远端 CI、候选 ZIP 的 §20、Phase 7、三管理器 smoke |
 
-机上仍运行已装的 rc.1 二进制。§0.6.19 证明的是本树测试对象，不是候选 ZIP。
+设计对照时点机上仍运行已装的 rc.1 二进制。§0.6.19 / §0.6.27 证明的是本树测试对象，不是候选 ZIP。
 
 ### 0.2 两份输入审计
 

@@ -22,7 +22,7 @@
 | **我是用户，这东西是干什么的** | **`guide/introduction.md`**（不含术语） |
 | **要评审或提出一个设计** | **`philosophy.md`**（英文），先过 PHIL-10 的 checklist |
 | **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
-| **设计 1.0.0-rc.3 核心与架构升级** | **`plan/rc3.md`**（计划层；落地前与代码不一致时以该文件的目标形状为准） |
+| **设计 1.0.0-rc.3 核心与架构升级** | **`plan/rc3.md`**（批 0–7 已落地并命名工作区 `1.0.0-rc.3`；正式 1.0.0 门见 `plan/implementation.md` §17.0.3） |
 | 实现某个模块 | `spec/blueprint.md`，从头读到尾。它是完整合同，不需要再叠任何东西 |
 | 了解技术架构 | `guide/architecture.md` |
 | 怎么装、怎么配、出问题怎么办 | `guide/how-to.md` |

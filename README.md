@@ -6,7 +6,8 @@ eBPF and an **unmodified** official
 VPN, alter packets' IP addresses or ports, or take over traffic from apps you
 did not select.
 
-> **Status:** preparing the 1.0.0 candidate for owner review. The normative
+> **Status:** workspace is **1.0.0-rc.3**. Preparing the 1.0.0 candidate for
+> owner review. The normative
 > contract lives in `docs/spec/`; the workspace manifest is the version source.
 > A signed release tag is the only release channel. Development packages carry
 > their Git revision and are not formal releases. Current software evidence and

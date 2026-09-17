@@ -1,6 +1,6 @@
 # Flux-rs Design Blueprint
 
-- Specifies: **1.0.0-rc.2 core deepening, pending owner review**. This is the single normative blueprint and it is edited
+- Specifies: **1.0.0-rc.3 core/architecture upgrade**. This is the single normative blueprint and it is edited
   in place; there are no incremental layers (`../authoring.md` AUTH-7.2).
 - Nature: **the implementation contract.** Where this document and the code
   disagree, the code is wrong. Where this document and `../philosophy.md`

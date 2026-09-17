@@ -264,3 +264,11 @@ alternatives with reasons.
 
 The previous 385 commits are preserved in an offline bundle outside this
 repository and are not part of this history.
+
+## [1.0.0-rc.3] - 2026-09-17
+
+Named workspace version for the core/architecture upgrade
+(`docs/plan/rc3.md` batches 0–7). Derived `versionCode` is `10000003`.
+Not a signed 1.0.0; remaining publish gates are in
+`docs/plan/implementation.md` §17.0.3. User-visible notes for those
+batches remain under [Unreleased] until a signed release.
