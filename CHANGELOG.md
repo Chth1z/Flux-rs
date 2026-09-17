@@ -105,6 +105,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaf that names `policy_bank`. `FLUX_ABI_MAGIC` is `0xF10C0905`.
   `publish_inactive` never `MAP_CREATE`s; an empty spare is
   `inactive_publish_failed`.
+- The §26 table now drives the reactor. `plan` returns Commands with
+  identities; the adapter executes them and does not call `converge` on
+  every event. Capture-side drift reattaches locally and does not freeze.
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

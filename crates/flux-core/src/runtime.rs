@@ -1,9 +1,11 @@
-//! Pure §26 lifecycle: phases, stimuli, effects, and the status projection.
+//! Pure §26 lifecycle: phases, stimuli, commands, and the status projection.
 //!
-//! The daemon's epoll loop is an adapter over [`step`]. Illegal combinations of
-//! disable / engine / dataplane flags are not representable as a [`Phase`].
-//! The JSON `State` and the `module.prop` line are both projections of one
-//! [`CommittedView`] (blueprint §10.1, §26, §27.1.3).
+//! The daemon's epoll loop is an adapter over [`plan`]: it decodes events,
+//! asks this module what to do, and executes the returned [`Command`]s.
+//! Illegal combinations of disable / engine / dataplane flags are not
+//! representable as a [`Phase`]. The JSON `State` and the `module.prop` line
+//! are both projections of one [`CommittedView`] (blueprint §10.1, §26,
+//! §27.1.3).
 
 use crate::control_wire::State;
 
@@ -90,9 +92,9 @@ pub enum Stimulus {
     EngineStopped,
 }
 
-/// A userspace action [`step`] asks the adapter to perform. No syscalls here.
+/// A userspace action [`plan`] asks the adapter to perform. No syscalls here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Effect {
+pub enum CommandKind {
     /// Combination absent from §26: log and ignore; do not invent handling.
     IgnoreUnexpected,
     /// Run the full activation sequence (§8.7).
@@ -137,46 +139,77 @@ pub enum Effect {
     RecheckSockDiag,
 }
 
+/// Identity of one command in a boot. Completions that carry a stale id must
+/// not commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandId(pub u64);
+
+/// One adapter action with an identity so a late completion cannot commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Command {
+    /// Monotonic id assigned by [`plan`].
+    pub id: CommandId,
+    /// What the adapter should do.
+    pub kind: CommandKind,
+}
+
+/// Planner memory: the observed [`Phase`] and the next command id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Model {
+    /// Last observed or table-advanced phase.
+    pub phase: Phase,
+    next_id: u64,
+}
+
+impl Model {
+    /// Start of a boot. Phase is reconstructed from [`Observation`] after I/O.
+    pub fn new(phase: Phase) -> Self {
+        Self { phase, next_id: 1 }
+    }
+}
+
 /// Result of one [`step`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
     /// Phase after the stimulus.
     pub phase: Phase,
     /// Adapter actions, in order. Empty means "no userspace work".
-    pub effects: Vec<Effect>,
+    pub commands: Vec<CommandKind>,
 }
 
 fn stay(phase: Phase) -> Step {
     Step {
         phase,
-        effects: Vec::new(),
+        commands: Vec::new(),
     }
 }
 
-fn with(phase: Phase, effects: &[Effect]) -> Step {
+fn with(phase: Phase, commands: &[CommandKind]) -> Step {
     Step {
         phase,
-        effects: effects.to_vec(),
+        commands: commands.to_vec(),
     }
 }
 
 fn unexpected(phase: Phase) -> Step {
-    with(phase, &[Effect::IgnoreUnexpected])
+    with(phase, &[CommandKind::IgnoreUnexpected])
 }
 
 /// Advance the lifecycle. Combinations absent from §26 yield
-/// [`Effect::IgnoreUnexpected`] and leave the phase unchanged.
+/// [`CommandKind::IgnoreUnexpected`] and leave the phase unchanged.
 pub fn step(phase: Phase, stimulus: Stimulus) -> Step {
     match (phase, stimulus) {
         (_, Stimulus::Status | Stimulus::Check) => stay(phase),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::Bootstrap) => stay(phase),
         (Phase::Inactive | Phase::Paused, Stimulus::Bootstrap) => {
-            with(phase, &[Effect::AttemptActivation])
+            with(phase, &[CommandKind::AttemptActivation])
         }
         (Phase::Activating | Phase::Active, Stimulus::Bootstrap) => unexpected(phase),
 
-        (Phase::Disabled, Stimulus::Enable) => with(Phase::Inactive, &[Effect::AttemptActivation]),
+        (Phase::Disabled, Stimulus::Enable) => {
+            with(Phase::Inactive, &[CommandKind::AttemptActivation])
+        }
         (
             Phase::Stopping | Phase::Inactive | Phase::Paused | Phase::Activating | Phase::Active,
             Stimulus::Enable,
@@ -184,27 +217,30 @@ pub fn step(phase: Phase, stimulus: Stimulus) -> Step {
 
         (Phase::Disabled | Phase::Stopping, Stimulus::Disable) => stay(phase),
         (Phase::Inactive | Phase::Paused | Phase::Activating, Stimulus::Disable) => {
-            with(Phase::Stopping, &[Effect::StopEngine])
+            with(Phase::Stopping, &[CommandKind::StopEngine])
         }
         (Phase::Active, Stimulus::Disable) => with(
             Phase::Stopping,
-            &[Effect::PublishInactive, Effect::StopEngine],
+            &[CommandKind::PublishInactive, CommandKind::StopEngine],
         ),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::Reload | Stimulus::Sighup) => {
-            with(phase, &[Effect::RevalidateOnly])
+            with(phase, &[CommandKind::RevalidateOnly])
         }
         (Phase::Inactive | Phase::Paused, Stimulus::Reload | Stimulus::Sighup) => {
-            with(phase, &[Effect::AttemptActivation])
+            with(phase, &[CommandKind::AttemptActivation])
         }
         (Phase::Activating, Stimulus::Reload | Stimulus::Sighup) => stay(phase),
         (Phase::Active, Stimulus::Reload | Stimulus::Sighup) => with(
             Phase::Active,
-            &[Effect::PolicyTransaction, Effect::EngineCandidateSwitch],
+            &[
+                CommandKind::PolicyTransaction,
+                CommandKind::EngineCandidateSwitch,
+            ],
         ),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::Stop | Stimulus::Sigterm) => {
-            with(phase, &[Effect::ExitProcess])
+            with(phase, &[CommandKind::ExitProcess])
         }
         (
             Phase::Inactive | Phase::Paused | Phase::Activating | Phase::Active,
@@ -212,22 +248,24 @@ pub fn step(phase: Phase, stimulus: Stimulus) -> Step {
         ) => with(
             Phase::Stopping,
             &[
-                Effect::PublishInactive,
-                Effect::StopEngine,
-                Effect::ExitProcess,
+                CommandKind::PublishInactive,
+                CommandKind::StopEngine,
+                CommandKind::ExitProcess,
             ],
         ),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::NewInterface) => stay(phase),
         (Phase::Inactive | Phase::Paused, Stimulus::NewInterface) => {
-            with(phase, &[Effect::ReevaluateAdmission])
+            with(phase, &[CommandKind::ReevaluateAdmission])
         }
         (Phase::Activating, Stimulus::NewInterface) => stay(phase),
-        (Phase::Active, Stimulus::NewInterface) => with(Phase::Active, &[Effect::AdmitAndAttach]),
+        (Phase::Active, Stimulus::NewInterface) => {
+            with(Phase::Active, &[CommandKind::AdmitAndAttach])
+        }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::InterfaceGone { .. }) => stay(phase),
         (Phase::Inactive | Phase::Paused, Stimulus::InterfaceGone { .. }) => {
-            with(phase, &[Effect::ReevaluateAdmission])
+            with(phase, &[CommandKind::ReevaluateAdmission])
         }
         (Phase::Activating, Stimulus::InterfaceGone { .. }) => stay(phase),
         (
@@ -237,119 +275,128 @@ pub fn step(phase: Phase, stimulus: Stimulus) -> Step {
             },
         ) => with(
             Phase::Inactive,
-            &[Effect::PublishInactive, Effect::ExcludeInterface],
+            &[CommandKind::PublishInactive, CommandKind::ExcludeInterface],
         ),
         (
             Phase::Active,
             Stimulus::InterfaceGone {
                 last_active_iface: false,
             },
-        ) => with(Phase::Active, &[Effect::ExcludeInterface]),
+        ) => with(Phase::Active, &[CommandKind::ExcludeInterface]),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::AddressChange) => stay(phase),
         (Phase::Inactive | Phase::Paused | Phase::Activating, Stimulus::AddressChange) => {
-            with(phase, &[Effect::UpdateSelfAddresses])
+            with(phase, &[CommandKind::UpdateSelfAddresses])
         }
         (Phase::Active, Stimulus::AddressChange) => {
-            with(Phase::Active, &[Effect::UpdateSelfAddresses])
+            with(Phase::Active, &[CommandKind::UpdateSelfAddresses])
         }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::CaptureSideDrift) => stay(phase),
         (Phase::Inactive | Phase::Paused | Phase::Activating, Stimulus::CaptureSideDrift) => {
-            with(phase, &[Effect::RunPendingConvergence])
+            with(phase, &[CommandKind::RunPendingConvergence])
         }
         (Phase::Active, Stimulus::CaptureSideDrift) => {
-            with(Phase::Active, &[Effect::ReattachCaptureLocally])
+            with(Phase::Active, &[CommandKind::ReattachCaptureLocally])
         }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::CoreDrift) => stay(phase),
         (Phase::Inactive | Phase::Paused | Phase::Activating, Stimulus::CoreDrift) => {
-            with(phase, &[Effect::RunPendingConvergence])
+            with(phase, &[CommandKind::RunPendingConvergence])
         }
         (Phase::Active, Stimulus::CoreDrift) => with(
             Phase::Activating,
-            &[Effect::PublishInactive, Effect::RunPendingConvergence],
+            &[
+                CommandKind::PublishInactive,
+                CommandKind::RunPendingConvergence,
+            ],
         ),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::NetlinkOverrun) => stay(phase),
-        (_, Stimulus::NetlinkOverrun) => with(phase, &[Effect::FullRedump]),
+        (_, Stimulus::NetlinkOverrun) => with(phase, &[CommandKind::FullRedump]),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::FluxTomlChanged) => {
-            with(phase, &[Effect::RevalidateOnly])
+            with(phase, &[CommandKind::RevalidateOnly])
         }
         (Phase::Inactive | Phase::Paused, Stimulus::FluxTomlChanged) => {
-            with(phase, &[Effect::AttemptActivation])
+            with(phase, &[CommandKind::AttemptActivation])
         }
         (Phase::Activating, Stimulus::FluxTomlChanged) => stay(phase),
         (Phase::Active, Stimulus::FluxTomlChanged) => {
-            with(Phase::Active, &[Effect::PolicyTransaction])
+            with(Phase::Active, &[CommandKind::PolicyTransaction])
         }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::TemplateOrListChanged) => {
-            with(phase, &[Effect::RevalidateOnly])
+            with(phase, &[CommandKind::RevalidateOnly])
         }
         (Phase::Inactive | Phase::Paused, Stimulus::TemplateOrListChanged) => {
-            with(phase, &[Effect::AttemptActivation])
+            with(phase, &[CommandKind::AttemptActivation])
         }
         (Phase::Activating, Stimulus::TemplateOrListChanged) => stay(phase),
         (Phase::Active, Stimulus::TemplateOrListChanged) => {
-            with(Phase::Active, &[Effect::RegenerateThenSwitch])
+            with(Phase::Active, &[CommandKind::RegenerateThenSwitch])
         }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::PackagesChanged) => stay(phase),
         (Phase::Inactive | Phase::Paused, Stimulus::PackagesChanged) => {
-            with(phase, &[Effect::ReparseThenPolicy])
+            with(phase, &[CommandKind::ReparseThenPolicy])
         }
         (Phase::Activating, Stimulus::PackagesChanged) => stay(phase),
         (Phase::Active, Stimulus::PackagesChanged) => {
-            with(Phase::Active, &[Effect::ReparseThenPolicy])
+            with(Phase::Active, &[CommandKind::ReparseThenPolicy])
         }
 
         (Phase::Disabled | Phase::Stopping, Stimulus::SsidPause) => stay(phase),
         (Phase::Inactive | Phase::Paused, Stimulus::SsidPause) => stay(Phase::Paused),
         (Phase::Activating | Phase::Active, Stimulus::SsidPause) => with(
             Phase::Paused,
-            &[Effect::PublishInactive, Effect::StopEngine],
+            &[CommandKind::PublishInactive, CommandKind::StopEngine],
         ),
 
         (Phase::Paused, Stimulus::SsidResume) => {
-            with(Phase::Inactive, &[Effect::AttemptActivation])
+            with(Phase::Inactive, &[CommandKind::AttemptActivation])
         }
         (_, Stimulus::SsidResume) => stay(phase),
 
         (Phase::Disabled, Stimulus::EngineExited) => unexpected(phase),
         (Phase::Stopping, Stimulus::EngineExited) => stay(Phase::Disabled),
         (Phase::Inactive | Phase::Paused, Stimulus::EngineExited) => {
-            with(phase, &[Effect::RestartWithBackoff])
+            with(phase, &[CommandKind::RestartWithBackoff])
         }
         (Phase::Activating | Phase::Active, Stimulus::EngineExited) => with(
             Phase::Inactive,
-            &[Effect::PublishInactive, Effect::RestartWithBackoff],
+            &[
+                CommandKind::PublishInactive,
+                CommandKind::RestartWithBackoff,
+            ],
         ),
 
         (Phase::Disabled, Stimulus::CurrentGenerationFault) => unexpected(phase),
         (Phase::Stopping | Phase::Inactive | Phase::Paused, Stimulus::CurrentGenerationFault) => {
-            with(phase, &[Effect::ClearLatchOnly])
+            with(phase, &[CommandKind::ClearLatchOnly])
         }
         (Phase::Activating | Phase::Active, Stimulus::CurrentGenerationFault) => with(
             Phase::Inactive,
-            &[Effect::PublishInactive, Effect::RestartWithBackoff],
+            &[
+                CommandKind::PublishInactive,
+                CommandKind::RestartWithBackoff,
+            ],
         ),
 
-        (_, Stimulus::StaleOrDuplicateFault) => with(phase, &[Effect::ClearLatchOnly]),
+        (_, Stimulus::StaleOrDuplicateFault) => with(phase, &[CommandKind::ClearLatchOnly]),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::DebounceExpired) => stay(phase),
-        (_, Stimulus::DebounceExpired) => with(phase, &[Effect::RunPendingConvergence]),
+        (_, Stimulus::DebounceExpired) => with(phase, &[CommandKind::RunPendingConvergence]),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::BackoffExpired) => stay(phase),
-        (_, Stimulus::BackoffExpired) => with(phase, &[Effect::RetryActivation]),
+        (_, Stimulus::BackoffExpired) => with(phase, &[CommandKind::RetryActivation]),
 
         (Phase::Disabled | Phase::Stopping, Stimulus::ReadinessBackoff) => stay(phase),
-        (_, Stimulus::ReadinessBackoff) => with(phase, &[Effect::RecheckSockDiag]),
+        (_, Stimulus::ReadinessBackoff) => with(phase, &[CommandKind::RecheckSockDiag]),
 
         (Phase::Activating, Stimulus::ActivationCommitted) => stay(Phase::Active),
         (Phase::Activating, Stimulus::ActivationFailed) => {
-            with(Phase::Inactive, &[Effect::PublishInactive])
+            with(Phase::Inactive, &[CommandKind::PublishInactive])
         }
         (_, Stimulus::ActivationCommitted | Stimulus::ActivationFailed) => unexpected(phase),
 
@@ -358,9 +405,48 @@ pub fn step(phase: Phase, stimulus: Stimulus) -> Step {
     }
 }
 
-/// True when `effects` would freeze capture. Capture-side drift MUST NOT.
-pub fn freezes_capture(effects: &[Effect]) -> bool {
-    effects.contains(&Effect::PublishInactive)
+/// Assign identities to [`step`] output so a late completion cannot commit.
+pub fn plan(mut model: Model, stimulus: Stimulus) -> (Model, Vec<Command>) {
+    let stepped = step(model.phase, stimulus);
+    model.phase = stepped.phase;
+    let commands = stepped
+        .commands
+        .into_iter()
+        .map(|kind| {
+            let id = CommandId(model.next_id);
+            model.next_id = model.next_id.saturating_add(1);
+            Command { id, kind }
+        })
+        .collect();
+    (model, commands)
+}
+
+/// True when `commands` would freeze capture. Capture-side drift MUST NOT.
+pub fn freezes_capture(commands: &[CommandKind]) -> bool {
+    commands.contains(&CommandKind::PublishInactive)
+}
+
+impl CommandKind {
+    /// True when the adapter should run the shared dataplane/engine executor.
+    /// Freeze, stop, exit, latch-clear and SOCK_DIAG recheck are not this.
+    pub fn needs_converge(self) -> bool {
+        matches!(
+            self,
+            Self::AttemptActivation
+                | Self::PolicyTransaction
+                | Self::EngineCandidateSwitch
+                | Self::ReevaluateAdmission
+                | Self::AdmitAndAttach
+                | Self::ExcludeInterface
+                | Self::UpdateSelfAddresses
+                | Self::ReattachCaptureLocally
+                | Self::FullRedump
+                | Self::RegenerateThenSwitch
+                | Self::ReparseThenPolicy
+                | Self::RunPendingConvergence
+                | Self::RetryActivation
+        )
+    }
 }
 
 /// Observable facts used only to reconstruct [`Phase`] after I/O completes.
@@ -531,8 +617,8 @@ impl Generations {
 mod tests {
     use super::*;
 
-    fn effects_of(phase: Phase, stimulus: Stimulus) -> Vec<Effect> {
-        step(phase, stimulus).effects
+    fn commands_of(phase: Phase, stimulus: Stimulus) -> Vec<CommandKind> {
+        step(phase, stimulus).commands
     }
 
     fn phase_of(phase: Phase, stimulus: Stimulus) -> Phase {
@@ -561,12 +647,12 @@ mod tests {
             Phase::Disabled
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::Bootstrap),
-            vec![Effect::AttemptActivation]
+            commands_of(Phase::Inactive, Stimulus::Bootstrap),
+            vec![CommandKind::AttemptActivation]
         );
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::Bootstrap),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Active, Stimulus::Bootstrap),
+            vec![CommandKind::IgnoreUnexpected]
         );
     }
 
@@ -574,27 +660,27 @@ mod tests {
     fn enable_disable_stop() {
         assert_eq!(
             step(Phase::Disabled, Stimulus::Enable),
-            with(Phase::Inactive, &[Effect::AttemptActivation])
+            with(Phase::Inactive, &[CommandKind::AttemptActivation])
         );
-        assert!(effects_of(Phase::Inactive, Stimulus::Enable).is_empty());
-        assert!(effects_of(Phase::Active, Stimulus::Enable).is_empty());
-        assert!(effects_of(Phase::Disabled, Stimulus::Disable).is_empty());
+        assert!(commands_of(Phase::Inactive, Stimulus::Enable).is_empty());
+        assert!(commands_of(Phase::Active, Stimulus::Enable).is_empty());
+        assert!(commands_of(Phase::Disabled, Stimulus::Disable).is_empty());
         assert_eq!(
             step(Phase::Inactive, Stimulus::Disable),
-            with(Phase::Stopping, &[Effect::StopEngine])
+            with(Phase::Stopping, &[CommandKind::StopEngine])
         );
         assert_eq!(
             step(Phase::Active, Stimulus::Disable),
             with(
                 Phase::Stopping,
-                &[Effect::PublishInactive, Effect::StopEngine]
+                &[CommandKind::PublishInactive, CommandKind::StopEngine]
             )
         );
         assert_eq!(
-            effects_of(Phase::Disabled, Stimulus::Stop),
-            vec![Effect::ExitProcess]
+            commands_of(Phase::Disabled, Stimulus::Stop),
+            vec![CommandKind::ExitProcess]
         );
-        assert!(effects_of(Phase::Active, Stimulus::Stop).contains(&Effect::PublishInactive));
+        assert!(commands_of(Phase::Active, Stimulus::Stop).contains(&CommandKind::PublishInactive));
         assert_eq!(phase_of(Phase::Active, Stimulus::Stop), Phase::Stopping);
     }
 
@@ -605,26 +691,29 @@ mod tests {
             step(Phase::Disabled, Stimulus::Sighup)
         );
         assert_eq!(
-            effects_of(Phase::Disabled, Stimulus::Reload),
-            vec![Effect::RevalidateOnly]
+            commands_of(Phase::Disabled, Stimulus::Reload),
+            vec![CommandKind::RevalidateOnly]
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::Reload),
-            vec![Effect::AttemptActivation]
+            commands_of(Phase::Inactive, Stimulus::Reload),
+            vec![CommandKind::AttemptActivation]
         );
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::Reload),
-            vec![Effect::PolicyTransaction, Effect::EngineCandidateSwitch]
+            commands_of(Phase::Active, Stimulus::Reload),
+            vec![
+                CommandKind::PolicyTransaction,
+                CommandKind::EngineCandidateSwitch
+            ]
         );
-        assert!(effects_of(Phase::Activating, Stimulus::Reload).is_empty());
+        assert!(commands_of(Phase::Activating, Stimulus::Reload).is_empty());
     }
 
     #[test]
     fn capture_side_drift_from_active_does_not_freeze() {
         let stepped = step(Phase::Active, Stimulus::CaptureSideDrift);
         assert_eq!(stepped.phase, Phase::Active);
-        assert_eq!(stepped.effects, vec![Effect::ReattachCaptureLocally]);
-        assert!(!freezes_capture(&stepped.effects));
+        assert_eq!(stepped.commands, vec![CommandKind::ReattachCaptureLocally]);
+        assert!(!freezes_capture(&stepped.commands));
     }
 
     #[test]
@@ -632,10 +721,13 @@ mod tests {
         let stepped = step(Phase::Active, Stimulus::CoreDrift);
         assert_eq!(stepped.phase, Phase::Activating);
         assert_eq!(
-            stepped.effects,
-            vec![Effect::PublishInactive, Effect::RunPendingConvergence]
+            stepped.commands,
+            vec![
+                CommandKind::PublishInactive,
+                CommandKind::RunPendingConvergence
+            ]
         );
-        assert!(freezes_capture(&stepped.effects));
+        assert!(freezes_capture(&stepped.commands));
     }
 
     #[test]
@@ -647,7 +739,7 @@ mod tests {
             },
         );
         assert_eq!(last.phase, Phase::Inactive);
-        assert!(freezes_capture(&last.effects));
+        assert!(freezes_capture(&last.commands));
         let rest = step(
             Phase::Active,
             Stimulus::InterfaceGone {
@@ -655,15 +747,15 @@ mod tests {
             },
         );
         assert_eq!(rest.phase, Phase::Active);
-        assert!(!freezes_capture(&rest.effects));
+        assert!(!freezes_capture(&rest.commands));
     }
 
     #[test]
     fn address_change_leaves_active() {
         let stepped = step(Phase::Active, Stimulus::AddressChange);
         assert_eq!(stepped.phase, Phase::Active);
-        assert_eq!(stepped.effects, vec![Effect::UpdateSelfAddresses]);
-        assert!(!freezes_capture(&stepped.effects));
+        assert_eq!(stepped.commands, vec![CommandKind::UpdateSelfAddresses]);
+        assert!(!freezes_capture(&stepped.commands));
     }
 
     #[test]
@@ -672,17 +764,17 @@ mod tests {
             phase_of(Phase::Active, Stimulus::FluxTomlChanged),
             Phase::Active
         );
-        assert!(!freezes_capture(&effects_of(
+        assert!(!freezes_capture(&commands_of(
             Phase::Active,
             Stimulus::FluxTomlChanged
         )));
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::PackagesChanged),
-            vec![Effect::ReparseThenPolicy]
+            commands_of(Phase::Active, Stimulus::PackagesChanged),
+            vec![CommandKind::ReparseThenPolicy]
         );
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::TemplateOrListChanged),
-            vec![Effect::RegenerateThenSwitch]
+            commands_of(Phase::Active, Stimulus::TemplateOrListChanged),
+            vec![CommandKind::RegenerateThenSwitch]
         );
     }
 
@@ -690,43 +782,43 @@ mod tests {
     fn ssid_pause_and_resume() {
         let pause = step(Phase::Active, Stimulus::SsidPause);
         assert_eq!(pause.phase, Phase::Paused);
-        assert!(freezes_capture(&pause.effects));
+        assert!(freezes_capture(&pause.commands));
         assert_eq!(
             step(Phase::Paused, Stimulus::SsidResume),
-            with(Phase::Inactive, &[Effect::AttemptActivation])
+            with(Phase::Inactive, &[CommandKind::AttemptActivation])
         );
-        assert!(effects_of(Phase::Active, Stimulus::SsidResume).is_empty());
+        assert!(commands_of(Phase::Active, Stimulus::SsidResume).is_empty());
     }
 
     #[test]
     fn engine_exit_and_faults() {
         assert_eq!(
-            effects_of(Phase::Disabled, Stimulus::EngineExited),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Disabled, Stimulus::EngineExited),
+            vec![CommandKind::IgnoreUnexpected]
         );
         assert_eq!(
             phase_of(Phase::Stopping, Stimulus::EngineExited),
             Phase::Disabled
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::EngineExited),
-            vec![Effect::RestartWithBackoff]
+            commands_of(Phase::Inactive, Stimulus::EngineExited),
+            vec![CommandKind::RestartWithBackoff]
         );
         let from_active = step(Phase::Active, Stimulus::EngineExited);
         assert_eq!(from_active.phase, Phase::Inactive);
-        assert!(freezes_capture(&from_active.effects));
+        assert!(freezes_capture(&from_active.commands));
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::CurrentGenerationFault),
-            vec![Effect::ClearLatchOnly]
+            commands_of(Phase::Inactive, Stimulus::CurrentGenerationFault),
+            vec![CommandKind::ClearLatchOnly]
         );
         let fault = step(Phase::Active, Stimulus::CurrentGenerationFault);
         assert_eq!(fault.phase, Phase::Inactive);
-        assert!(freezes_capture(&fault.effects));
+        assert!(freezes_capture(&fault.commands));
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::StaleOrDuplicateFault),
-            vec![Effect::ClearLatchOnly]
+            commands_of(Phase::Active, Stimulus::StaleOrDuplicateFault),
+            vec![CommandKind::ClearLatchOnly]
         );
-        assert!(!freezes_capture(&effects_of(
+        assert!(!freezes_capture(&commands_of(
             Phase::Active,
             Stimulus::StaleOrDuplicateFault
         )));
@@ -734,18 +826,18 @@ mod tests {
 
     #[test]
     fn timers() {
-        assert!(effects_of(Phase::Disabled, Stimulus::DebounceExpired).is_empty());
+        assert!(commands_of(Phase::Disabled, Stimulus::DebounceExpired).is_empty());
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::DebounceExpired),
-            vec![Effect::RunPendingConvergence]
+            commands_of(Phase::Active, Stimulus::DebounceExpired),
+            vec![CommandKind::RunPendingConvergence]
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::BackoffExpired),
-            vec![Effect::RetryActivation]
+            commands_of(Phase::Inactive, Stimulus::BackoffExpired),
+            vec![CommandKind::RetryActivation]
         );
         assert_eq!(
-            effects_of(Phase::Activating, Stimulus::ReadinessBackoff),
-            vec![Effect::RecheckSockDiag]
+            commands_of(Phase::Activating, Stimulus::ReadinessBackoff),
+            vec![CommandKind::RecheckSockDiag]
         );
     }
 
@@ -757,27 +849,27 @@ mod tests {
         );
         assert_eq!(
             step(Phase::Activating, Stimulus::ActivationFailed),
-            with(Phase::Inactive, &[Effect::PublishInactive])
+            with(Phase::Inactive, &[CommandKind::PublishInactive])
         );
         assert_eq!(
             phase_of(Phase::Stopping, Stimulus::EngineStopped),
             Phase::Disabled
         );
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::ActivationCommitted),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Active, Stimulus::ActivationCommitted),
+            vec![CommandKind::IgnoreUnexpected]
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::EngineStopped),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Inactive, Stimulus::EngineStopped),
+            vec![CommandKind::IgnoreUnexpected]
         );
     }
 
     #[test]
     fn activating_queues_config_events() {
-        assert!(effects_of(Phase::Activating, Stimulus::Reload).is_empty());
-        assert!(effects_of(Phase::Activating, Stimulus::FluxTomlChanged).is_empty());
-        assert!(effects_of(Phase::Activating, Stimulus::NewInterface).is_empty());
+        assert!(commands_of(Phase::Activating, Stimulus::Reload).is_empty());
+        assert!(commands_of(Phase::Activating, Stimulus::FluxTomlChanged).is_empty());
+        assert!(commands_of(Phase::Activating, Stimulus::NewInterface).is_empty());
     }
 
     #[test]
@@ -886,7 +978,7 @@ mod tests {
     fn capture_side_drift_never_publishes_inactive() {
         for phase in ALL_PHASES {
             assert!(
-                !freezes_capture(&effects_of(phase, Stimulus::CaptureSideDrift)),
+                !freezes_capture(&commands_of(phase, Stimulus::CaptureSideDrift)),
                 "{phase:?} capture-side drift must not freeze capture"
             );
         }
@@ -902,7 +994,7 @@ mod tests {
             Phase::Activating,
         ] {
             assert!(
-                !effects_of(phase, Stimulus::CoreDrift).contains(&Effect::PublishInactive),
+                !commands_of(phase, Stimulus::CoreDrift).contains(&CommandKind::PublishInactive),
                 "{phase:?}"
             );
         }
@@ -910,52 +1002,73 @@ mod tests {
 
     #[test]
     fn remaining_table_cells() {
-        assert!(effects_of(Phase::Disabled, Stimulus::NewInterface).is_empty());
+        assert!(commands_of(Phase::Disabled, Stimulus::NewInterface).is_empty());
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::NewInterface),
-            vec![Effect::ReevaluateAdmission]
+            commands_of(Phase::Inactive, Stimulus::NewInterface),
+            vec![CommandKind::ReevaluateAdmission]
         );
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::NetlinkOverrun),
-            vec![Effect::FullRedump]
+            commands_of(Phase::Active, Stimulus::NetlinkOverrun),
+            vec![CommandKind::FullRedump]
         );
-        assert!(effects_of(Phase::Disabled, Stimulus::NetlinkOverrun).is_empty());
+        assert!(commands_of(Phase::Disabled, Stimulus::NetlinkOverrun).is_empty());
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::AddressChange),
-            vec![Effect::UpdateSelfAddresses]
+            commands_of(Phase::Inactive, Stimulus::AddressChange),
+            vec![CommandKind::UpdateSelfAddresses]
         );
         assert_eq!(
-            effects_of(Phase::Paused, Stimulus::SsidPause),
-            stay(Phase::Paused).effects
+            commands_of(Phase::Paused, Stimulus::SsidPause),
+            stay(Phase::Paused).commands
         );
         assert_eq!(
             phase_of(Phase::Inactive, Stimulus::SsidPause),
             Phase::Paused
         );
         assert_eq!(
-            effects_of(Phase::Disabled, Stimulus::PackagesChanged),
-            Vec::<Effect>::new()
+            commands_of(Phase::Disabled, Stimulus::PackagesChanged),
+            Vec::<CommandKind>::new()
         );
         assert_eq!(
-            effects_of(Phase::Inactive, Stimulus::CaptureSideDrift),
-            vec![Effect::RunPendingConvergence]
+            commands_of(Phase::Inactive, Stimulus::CaptureSideDrift),
+            vec![CommandKind::RunPendingConvergence]
         );
         assert_eq!(
             step(Phase::Disabled, Stimulus::Enable).phase,
             Phase::Inactive
         );
-        assert!(effects_of(Phase::Stopping, Stimulus::Enable).is_empty());
+        assert!(commands_of(Phase::Stopping, Stimulus::Enable).is_empty());
     }
 
     #[test]
     fn section_26_absent_combo_is_ignore() {
         assert_eq!(
-            effects_of(Phase::Active, Stimulus::Bootstrap),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Active, Stimulus::Bootstrap),
+            vec![CommandKind::IgnoreUnexpected]
         );
         assert_eq!(
-            effects_of(Phase::Disabled, Stimulus::EngineExited),
-            vec![Effect::IgnoreUnexpected]
+            commands_of(Phase::Disabled, Stimulus::EngineExited),
+            vec![CommandKind::IgnoreUnexpected]
         );
+    }
+
+    #[test]
+    fn plan_assigns_monotonic_ids_and_does_not_freeze_on_capture_drift() {
+        let (model, commands) = plan(Model::new(Phase::Active), Stimulus::CaptureSideDrift);
+        assert_eq!(model.phase, Phase::Active);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].id, CommandId(1));
+        assert_eq!(commands[0].kind, CommandKind::ReattachCaptureLocally);
+        assert!(!freezes_capture(
+            &commands
+                .iter()
+                .map(|command| command.kind)
+                .collect::<Vec<_>>()
+        ));
+        assert!(CommandKind::ReattachCaptureLocally.needs_converge());
+        assert!(!CommandKind::PublishInactive.needs_converge());
+        assert!(!CommandKind::ClearLatchOnly.needs_converge());
+        let (_, next) = plan(model, Stimulus::Reload);
+        assert_eq!(next[0].id, CommandId(2));
+        assert_eq!(next[1].id, CommandId(3));
     }
 }

@@ -3,7 +3,7 @@
 //! This crate holds everything that needs no syscall: configuration parsing,
 //! app selector resolution, CIDR canonicalisation, the PolicyEpoch model,
 //! dump completeness, the data-plane ABI mirror, the control-protocol wire types, the §26
-//! lifecycle table, and version arithmetic. It therefore compiles and tests
+//! lifecycle Planner (`plan` / `step`), and version arithmetic. It therefore compiles and tests
 //! on any host, including Windows.
 //!
 //! Boundaries that must not erode (blueprint §5):

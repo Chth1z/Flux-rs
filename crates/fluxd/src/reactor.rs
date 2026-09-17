@@ -1,4 +1,4 @@
-//! Single-threaded epoll adapter over `flux_core::runtime::step`.
+//! Single-threaded epoll adapter over `flux_core::runtime::plan`.
 //!
 //! Implements blueprint §10.1, §10.4 and §26: event
 //! sources are signalfd, inotify, the control socket, child pidfds, child
@@ -8,7 +8,7 @@
 //! periodic polling anywhere** — that is a hard product constraint, not a
 //! preference; both timers here are one-shot and armed only by an event.
 //! Domain FSMs live in `engine`, `control` and `subscription`. This file turns
-//! epoll into Stimulus and Effect.
+//! epoll into Stimulus, asks the Planner for Commands, and executes them.
 //!
 //! Phase 6 publishes `active=1` only after policy preparation, four verified
 //! engine sockets and positively verified ingress/egress TC attachment.
@@ -45,7 +45,9 @@ use flux_core::control_wire::{
     Counters, EngineStatus, Request, Response, RootManagerStatus, SsidStatus, State,
 };
 use flux_core::engine_config::{self, MAX_ENGINE_CONFIG_BYTES};
-use flux_core::runtime::{project, DisplayKind, Effect, Generations, Observation, Phase, Stimulus};
+use flux_core::runtime::{
+    plan, project, CommandKind, DisplayKind, Generations, Model, Observation, Phase, Stimulus,
+};
 use flux_core::selector::PackageIndex;
 use flux_core::snapshot::Presence;
 use flux_core::ssid::ssid_verdict;
@@ -170,6 +172,8 @@ struct Reactor {
     /// Last status line written to `module.prop`, so an unchanged state does
     /// not rewrite the manager's file on every event.
     module_prop_status: Option<String>,
+    /// Planner memory. Phase is rebuilt from [`Observation`] after I/O.
+    planner: Model,
 }
 
 /// Foreground daemon body. The supervisor re-execs into this function.
@@ -340,11 +344,20 @@ impl Reactor {
             bad_page_size,
             root_manager,
             module_prop_status: None,
+            planner: Model::new(Phase::Inactive),
         })
     }
 
     fn run(&mut self) -> u8 {
-        self.converge("cold start");
+        self.planner.phase = self.phase();
+        if self.layout.disabled() {
+            // Bootstrap from Disabled is a stay. Leftover maps from a previous
+            // boot still need the disable tail.
+            self.deactivate_runtime();
+            self.planner.phase = self.phase();
+        } else {
+            self.apply_stimulus(Stimulus::Bootstrap, "cold start");
+        }
         self.sync_module_prop();
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
         loop {
@@ -371,11 +384,7 @@ impl Reactor {
                 // guard never forms an unaligned reference to `u64`.
                 let token = event.u64;
                 match token {
-                    TOK_SIGNAL => {
-                        if self.handle_signals() {
-                            self.request_shutdown("signal");
-                        }
-                    }
+                    TOK_SIGNAL => self.handle_signals(),
                     TOK_CONTROL => {
                         if self.handle_control() {
                             self.request_shutdown("stop request");
@@ -384,20 +393,9 @@ impl Reactor {
                     TOK_INOTIFY => self.handle_inotify(),
                     TOK_DEBOUNCE => {
                         drain_timer(&self.debounce_timer);
-                        if self.wifi_changed && !self.topology_changed {
-                            self.note_stimulus(if self.ssid_paused {
-                                Stimulus::SsidPause
-                            } else {
-                                Stimulus::SsidResume
-                            });
-                        } else if self.topology_changed {
-                            // Capture-side drift must not freeze (§26 invariant 4).
-                            self.note_stimulus(Stimulus::CaptureSideDrift);
-                        } else {
-                            self.note_stimulus(Stimulus::DebounceExpired);
-                        }
                         let topology_changed = self.topology_changed;
-                        self.converge("debounced filesystem/network change");
+                        let stimulus = self.take_debounce_stimulus();
+                        self.apply_stimulus(stimulus, "debounced filesystem/network change");
                         if topology_changed {
                             self.maybe_retry_subscription_on_route();
                         }
@@ -409,7 +407,7 @@ impl Reactor {
                             self.engine_cancel_requested = true;
                             self.cancel_engine_work();
                         } else {
-                            self.converge("backoff retry");
+                            self.apply_stimulus(Stimulus::BackoffExpired, "backoff retry");
                         }
                     }
                     TOK_ENGINE_PIDFD => self.handle_engine_exit(),
@@ -517,13 +515,83 @@ impl Reactor {
         view
     }
 
-    fn note_stimulus(&mut self, stimulus: Stimulus) {
-        let stepped = flux_core::runtime::step(self.phase(), stimulus);
-        if stepped.effects.contains(&Effect::IgnoreUnexpected) {
-            self.logger.log(&format!(
-                "ignoring unexpected {stimulus:?} in {:?}",
-                self.phase()
-            ));
+    /// Ask the Planner, then execute. `planner.phase` is the last settled
+    /// phase: Enable/Disable must not rebuild it from the file that just
+    /// changed, or the §26 row is lost.
+    fn apply_stimulus(&mut self, stimulus: Stimulus, reason: &str) {
+        let phase = self.planner.phase;
+        let (model, commands) = plan(self.planner, stimulus);
+        self.planner = model;
+        let kinds: Vec<CommandKind> = commands.iter().map(|command| command.kind).collect();
+        if kinds.contains(&CommandKind::IgnoreUnexpected) {
+            self.logger
+                .log(&format!("ignoring unexpected {stimulus:?} in {phase:?}"));
+            self.planner.phase = phase;
+            return;
+        }
+        if kinds.is_empty() {
+            return;
+        }
+        self.execute_commands(&kinds, stimulus, reason);
+        self.planner.phase = self.phase();
+    }
+
+    fn execute_commands(&mut self, kinds: &[CommandKind], stimulus: Stimulus, reason: &str) {
+        if kinds.contains(&CommandKind::ExitProcess) {
+            self.request_shutdown(reason);
+            return;
+        }
+
+        let deactivate = matches!(stimulus, Stimulus::Disable | Stimulus::SsidPause)
+            && kinds.contains(&CommandKind::StopEngine);
+        if deactivate {
+            self.deactivate_runtime();
+            return;
+        }
+
+        if kinds.contains(&CommandKind::PublishInactive) {
+            if let Err(error) = self.dataplane.publish_inactive() {
+                self.record_dataplane_error("inactive publication", error);
+            }
+        }
+
+        if kinds.contains(&CommandKind::StopEngine)
+            || kinds.contains(&CommandKind::RestartWithBackoff)
+        {
+            self.engine_cancel_requested = true;
+            self.cancel_engine_work();
+        }
+
+        if kinds.iter().any(|kind| kind.needs_converge()) {
+            self.converge(reason);
+            return;
+        }
+
+        if kinds.contains(&CommandKind::RevalidateOnly) {
+            let _ = checks::quick_check(&self.layout, &self.spec);
+        }
+    }
+
+    /// Wi-Fi events must dump before Pause/Resume is chosen; the last
+    /// `ssid_paused` flag is the previous verdict, not this one.
+    fn take_debounce_stimulus(&mut self) -> Stimulus {
+        if self.wifi_changed && !self.topology_changed {
+            let policy = self.current_policy.as_ref().map(|policy| SsidPolicy {
+                mode: policy.flux.ssid_mode,
+                entries: policy.flux.ssids.clone(),
+            });
+            if self.evaluate_ssid(policy.as_ref(), false) {
+                Stimulus::SsidPause
+            } else {
+                Stimulus::SsidResume
+            }
+        } else if self.topology_changed {
+            // Topology debounce stays capture-side until change_type exists
+            // (batch 6). Core freeze remains the engine-exit / fault / disable
+            // paths. Mis-classifying core as capture-side must not PublishInactive.
+            Stimulus::CaptureSideDrift
+        } else {
+            Stimulus::DebounceExpired
         }
     }
 
@@ -596,9 +664,8 @@ impl Reactor {
         self.logger.log("exited");
     }
 
-    /// Returns true when the daemon must exit.
-    fn handle_signals(&mut self) -> bool {
-        let mut exit = false;
+    /// Drains signalfd. SIGTERM/SIGINT become Planner `Sigterm` Commands.
+    fn handle_signals(&mut self) {
         loop {
             let mut info = std::mem::MaybeUninit::<libc::signalfd_siginfo>::uninit();
             // SAFETY: info is a valid buffer of exactly the size the kernel
@@ -618,16 +685,16 @@ impl Reactor {
             match info.ssi_signo as i32 {
                 libc::SIGHUP => {
                     self.logger.log("SIGHUP: reload");
-                    self.note_stimulus(Stimulus::Sighup);
                     self.reload_requested = true;
                     self.policy_retry_available = true;
-                    self.converge("SIGHUP");
+                    self.apply_stimulus(Stimulus::Sighup, "SIGHUP");
                 }
-                libc::SIGTERM | libc::SIGINT => exit = true,
+                libc::SIGTERM | libc::SIGINT => {
+                    self.apply_stimulus(Stimulus::Sigterm, "signal");
+                }
                 _ => {}
             }
         }
-        exit
     }
 
     /// Returns true when a `stop` request asks the daemon to exit.
@@ -945,8 +1012,9 @@ impl Reactor {
                 let result = self.layout.set_enabled();
                 if let Err(e) = &result {
                     self.logger.log(&format!("enable failed: {e}"));
+                } else {
+                    self.apply_stimulus(Stimulus::Enable, "enable");
                 }
-                self.converge("enable");
                 if result.is_ok() && self.convergence_busy() {
                     return (None, false);
                 }
@@ -960,8 +1028,9 @@ impl Reactor {
                 let result = self.layout.set_disabled();
                 if let Err(e) = &result {
                     self.logger.log(&format!("disable failed: {e}"));
+                } else {
+                    self.apply_stimulus(Stimulus::Disable, "disable");
                 }
-                self.converge("disable");
                 if result.is_ok() && self.convergence_busy() {
                     return (None, false);
                 }
@@ -974,7 +1043,7 @@ impl Reactor {
             Request::Reload => {
                 self.reload_requested = true;
                 self.policy_retry_available = true;
-                self.converge("reload");
+                self.apply_stimulus(Stimulus::Reload, "reload");
                 if self.convergence_busy() {
                     return (None, false);
                 }
@@ -997,8 +1066,11 @@ impl Reactor {
             },
             Request::Stop => {
                 // Reply while the socket still exists; the connection state
-                // reports `stop_after` once the frame is sent.
-                Some(self.build_status(true))
+                // reports `stop_after` once the frame is sent. Plan after the
+                // snapshot so the response still shows the pre-shutdown view.
+                let response = Some(self.build_status(true));
+                self.apply_stimulus(Stimulus::Stop, "stop request");
+                response
             }
         };
         (response, matches!(request, Request::Stop))
@@ -1044,7 +1116,11 @@ impl Reactor {
             }
         }
         if switch_changed {
-            self.converge("disable-file change");
+            if self.layout.disabled() {
+                self.apply_stimulus(Stimulus::Disable, "disable-file change");
+            } else {
+                self.apply_stimulus(Stimulus::Enable, "disable-file change");
+            }
         }
         if policy_changed || engine_config_changed {
             self.policy_changed |= policy_changed;
@@ -1311,7 +1387,7 @@ impl Reactor {
                         && !self.layout.disabled()
                         && !self.shutdown_requested;
                     if !is_current {
-                        self.note_stimulus(Stimulus::StaleOrDuplicateFault);
+                        self.apply_stimulus(Stimulus::StaleOrDuplicateFault, "stale BPF fault");
                         if let Err(error) = self.dataplane.delete_fault_latch(&key) {
                             self.logger
                                 .log(&format!("cannot clear ignored BPF fault latch: {error}"));
@@ -1323,20 +1399,11 @@ impl Reactor {
                         continue;
                     }
 
-                    self.note_stimulus(Stimulus::CurrentGenerationFault);
-                    // §7.4/§26: leaving Active starts with one inactive control
-                    // publication. Stopping the supervised child then funnels
-                    // through the normal enabled convergence path, which
-                    // allocates a fresh, monotonically increasing generation.
-                    if let Err(error) = self.dataplane.publish_inactive() {
-                        self.record_dataplane_error("BPF fault inactive publication", error);
-                    }
                     self.logger.log(&format!(
                         "generation {} faulted; capture frozen before engine restart",
                         event.generation
                     ));
-                    self.engine_cancel_requested = true;
-                    self.cancel_engine_work();
+                    self.apply_stimulus(Stimulus::CurrentGenerationFault, "BPF fault");
                 }
             }
             Err(error) => self.record_dataplane_error("BPF fault ring", error),
@@ -1344,9 +1411,23 @@ impl Reactor {
     }
 
     fn handle_engine_exit(&mut self) {
-        if let Err(error) = self.dataplane.publish_inactive() {
+        let phase = self.planner.phase;
+        let (model, commands) = plan(self.planner, Stimulus::EngineExited);
+        self.planner = model;
+        if commands
+            .iter()
+            .any(|command| command.kind == CommandKind::IgnoreUnexpected)
+        {
             self.logger
-                .log(&format!("cannot freeze capture after engine exit: {error}"));
+                .log(&format!("ignoring unexpected EngineExited in {phase:?}"));
+        } else if commands
+            .iter()
+            .any(|command| command.kind == CommandKind::PublishInactive)
+        {
+            if let Err(error) = self.dataplane.publish_inactive() {
+                self.logger
+                    .log(&format!("cannot freeze capture after engine exit: {error}"));
+            }
         }
         disarm_timer(&self.tc_verify_timer);
         if let Err(error) = self.dataplane.cancel_attachment() {
@@ -1354,6 +1435,7 @@ impl Reactor {
                 .log(&format!("cannot cancel TC verification: {error}"));
         }
         let Some(mut child) = self.engine.take() else {
+            self.planner.phase = self.phase();
             return;
         };
         self.flush_engine_line(child.pid);
@@ -1387,6 +1469,7 @@ impl Reactor {
                     self.finish_transaction_error(candidate_error, Some(activation_error));
                 }
             }
+            self.planner.phase = self.phase();
             return;
         }
         self.last_error = Some(format!("engine_exited:{exit}"));
@@ -1405,6 +1488,7 @@ impl Reactor {
             self.logger
                 .log("current engine exited while its replacement was being checked");
         }
+        self.planner.phase = self.phase();
     }
 
     fn drain_engine_output(&mut self) {

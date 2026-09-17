@@ -1137,6 +1137,8 @@ ABI bump 本身对已装模块是不兼容加载（magic 检查失败）。rc.3 
 
 ### 批 4：Planner 驱动（I1、A01、A08）
 
+已落地 2026-09-17。
+
 - `step` 产出 Commands；reactor 执行；删除平行 converge 决策。
 - 生命周期测试从“调用内部顺序”迁到 Planner 接口 + 少量 executor 集成。
 

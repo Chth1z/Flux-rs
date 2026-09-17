@@ -48,7 +48,7 @@
 
 | crate | 内容 | 约束 |
 |---|---|---|
-| `flux-core` | 配置、selector、CIDR、ABI 镜像、wire 类型、版本算术、节点解析/组装、订阅精修、SSID 判定 | 无 `libc`、无系统调用、`unsafe` 禁止。测试在任何主机上跑 |
+| `flux-core` | 配置、selector、CIDR、ABI 镜像、wire 类型、版本算术、节点解析/组装、订阅精修、SSID 判定、§26 Planner | 无 `libc`、无系统调用、`unsafe` 禁止。测试在任何主机上跑 |
 | `fluxd` | reactor、netlink、BPF 加载器、网络对象、引擎监督、监督进程 | 唯一碰内核的 crate |
 | `xtask` | 构建、打包、发布、文档机检 | 只在开发主机上跑，不发布 |
 

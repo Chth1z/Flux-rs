@@ -1166,7 +1166,7 @@ Flux-rs/
 │   │       ├── engine_config.rs   # template validation and generated-config assembly
 │   │       ├── abi.rs             # Rust mirror of flux_abi.h, with layout assertions
 │   │       ├── control_wire.rs    # control protocol request/response types
-│   │       ├── runtime.rs         # §26 Phase / Stimulus / step / CommittedView
+│   │       ├── runtime.rs         # §26 Phase / Stimulus / plan / CommittedView
 │   │       ├── subscription.rs    # URI/JSON parse, refine, assemble_nodes
 │   │       ├── migration.rs       # install-time TOML reshape
 │   │       ├── ssid.rs            # [ssid] verdict, no SSID bytes on the wire
@@ -1177,7 +1177,7 @@ Flux-rs/
 │           ├── main.rs            # CLI dispatch
 │           ├── layout.rs          # directories, permissions, single-instance lock
 │           ├── control.rs         # SOCK_SEQPACKET server, client, session FSM
-│           ├── reactor.rs         # epoll adapter: Stimulus in, Effect out
+│           ├── reactor.rs         # epoll adapter: Stimulus in, Commands out
 │           ├── watch.rs           # inotify WatchSet: parent dirs, rebuild on replace
 │           ├── packages.rs        # reads and parses /data/system/packages.list
 │           ├── netlink/           # rtnetlink codecs; SOCK_DIAG ProbeReady
@@ -1206,7 +1206,7 @@ Module dependencies inside `fluxd`:
 dataplane, engine, subscription, configuration, install, logger}`,
 with no reverse edge back to `reactor`. The top-level Phase lives in
 `flux-core::runtime`; the reactor is the epoll adapter that turns events into
-Stimulus and Effect. Domain FSMs (engine generation, control sessions,
+Stimulus, asks `plan` for Commands, and executes them. Domain FSMs (engine generation, control sessions,
 subscription schedule, clsact attach) sit in their owning modules. The
 subscription worker owns only its request and transport. There is no mutable
 global coordination state.
@@ -2745,7 +2745,7 @@ a field there must not leave a contradictory pseudo-definition here (PHIL-4).
 | `fluxd/dataplane/` | Owns observed topology, admitted interfaces, kernel identities and desired policy | Typed operations; capture drift remains local, core drift publishes inactive first, and deletion requires current identity evidence (§8, §26) |
 | `fluxd/engine.rs` | Owns an immutable candidate file and each child/pidfd | Check the exact file that will run; readiness is a preemptible ProbeReady; child exit is confirmed before a replacement starts (§9.4, §9.5) |
 | `fluxd/subscription.rs` | One immutable fetch batch/result and selection of pending or accepted source-addressed responses | At most one blocking worker; it cannot mutate reactor state, cache files or a generation. A matching pending response takes precedence over that source's disk cache; diagnostics and runtime use the same source/error rules (§28.6) |
-| `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | One coordinator and no re-entry; policy and engine are separate transaction domains; later events remain serviceable and are consumed after the current transaction (§10.5, §26) |
+| `fluxd/reactor.rs` | Owns top-level state, pending events and engine transactions | Executes Planner Commands; `converge()` is an executor for activation and policy, not a second §26 table. Capture-side drift must not `PublishInactive` (§10.5, §26) |
 | `fluxd/time.rs` | A timestamp supplied by the caller | Pure formatting shared by logs and diagnostics; neither consumer depends on the reactor to format dates |
 | `fluxd/netlink/sock_diag.rs` | Four listener dumps become inodes only after a complete dump | Incomplete dumps cannot conclude absence; the reactor returns to epoll between datagrams (§9.5) |
 | `flux-core/snapshot.rs` | Dump completeness evidence becomes a TrustedSnapshot; switch observation is Present / Absent / Unreadable | Incomplete dumps cannot be constructed as trusted; Unreadable is not Absent |
@@ -3527,7 +3527,7 @@ The evidence is static path counts, algorithmic complexity, allocation lifetimes
 ## 15.1 Static checks, and which platform proves what
 
 - `cargo fmt --check`; the high-value `cargo clippy` lints; `cargo build --target aarch64-linux-android`.
-- `cargo test -p flux-core`, which **MUST run on a Windows host**. That constraint is what keeps the pure logic free of libc and syscalls (§5). The §26 table lives in `runtime.rs` on this crate.
+- `cargo test -p flux-core`, which **MUST run on a Windows host**. That constraint is what keeps the pure logic free of libc and syscalls (§5). The §26 table lives in `runtime.rs` as `plan` / `step` on this crate.
 - BPF: compiles clean under `-Wall -Wextra -Werror`, and a real `BPF_PROG_LOAD` passes the verifier on the Linux CI runner.
 
   **Passing on a newer kernel does not mean passing on 5.15.** CI runs `ubuntu-latest`, whose kernel is far newer than the baseline, so this gate proves only that the programs hold under some modern verifier. **The baseline verifier evidence comes from the device**: the Phase 3-8 device suites load the same programs on SM-S9180 running 5.15.211, and that is the first-hand result for 5.15. The CI gate exists to fail early, not to be the verdict; both must pass (GOV-4.1).
@@ -3663,7 +3663,12 @@ to meet it rather than to argue it is minor.
 
 # Part 26: The reactor state machine
 
-Three top-level states (§10.1) by event, giving the action. This table is the direct basis for implementing `reactor.rs`. **A combination absent from the table is a combination that should not occur**: log it and ignore it, and MUST NOT invent handling for it.
+Three top-level states (§10.1) by event, giving the action. This table is the
+direct basis for `flux_core::runtime::plan`: `Model + Stimulus → Model +
+Commands`. `reactor.rs` decodes events, executes those Commands, and rebuilds
+`Phase` from `Observation` after I/O. **A combination absent from the table is a
+combination that should not occur**: it yields `IgnoreUnexpected`; the adapter
+MUST NOT invent handling for it.
 
 | Event | `Disabled` | `Inactive` | `Active` |
 |---|---|---|---|
@@ -3712,6 +3717,10 @@ Three top-level states (§10.1) by event, giving the action. This table is the d
    **This is the easiest thing in the state machine to get wrong, and the
    consequence is the most visible** — which is why the distinction is a row in
    the table rather than a note under it.
+
+The Active capture-side row is `ReattachCaptureLocally`. `plan` MUST NOT
+emit `PublishInactive` for that stimulus; `freezes_capture` exists so a
+regression cannot hide in the adapter.
 
 ---
 
