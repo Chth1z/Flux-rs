@@ -205,8 +205,8 @@ pub struct Counters {
     pub drop_stale_gen: u64,
     /// Ethernet write or change_head failed.
     pub drop_handoff: u64,
-    /// Selected and active UDP fragment dropped.
-    pub drop_udp_frag: u64,
+    /// Selected and active IP fragment with no TCP decision. L4 is not proven.
+    pub drop_selected_fragment: u64,
     /// Decision magic or reserved bytes were bad.
     pub drop_corrupt: u64,
     /// Storage create and re-read both failed.
@@ -435,5 +435,17 @@ mod tests {
         let counters: Counters = from_line(r#"{"admit_tcp":5}"#).expect("partial decode");
         assert_eq!(counters.admit_tcp, 5);
         assert_eq!(counters.in_drop_assign, 0);
+        assert_eq!(counters.drop_selected_fragment, 0);
+    }
+
+    #[test]
+    fn fragment_counter_json_key_is_drop_selected_fragment() {
+        let json = to_line(&Counters {
+            drop_selected_fragment: 3,
+            ..Counters::default()
+        })
+        .expect("serialise");
+        assert!(json.contains("\"drop_selected_fragment\":3"));
+        assert!(!json.contains("drop_udp_frag"));
     }
 }

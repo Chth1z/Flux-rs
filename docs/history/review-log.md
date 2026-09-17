@@ -781,3 +781,11 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 **实际：** `spawn_check` 不 `chdir` 到 `EngineSpec.workdir`，相对资源 check≠run。`stop` 把任何通信错误当成功。订阅每源 8 MiB 且无批次墙钟。`as_bytes<T>` 接受任意 `Copy`。审计甲 R08 余 / R09–R12 / R16。
 
 **处置：** check 与 run 共用 workdir。`stop` 仅在锁未持有时对通信失败返回 0。fetch 批次 60s + 总正文 8 MiB；4xx/过大不重试；过期 epoch 丢弃。map 更新核对 spec 尺寸；`MapPod` 封闭 `as_bytes`。`Ipv4Cidr`/`Ipv6Cidr`/`AppSelector` 字段私有。不 bump ABI。不实现 TCX。
+
+### 0.6.25 l3_end / fragment 计数 / change_type（2026-09-17）
+
+**原说法：** L4 在 `data_end` 内即可；IPv6 见 Fragment 即 fragment；`drop_udp_frag` 名写 UDP。
+
+**实际：** 声明包尾之外的 skb 尾随字节可被当成 TCP/UDP 头。IPv6 快路径不要求 8 字节 `frag_hdr`。`bpf_skb_change_type` 失败后仍 assign。审计乙 B01–B04 / rc.3 I8。
+
+**处置：** 每个头同时 ≤ `l3_end` 与 `data_end`。IPv6 fragment 要完整 8 字节头。计数槽 6 改名为 `DROP_SELECTED_FRAGMENT` / JSON `drop_selected_fragment`。change_type 失败 `IN_DROP_PARSE` + `SHOT`。不 bump ABI。5.15 四 entry 与 Phase 6 设备重跑需 GOV-1.2。不实现 TCX。

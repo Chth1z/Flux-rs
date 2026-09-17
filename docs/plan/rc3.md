@@ -1158,6 +1158,13 @@ ABI bump 本身对已装模块是不兼容加载（magic 检查失败）。rc.3 
 
 ### 批 6：解析 l3_end、fragment 名、change_type、畸形语料（I8、B01–B04）
 
+已落地 2026-09-17（宿主语料与对象；5.15 四 entry / Phase 6 设备重跑仍需 GOV-1.2）。
+
+- `parse_pkt`：L4 与扩展头同时 ≤ `l3_end` 与 `data_end`。
+- IPv6 fragment 要求完整 8 字节头；I1b 快路径同样。
+- `FLUX_CNT_DROP_SELECTED_FRAGMENT` / JSON `drop_selected_fragment`。
+- `bpf_skb_change_type` 失败则计数并 `TC_ACT_SHOT`。
+
 退出：语料表；5.15 四 entry；Phase 6 不回归。
 
 ### 批 7：发布冻结与诊断 canary（I7、R13–R15）

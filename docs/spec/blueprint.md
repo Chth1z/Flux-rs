@@ -721,7 +721,7 @@ datagram**, every pre-redirect failure below is Direct:
   this packet nor any later parseable packet may go direct because of an internal
   Flux error;
 - a selected, active IP fragment with no TCP decision that missed the bypass
-  (historical counter name `drop_udp_frag`; L4 is not proven);
+  (`drop_selected_fragment`; L4 is not proven);
 - any failure after `bpf_skb_change_head()` has added the internal Ethernet
   header on a raw-IP interface;
 - any failure after the EtherType has been written at the L3 entry — the L2 entry
@@ -1463,6 +1463,24 @@ header but past `data_end` is truncated memory, not a shorter packet.
   header and flags; UDP must have a complete 8-byte header. Those L4 bytes
   must also sit inside both `l3_end` and `data_end`.
 
+Host tests encode the bound table in `crates/flux-core/src/parse_bounds.rs`. The
+decoder remains `parse_pkt`; this table is not a second parser.
+
+| Id | Family | Setup | Parse result |
+|---|---|---|---|
+| v4-pad-not-l4 | 4 | `tot_len` equals the IPv4 header; skb longer; TCP-looking bytes after `tot_len` | unsupported |
+| v4-l4-inside | 4 | `tot_len` covers the TCP/UDP fixed header; padding may follow | tcp / udp |
+| v4-tot-lt-ihl | 4 | `tot_len < ihl * 4` | unsupported |
+| v4-tot-gt-skb | 4 | `nh_off + tot_len > skb->len` | unsupported |
+| v4-min-header | 4 | minimum IPv4 header in `data_end` before the fragment branch | fragment-ready |
+| v6-jumbo | 6 | `payload_len == 0` | unsupported |
+| v6-frag-short | 6 | `nexthdr == Fragment` and `payload_len < 8` | unsupported |
+| v6-frag-trunc | 6 | `payload_len >= 8` but the 8-byte header sits past `data_end` | unsupported |
+| v6-frag-ok | 6 | complete 8-byte Fragment header inside both bounds | fragment |
+| v6-unk-ext | 6 | ESP, No-Next-Header, or an unknown extension | unsupported |
+
+Legal GSO, IPv4 options, and TCP retransmits are not in this table; they stay on the Phase 6 happy path.
+
 ## 7.3 The egress algorithm (`flx_cap_l2` / `flx_cap_l3`)
 
 ```
@@ -1488,11 +1506,9 @@ E3  /* no decision yet */
     parse L3 (bounded by l3_end AND data_end); if unsupported -> UNSPEC
     if fragment:   /* IPv6: only with a complete 8-byte Fragment header */
         if bypass_lookup(family, daddr)                   -> UNSPEC
-        if mode == SELECTED && c->active                  -> cnt(UDP_FRAG_DROP); SHOT
+        if mode == SELECTED && c->active                  -> cnt(DROP_SELECTED_FRAGMENT); SHOT
         else                                              -> UNSPEC
-        /* UDP_FRAG_DROP is the historical ABI name. The condition is
-           selected + active + no TCP decision + IP fragment; L4 is not
-           proven. The published JSON key stays until the ABI bump. */
+        /* selected + active + no TCP decision + IP fragment; L4 is not proven */
     parse L4 (bounded by l3_end AND data_end); if !TCP && !UDP -> UNSPEC
 E4  if TCP:
         if !(SYN && !ACK)                                 -> UNSPEC

@@ -236,7 +236,7 @@ fn dispatch(command: &str, rest: &[String]) -> ExitCode {
         let dropped = counters.drop_inactive
             + counters.drop_stale_gen
             + counters.drop_handoff
-            + counters.drop_udp_frag
+            + counters.drop_selected_fragment
             + counters.drop_corrupt
             + counters.in_drop_no_listener
             + counters.in_drop_assign

@@ -30,6 +30,8 @@
  *             (one byte of former pad1). sizeof(flux_control) stays 96.
  *             uid_policy is NOT ARRAY_OF_MAPS: E1 is a constant if/else plus
  *             one HASH lookup after the control snapshot that names the bank.
+ *             Slot 6 of `flux_counter` is `FLUX_CNT_DROP_SELECTED_FRAGMENT`
+ *             (same index as the former UDP-named slot).
  * 0xF10C0904: bypass LPM values distinguish mechanism-reserved prefixes from
  *             user policy, and flux_control carries the CIDR list direction.
  *             The control layout and every existing field offset stay fixed.
@@ -339,7 +341,7 @@ enum flux_counter {
 	FLUX_CNT_DROP_INACTIVE = 3,       /* captured socket, active == 0      */
 	FLUX_CNT_DROP_STALE_GEN = 4,      /* captured socket, old generation   */
 	FLUX_CNT_DROP_HANDOFF = 5,        /* eth write / change_head failed    */
-	FLUX_CNT_DROP_UDP_FRAG = 6,       /* selected+active UDP fragment      */
+	FLUX_CNT_DROP_SELECTED_FRAGMENT = 6, /* selected+active, no TCP decision */
 	FLUX_CNT_DROP_CORRUPT = 7,        /* decision magic / reserved bad     */
 	FLUX_CNT_DECISION_ALLOC_FAIL = 8, /* CREATE and re-read both NULL      */
 	FLUX_CNT_EGRESS_LISTENER_MISS = 9,

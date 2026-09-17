@@ -208,6 +208,18 @@ struct flux_pkt {
 	__u8 daddr[16];  // network order; 4 bytes used for IPv4
 };
 
+// Exclusive parse results: -1 (unsupported/malformed); fragment=1 with
+// have_l4=0; or have_l4=1 with fragment=0 and l4proto TCP or UDP.
+struct flux_frag_hdr {
+	__u8 nexthdr;
+	__u8 reserved;
+	__be16 frag_off;
+	__be32 identification;
+};
+
+_Static_assert(sizeof(struct flux_frag_hdr) == 8,
+	       "IPv6 Fragment header is 8 bytes");
+
 // Make FLUX_MAX_PULL_BYTES (clamped to skb->len) linear and writable. Called
 // once on the slow path only. Invalidates every previously read data pointer.
 static __always_inline int pull_headers(struct __sk_buff *skb)
@@ -221,11 +233,15 @@ static __always_inline int pull_headers(struct __sk_buff *skb)
 // nh_off is FLUX_ETH_HLEN for the L2 entry and on ingress (cls_bpf pushes the
 // mac header before running ingress programs), 0 for the raw-IP L3 entry.
 // Returns 0 on a usable parse, -1 when the packet is out of scope.
+// Every header read is bounded by both l3_end (protocol length) and data_end
+// (linear memory). skb->len may exceed tot_len/payload_len (padding); tot_len
+// may exceed the linear head (GSO). Neither equality is a well-formedness test.
 static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 				     struct flux_pkt *p)
 {
 	void *data = (void *)(long)skb->data;
 	void *end = (void *)(long)skb->data_end;
+	__u32 l3_end;
 
 	__builtin_memset(p, 0, sizeof(*p));
 
@@ -243,6 +259,9 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 			return -1;
 		__u16 total_len = bpf_ntohs(ip->tot_len);
 		if (total_len < ihl_bytes || (__u32)nh_off + total_len > skb->len)
+			return -1;
+		l3_end = (__u32)nh_off + total_len;
+		if ((__u32)nh_off + ihl_bytes > l3_end)
 			return -1;
 		__builtin_memcpy(p->daddr, &ip->daddr, 4);
 
@@ -266,6 +285,7 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 		if (payload_len == 0 ||
 		    (__u32)nh_off + sizeof(*ip6) + payload_len > skb->len)
 			return -1;
+		l3_end = (__u32)nh_off + (__u32)sizeof(*ip6) + payload_len;
 		__builtin_memcpy(p->daddr, &ip6->daddr, 16);
 
 		__u8 nexthdr = ip6->nexthdr;
@@ -277,6 +297,11 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 			if (nexthdr == IPPROTO_TCP || nexthdr == IPPROTO_UDP)
 				break;
 			if (nexthdr == IPPROTO_FRAGMENT) {
+				if ((__u32)off + sizeof(struct flux_frag_hdr) > l3_end)
+					return -1;
+				struct flux_frag_hdr *fh = data + off;
+				if ((void *)(fh + 1) > end)
+					return -1;
 				p->fragment = 1;
 				return 0;
 			}
@@ -286,12 +311,16 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 			    nexthdr != IPPROTO_DSTOPTS)
 				return -1;
 
+			if ((__u32)off + sizeof(struct ipv6_opt_hdr) > l3_end)
+				return -1;
 			struct ipv6_opt_hdr *opt = data + off;
 			if ((void *)(opt + 1) > end)
 				return -1;
 			__u16 len = (__u16)((opt->hdrlen + 1) * 8);
 			ext_bytes += len;
 			if (ext_bytes > FLUX_IPV6_MAX_EXT_BYTES)
+				return -1;
+			if ((__u32)off + len > l3_end)
 				return -1;
 			nexthdr = opt->nexthdr;
 			off += len;
@@ -305,6 +334,8 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 	}
 
 	if (p->l4proto == IPPROTO_TCP) {
+		if ((__u32)p->l4_off + sizeof(struct tcphdr) > l3_end)
+			return -1;
 		struct tcphdr *th = data + p->l4_off;
 		if ((void *)(th + 1) > end)
 			return -1;
@@ -312,6 +343,8 @@ static __always_inline int parse_pkt(struct __sk_buff *skb, __u16 nh_off,
 		p->tcp_ack = th->ack;
 		p->have_l4 = 1;
 	} else if (p->l4proto == IPPROTO_UDP) {
+		if ((__u32)p->l4_off + sizeof(struct udphdr) > l3_end)
+			return -1;
 		struct udphdr *uh = data + p->l4_off;
 		if ((void *)(uh + 1) > end)
 			return -1;
@@ -563,10 +596,10 @@ static __always_inline int cap_core(struct __sk_buff *skb, int l3)
 		if (bypass_hit(&p, c))
 			return TC_ACT_UNSPEC;
 		if (*mode == FLUX_UID_SELECTED && c && c->active) {
-			// Never direct: a fragment of a datagram that would
-			// have been proxied must not reach the real
-			// destination. 0.9.0 accepts breaking fragmented UDP.
-			cnt(FLUX_CNT_DROP_UDP_FRAG);
+			// Never direct: a fragment of a flow that would have
+			// been proxied must not reach the real destination.
+			// L4 is not proven, so TCP fragments take this path too.
+			cnt(FLUX_CNT_DROP_SELECTED_FRAGMENT);
 			return TC_ACT_SHOT;
 		}
 		return TC_ACT_UNSPEC;
@@ -740,6 +773,11 @@ static __always_inline int ingress_fast_path(struct __sk_buff *skb)
 		if (ip6->version != 6)
 			return -1;
 		if (ip6->nexthdr == IPPROTO_FRAGMENT) {
+			if (bpf_ntohs(ip6->payload_len) < 8)
+				return -1;
+			struct flux_frag_hdr *fh = (void *)(ip6 + 1);
+			if ((void *)(fh + 1) > end)
+				return -1;
 			cnt(FLUX_CNT_IN_PASS_FRAGMENT);
 			return TC_ACT_OK;
 		}
@@ -778,7 +816,10 @@ int flx_in(struct __sk_buff *skb)
 	// ingress runs before ip_rcv(), so correcting it here is what makes the
 	// egress side able to skip MAC rewriting entirely. Metadata only: no
 	// packet bytes are touched, so no un-cloning is triggered.
-	bpf_skb_change_type(skb, PACKET_HOST);
+	if (bpf_skb_change_type(skb, PACKET_HOST) != 0) {
+		cnt(FLUX_CNT_IN_DROP_PARSE);
+		return TC_ACT_SHOT;
+	}
 
 	// cls_bpf pushes the mac header before running ingress programs, so the
 	// Ethernet header is readable at offset 0.

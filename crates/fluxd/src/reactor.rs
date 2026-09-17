@@ -3893,7 +3893,7 @@ fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
                 .to_string(),
         );
     }
-    if counters.drop_udp_frag > 0 {
+    if counters.drop_selected_fragment > 0 {
         hints.push(
             "selected-app IP fragments with no TCP decision are dropped by design (§7.3); large DNS/QUIC payloads may fail"
                 .to_string(),
@@ -4167,7 +4167,7 @@ mod tests {
             admit_tcp: 1,
             in_drop_assign: 1,
             in_drop_no_listener: 1,
-            drop_udp_frag: 1,
+            drop_selected_fragment: 1,
             ..Counters::default()
         };
         let hints = counter_hints(State::Active, &counters);

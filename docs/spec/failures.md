@@ -143,7 +143,7 @@ Every possible failure point specifies **how it is detected, what action is take
   "counters": {                        // Sum of the PERCPU_ARRAY from §6.1
     "admit_tcp": 41, "direct_tcp": 190, "admit_udp": 388,
     "drop_inactive": 0, "drop_stale_gen": 0, "drop_handoff": 0,
-    "drop_udp_frag": 0, "drop_corrupt": 0, "decision_alloc_fail": 0,
+    "drop_selected_fragment": 0, "drop_corrupt": 0, "decision_alloc_fail": 0,
     "egress_listener_miss": 2,
     "in_assign_tcp": 41, "in_assign_udp": 388,
     "in_pass_established": 5120, "in_pass_fragment": 0,
@@ -203,7 +203,7 @@ The opposite of zero observability is not "print more numbers"; it is to **perfo
 | `egress_listener_miss > 0` and `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
 | `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check the [cidr] mode and list, and active"` |
 | All counters are 0 and `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |
-| `drop_udp_frag > 0` | `"selected-app IP fragments with no TCP decision are dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
+| `drop_selected_fragment > 0` | `"selected-app IP fragments with no TCP decision are dropped by design (§7.3); large DNS/QUIC payloads may fail"` |
 | `in_pass_established` is much greater than `in_assign_tcp` | Normal (one assign and many passes per connection). **Produce no hint**; this row exists only to prevent a false positive |
 
 ---

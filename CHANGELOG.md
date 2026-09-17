@@ -114,6 +114,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has not yet reached Active/Disabled. A fetch batch has a 60s wall clock and
   an 8 MiB total body budget. Map updates refuse a size that does not match
   the spec; CIDR and selector fields are private.
+- `parse_pkt` requires each header to sit inside both `l3_end` and `data_end`.
+  IPv6 fragments need the 8-byte Fragment header. `bpf_skb_change_type`
+  failure is fail-closed on the veth. The JSON counter is
+  `drop_selected_fragment`.
 - Leaving Wi-Fi for cellular no longer takes the whole proxy down until the
   daemon is restarted. netd deletes an interface's `clsact` when it leaves a
   network (`docs/spec/blueprint.md` §8.5.1), and that takes Flux's egress filter

@@ -17,7 +17,8 @@
 /// * `0xF10C0905` dual PolicyEpoch banks. `uid_policy` / `bypass_*` /
 ///   `self_addr_*` become two same-type maps selected by
 ///   [`Control::policy_bank`]. `sizeof(Control)` stays 96; one byte of former
-///   `pad1` is now the bank. `uid_policy` is not `ARRAY_OF_MAPS`.
+///   `pad1` is now the bank. `uid_policy` is not `ARRAY_OF_MAPS`. Counter slot
+///   6 is [`Counter::DropSelectedFragment`].
 /// * `0xF10C0904` tags bypass LPM values as mechanism-reserved or user policy
 ///   and carries the CIDR list direction in the former control padding. The
 ///   control size and every existing field offset remain unchanged.
@@ -580,8 +581,8 @@ pub enum Counter {
     DropStaleGen = 4,
     /// Ethernet write or `bpf_skb_change_head` failed.
     DropHandoff = 5,
-    /// Selected and active UDP fragment.
-    DropUdpFrag = 6,
+    /// Selected and active IP fragment with no TCP decision. L4 is not proven.
+    DropSelectedFragment = 6,
     /// Decision magic or reserved bytes were bad.
     DropCorrupt = 7,
     /// `BPF_F_CREATE` and the re-read both returned NULL.

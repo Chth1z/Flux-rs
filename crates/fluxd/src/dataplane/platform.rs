@@ -313,7 +313,7 @@ impl Manager {
             drop_inactive: read(Counter::DropInactive)?,
             drop_stale_gen: read(Counter::DropStaleGen)?,
             drop_handoff: read(Counter::DropHandoff)?,
-            drop_udp_frag: read(Counter::DropUdpFrag)?,
+            drop_selected_fragment: read(Counter::DropSelectedFragment)?,
             drop_corrupt: read(Counter::DropCorrupt)?,
             decision_alloc_fail: read(Counter::DecisionAllocFail)?,
             egress_listener_miss: read(Counter::EgressListenerMiss)?,

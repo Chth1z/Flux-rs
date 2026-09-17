@@ -98,7 +98,7 @@ CLI 退出码把三件事拆开（`docs/spec/interaction.md` §27.3.4）：请�
 
 没有第三个选项。入场之后回落到真实目的地址会泄漏用户要求代理的流量，所以处处禁止，包括快照损坏和 generation 不匹配的情形。
 
-用 `TC_ACT_UNSPEC` 而不是 `TC_ACT_OK` 是有讲究的：`TC_ACT_OK` 会结束分类器链，跳过 AOSP 的 CLAT 和 OEM 的 filter，而直连流量还需要它们。
+用 `TC_ACT_UNSPEC` 而不是 `TC_ACT_OK` 是有讲究的：`TC_ACT_OK` 会结束分类器链，跳过 AOSP 的 CLAT 和 OEM 的 filter，而直连流量还需要它们。解析同时受协议长度 `l3_end` 和内存边界 `data_end` 约束；已进 veth 之后 `bpf_skb_change_type` 失败必须丢包。
 
 ## 状态
 

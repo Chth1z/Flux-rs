@@ -185,7 +185,10 @@ fn enum_members() -> Vec<(&'static str, u64)> {
         ("FLUX_CNT_DROP_INACTIVE", Counter::DropInactive as u64),
         ("FLUX_CNT_DROP_STALE_GEN", Counter::DropStaleGen as u64),
         ("FLUX_CNT_DROP_HANDOFF", Counter::DropHandoff as u64),
-        ("FLUX_CNT_DROP_UDP_FRAG", Counter::DropUdpFrag as u64),
+        (
+            "FLUX_CNT_DROP_SELECTED_FRAGMENT",
+            Counter::DropSelectedFragment as u64,
+        ),
         ("FLUX_CNT_DROP_CORRUPT", Counter::DropCorrupt as u64),
         (
             "FLUX_CNT_DECISION_ALLOC_FAIL",
