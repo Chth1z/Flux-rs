@@ -132,7 +132,7 @@ Re-Kernel 能通用，是因为它的 netfilter 只链 GKI ABI 里的 `nf_regist
 | **2** | 未选中地板：对照现行 TC E1 测 LOCAL_OUT 空钩子成本 | 数字进 `tools/phase0/results/`；若明显更差，停。设备证据：`history/review-log.md` §0.6.33 |
 | **3** | 命中路径交给官方 listener，保留原头；**不**把 `nf_tproxy_get_sock_*` 写成链接符号 | Phase 6 级 origdst 双栈通过；未选中 App 仍直连；同一 GKI 代仍一份 `.ko`。**UDP+TCP origdst 双栈已在 SM-S9180 关闭（§0.6.41–0.6.42）。** `flux-core::kmod_uapi` 与 `LoadedModule` ioctl 已进树。默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。不做第二次 `ip_rcv` / dummy 注入。 |
 | **4** | 拆除 veth、物理口 TC、RPDB 100 / table 20260、`rp_filter` 门 | `dataplane::Manager` 唯一路径是加载 `.ko` + ioctl；冷启动仍删 leftover `flxrs*`。Phase 3 断言无 `flxrs*` / pref 100。蓝图 §8.7/§8.8 与 `failures.md` `lkm_*` 已改。宿主门禁绿。设备上未在持有 fd 的 `fluxd` 仍跑时重跑 Phase 3（不 disable）。Phase 5/6 的 TC 套件已跳过，等 CIDR/DRAINING ioctl。 |
-| **5** | `sock_diag.rs` 发 `SOCK_DESTROY`（type 21）；禁止 `ss -K` | 取消勾选后自建 TCP 被拆；dump 不全则漏拆不误杀 |
+| **5** | `sock_diag.rs` 发 `SOCK_DESTROY`（type 21）；禁止 `ss -K` | 取消勾选后 `SET_UIDS` 去掉该 UID，再按完整 dump 的 `idiag_uid` 拆活 TCP。dump 不全则一条都不拆。uid 0 / overflowuid / LISTEN 不碰。宿主门禁绿。WSL dump/解析通过；该内核 type 21 为 `EOPNOTSUPP`。未对设备真实 App 连接发销毁。蓝图 §7.6/§9.5 与 `failures.md` `sock_destroy_*` 已改。 |
 | **6** | 包装：ZIP 内 `.ko`、Direct token、三管理器仍一份信封 | `fluxd check` 在 vermagic 不匹配时给出可执行原因 |
 | **7** | 工作区命名 `1.0.0-rc.4`；候选设备回归 | 正式 1.0.0 门仍是远端 CI + §20 + 三管理器 smoke |
 

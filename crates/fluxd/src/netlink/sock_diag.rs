@@ -1,12 +1,13 @@
-//! `NETLINK_SOCK_DIAG` enumeration of exact listener sockets.
+//! `NETLINK_SOCK_DIAG` listener readiness and TCP `SOCK_DESTROY`.
 //!
-//! Implements the readiness half of blueprint §9.5: enumerate the four engine
-//! sockets (`2 family × 2 protocol`) via `SOCK_DIAG_BY_FAMILY` / `inet_diag`
-//! and cross-check every returned inode against `/proc/<pid>/fd`. This is Q2
-//! (§16.10.2) turned from a one-off measurement into a product-carried check.
+//! Readiness is blueprint §9.5: enumerate the four engine sockets
+//! (`2 family × 2 protocol`) via `SOCK_DIAG_BY_FAMILY` / `inet_diag` and
+//! cross-check every returned inode against `/proc/<pid>/fd`.
 //!
-//! Read-only: this module never mutates kernel state. Raw netlink bytes stay
-//! inside `netlink/` per the module boundary of blueprint §5.
+//! Unselect uses the same family, type 21 (`SOCK_DESTROY`), never `ss -K`.
+//! An incomplete dump (`NLMSG_DONE` missing, `NLM_F_DUMP_INTR`, truncated)
+//! destroys nothing: leak live TCP rather than reset a socket we did not
+//! fully identify. Raw netlink bytes stay inside `netlink/` (§5).
 
 use std::io;
 use std::net::IpAddr;
@@ -14,10 +15,12 @@ use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
 use super::wire::{
-    feed_dump, DumpFeed, MessageBuilder, RawMessage, RequestSocket, NLM_F_DUMP, NLM_F_REQUEST,
+    feed_dump, DumpFeed, MessageBuilder, RawMessage, RequestSocket, NLM_F_ACK, NLM_F_DUMP,
+    NLM_F_REQUEST,
 };
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const SOCK_DESTROY: u16 = 21;
 const INET_DIAG_REQ_V2_LEN: usize = 56;
 const INET_DIAG_MSG_MIN_LEN: usize = 72;
 const FIND_INODE_DEADLINE: Duration = Duration::from_secs(3);
@@ -27,6 +30,16 @@ const FIND_INODE_DATAGRAMS: u32 = 64;
 /// reports state 7 (`TCP_CLOSE`), which is why the state gate below applies
 /// only to TCP (measured on-device, §16.10.3).
 const TCP_LISTEN: u8 = 10;
+const TCP_ESTABLISHED: u8 = 1;
+const TCP_SYN_SENT: u8 = 2;
+const TCP_SYN_RECV: u8 = 3;
+const TCP_FIN_WAIT1: u8 = 4;
+const TCP_FIN_WAIT2: u8 = 5;
+const TCP_CLOSE_WAIT: u8 = 8;
+const TCP_LAST_ACK: u8 = 9;
+const TCP_CLOSING: u8 = 11;
+const OVERFLOWUID: u32 = 65534;
+const SOCK_DESTROY_MAX: usize = 4096;
 
 /// One exact socket the engine must hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +212,67 @@ pub fn pid_owns_inode(pid: i32, inode: u32) -> io::Result<bool> {
     Ok(false)
 }
 
+/// How many live TCP sockets a complete dump actually reset.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DestroyReport {
+    /// `SOCK_DESTROY` ACKed.
+    pub destroyed: u32,
+    /// Target vanished between dump and destroy (`ESRCH`/`ENOENT`).
+    pub already_gone: u32,
+}
+
+/// Reset live TCP owned by `uids` after they leave `SELECTED`.
+///
+/// Dumps IPv4 and IPv6 TCP, then destroys only sockets whose `idiag_uid`
+/// matches. Incomplete dumps return `Err` and destroy nothing. uid 0 and
+/// overflowuid are never targeted. Listen / TIME_WAIT / CLOSE are skipped.
+/// Does not invoke `ss`.
+pub fn destroy_tcp_for_uids(uids: &[u32]) -> io::Result<DestroyReport> {
+    let wanted: Vec<u32> = uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid != 0 && *uid != OVERFLOWUID)
+        .collect();
+    if wanted.is_empty() {
+        return Ok(DestroyReport::default());
+    }
+
+    let mut targets = Vec::new();
+    for family in [libc::AF_INET as u8, libc::AF_INET6 as u8] {
+        let items = match dump_tcp_family(family) {
+            Ok(items) => items,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        for message in items {
+            if let Some(diag) = parse_diag_tcp(&message.payload) {
+                if wanted.contains(&diag.uid) && tcp_is_live_client(diag.state) {
+                    targets.push(diag);
+                }
+            }
+        }
+    }
+
+    let mut socket = RequestSocket::open_nonblocking(libc::NETLINK_SOCK_DIAG)?;
+    let mut report = DestroyReport::default();
+    for diag in targets.iter().take(SOCK_DESTROY_MAX) {
+        let seq = socket.next_seq();
+        match socket.ack(destroy_request(diag.family, &diag.sockid, seq), seq) {
+            Ok(()) => report.destroyed += 1,
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ESRCH | libc::ENOENT | libc::ENODEV)
+                ) =>
+            {
+                report.already_gone += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(report)
+}
+
 /// Incomplete dumps (`NLMSG_DONE` missing, interrupted, truncated) are retried
 /// until the readiness deadline. Hard errors (`ENOENT`, `EPERM`) are not.
 pub(crate) fn dump_retryable(error: &io::Error) -> bool {
@@ -221,6 +295,83 @@ fn dump_request(exp: &SocketExpectation, seq: u32) -> Vec<u8> {
     req[1] = exp.protocol;
     req[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
     MessageBuilder::new(SOCK_DIAG_BY_FAMILY, NLM_F_REQUEST | NLM_F_DUMP, seq, &req).finish()
+}
+
+fn dump_tcp_request(family: u8, seq: u32) -> Vec<u8> {
+    let mut req = [0u8; INET_DIAG_REQ_V2_LEN];
+    req[0] = family;
+    req[1] = libc::IPPROTO_TCP as u8;
+    req[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
+    MessageBuilder::new(SOCK_DIAG_BY_FAMILY, NLM_F_REQUEST | NLM_F_DUMP, seq, &req).finish()
+}
+
+fn destroy_request(family: u8, sockid: &[u8; 48], seq: u32) -> Vec<u8> {
+    let mut req = [0u8; INET_DIAG_REQ_V2_LEN];
+    req[0] = family;
+    req[1] = libc::IPPROTO_TCP as u8;
+    req[8..56].copy_from_slice(sockid);
+    MessageBuilder::new(SOCK_DESTROY, NLM_F_REQUEST | NLM_F_ACK, seq, &req).finish()
+}
+
+fn dump_tcp_family(family: u8) -> io::Result<Vec<RawMessage>> {
+    let mut socket = RequestSocket::open_nonblocking(libc::NETLINK_SOCK_DIAG)?;
+    let seq = socket.next_seq();
+    socket.send(&dump_tcp_request(family, seq))?;
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + FIND_INODE_DEADLINE;
+    let mut datagrams = 0u32;
+    loop {
+        if datagrams >= FIND_INODE_DATAGRAMS || Instant::now() >= deadline {
+            return Err(incomplete_diag());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !poll_readable(socket.as_raw_fd(), remaining)? {
+            return Err(incomplete_diag());
+        }
+        datagrams += 1;
+        let messages = match socket.try_recv(seq) {
+            Ok(messages) => messages,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
+        };
+        match feed_dump(std::mem::take(&mut collected), &messages, false)? {
+            DumpFeed::NeedMore(items) => collected = items,
+            DumpFeed::Complete(items) => return Ok(items),
+        }
+    }
+}
+
+struct DiagTcp {
+    family: u8,
+    state: u8,
+    sockid: [u8; 48],
+    uid: u32,
+}
+
+fn parse_diag_tcp(payload: &[u8]) -> Option<DiagTcp> {
+    if payload.len() < INET_DIAG_MSG_MIN_LEN {
+        return None;
+    }
+    Some(DiagTcp {
+        family: payload[0],
+        state: payload[1],
+        sockid: payload[4..52].try_into().ok()?,
+        uid: u32::from_ne_bytes(payload[64..68].try_into().ok()?),
+    })
+}
+
+fn tcp_is_live_client(state: u8) -> bool {
+    matches!(
+        state,
+        TCP_ESTABLISHED
+            | TCP_SYN_SENT
+            | TCP_SYN_RECV
+            | TCP_FIN_WAIT1
+            | TCP_FIN_WAIT2
+            | TCP_CLOSE_WAIT
+            | TCP_LAST_ACK
+            | TCP_CLOSING
+    )
 }
 
 fn incomplete_diag() -> io::Error {
@@ -410,5 +561,97 @@ mod tests {
             }
         }
         drop(listener);
+    }
+
+    #[test]
+    fn parse_diag_tcp_reads_uid_and_skips_listen() {
+        let mut payload = vec![0u8; INET_DIAG_MSG_MIN_LEN];
+        payload[0] = libc::AF_INET as u8;
+        payload[1] = TCP_LISTEN;
+        payload[64..68].copy_from_slice(&10_123u32.to_ne_bytes());
+        let diag = parse_diag_tcp(&payload).expect("min-size message");
+        assert_eq!(diag.uid, 10_123);
+        assert!(!tcp_is_live_client(diag.state));
+        payload[1] = TCP_ESTABLISHED;
+        assert!(tcp_is_live_client(
+            parse_diag_tcp(&payload).expect("established").state
+        ));
+    }
+
+    #[test]
+    fn destroy_tcp_for_uids_skips_root_and_empty() {
+        assert_eq!(
+            destroy_tcp_for_uids(&[]).expect("empty"),
+            DestroyReport::default()
+        );
+        assert_eq!(
+            destroy_tcp_for_uids(&[0, OVERFLOWUID]).expect("root"),
+            DestroyReport::default()
+        );
+    }
+
+    #[test]
+    fn destroys_an_owned_loopback_tcp_by_sockid() {
+        use std::io::Write;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let server_port = listener.local_addr().unwrap().port();
+        let mut client =
+            std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, server_port)).expect("connect");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let accepted = loop {
+            assert!(Instant::now() < deadline, "accept timed out");
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        };
+        let client_port = client.local_addr().unwrap().port();
+        let items = match dump_tcp_family(libc::AF_INET as u8) {
+            Ok(items) => items,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                eprintln!("skipping: no TCP sock_diag handler ({error})");
+                return;
+            }
+            Err(error) => panic!("dump tcp: {error}"),
+        };
+        let diag = items
+            .iter()
+            .find_map(|message| {
+                let diag = parse_diag_tcp(&message.payload)?;
+                let sport = u16::from_be_bytes(diag.sockid[0..2].try_into().ok()?);
+                let dport = u16::from_be_bytes(diag.sockid[2..4].try_into().ok()?);
+                (diag.family == libc::AF_INET as u8
+                    && tcp_is_live_client(diag.state)
+                    && sport == client_port
+                    && dport == server_port)
+                    .then_some(diag)
+            })
+            .expect("connected client must appear in a complete TCP dump");
+        let mut socket =
+            RequestSocket::open_nonblocking(libc::NETLINK_SOCK_DIAG).expect("diag socket");
+        let seq = socket.next_seq();
+        match socket.ack(destroy_request(diag.family, &diag.sockid, seq), seq) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::EOPNOTSUPP) => {
+                // inet_diag dump works; this kernel omitted SOCK_DESTROY (WSL).
+                return;
+            }
+            Err(error) => panic!("SOCK_DESTROY: {error}"),
+        }
+        client
+            .set_write_timeout(Some(Duration::from_millis(400)))
+            .expect("write timeout");
+        let wrote = client.write(&[0x5a; 8]);
+        assert!(
+            wrote.as_ref().is_err() || matches!(wrote, Ok(0)),
+            "destroyed TCP still accepted a write: {wrote:?}"
+        );
+        drop(accepted);
     }
 }

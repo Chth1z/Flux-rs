@@ -1128,7 +1128,7 @@ mod tests {
         let mut perm = fs::metadata(&fake).unwrap().permissions();
         use std::os::unix::fs::PermissionsExt;
         perm.set_mode(0o755);
-        fs::set_permissions(&fake, perm).unwrap();
+        fs::set_permissions(&fake, perm.clone()).unwrap();
         let fake_spec = EngineSpec::for_binary(fake, dir.clone());
         match run_check(&fake_spec, Path::new("/dev/null")) {
             Err(EngineError::CheckFailed { exit, output_head }) => {

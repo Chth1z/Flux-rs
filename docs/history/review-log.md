@@ -937,3 +937,11 @@ SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。安装前生产为 
 **实测（宿主）：** `Manager` 冷启动仍按所有权谓词删 leftover `flxrs*` / pref 100 / table 20260，但 `converge(true)` 只 `finit_module` + 打开 `/dev/fluxrs`。`steal_ready=0` → `lkm_tproxy_symbol` 并放开 fd。`apply_policy` 只 `SET_UIDS`（超过 64 → `policy_capacity:kmod_uids`）。`prepare_generation` `SET_LISTENERS`。`begin_attachment` 在已加载模块时直接 Complete。`publish_inactive` `CLEAR_UIDS`，fd 仍握着。钩子对固定旁路前缀与 ABI listener 主机 `NF_ACCEPT`（与 `FIXED_BYPASS_*` 锁步；用户 CIDR / self-addr 尚未 ioctl）。Phase 3 断言无 `flxrs*`；Phase 5/6 的 TC/L2/RAWIP 套件改为跳过（CIDR/DRAINING 不在 kmod）。蓝图 §8.7/§8.8 与 `failures.md` `lkm_*` 已改。未在仍握着 `/dev/fluxrs` 的运行中 `fluxd` 上重跑设备 Phase 3（不 disable、不 nsenter、不 `setenforce 0`）。
 
 **处置：** 批 4 代码路径已切到唯一 LOCAL_OUT。双数据面禁止。下一批是 `SOCK_DESTROY`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。
+
+### 0.6.44 rc.4 批 5：取消勾选发 `SOCK_DESTROY`（2026-09-18）
+
+**原说法：** 取消勾选后 `SET_UIDS` 去掉该 UID，再对完整 dump 里 `idiag_uid` 匹配的活 TCP 发 netlink type 21。dump 不全则一条都不拆。禁止 `ss -K`。uid 0 / overflowuid / LISTEN / TIME_WAIT / CLOSE 不碰。UDP 不拆。
+
+**实测（宿主）：** `apply_policy` 先 `SET_UIDS`，再对离开 `SELECTED` 的 UID 调 `destroy_tcp_for_uids`。不完整 dump（无 `NLMSG_DONE`、`NLM_F_DUMP_INTR`、截断）返回 `Err` 且销毁循环未进入；`dump_retryable` 写成 `sock_destroy_incomplete:`，硬错误写成 `sock_destroy_failed:`。Windows 宿主门禁绿（`sock_diag` 不编进该目标）。WSL：dump/解析/uid 0 跳过通过；对自建 loopback 一条 4 元组发 type 21 得 `EOPNOTSUPP`（该内核有 inet_diag dump、无 `SOCK_DESTROY`），测试在该 errno 上返回而非失败。未对设备上真实 App 连接发销毁。
+
+**处置：** 批 5 控制面已进树。下一批是 ZIP 内 `.ko`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。

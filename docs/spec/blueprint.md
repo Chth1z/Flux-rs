@@ -1768,6 +1768,13 @@ usually does not point at the real cause.
 
 Deselecting an app changes its UID from `SELECTED` to `DRAINING`; it is **not deleted**. Selecting an app affects only flows that have no decision yet. A bypass change behaves the same way.
 
+**C13 unique dataplane (LOCAL_OUT).** There is no SK_STORAGE decision on the
+app socket. Unselect publishes `SET_UIDS` without that UID, then
+`fluxd` sends `SOCK_DESTROY` (netlink type 21, never `ss -K`) for that UID's
+live TCP. An incomplete dump MUST destroy nothing (leak those sockets rather
+than reset one whose identity was not fully collected). uid 0, overflowuid,
+LISTEN, TIME_WAIT and CLOSE are not targeted. UDP is not destroyed.
+
 **Hard invariant: within one boot, a UID entry that could ever have created a
 TCP decision MUST NOT be deleted from `uid_policy`**; it may only remain
 `SELECTED` or `DRAINING`.
@@ -2678,6 +2685,11 @@ Flux does not use sing-box's `SIGHUP`, whose success cannot be confirmed synchro
 Enumerate the four exact sockets — two families by two protocols — through `NETLINK_SOCK_DIAG` (`SOCK_DIAG_BY_FAMILY`, `inet_diag`), and cross-check each socket's inode against `/proc/<candidate-pid>/fd/*`. This establishes control-plane evidence that the four sockets are held by the candidate **at the moment of promotion**, and nothing more. Admission during operation remains per-packet through BPF's `listener_alive()`; there is **no periodic diag polling**.
 
 The enumeration is a `ProbeReady` state machine on a non-blocking `NETLINK_SOCK_DIAG` socket in the reactor epoll set. Each datagram is fed through the dump-completeness gate of §8.5: a dump without `NLMSG_DONE`, or with `NLM_F_DUMP_INTR`, truncation or a negative DONE status, is Incomplete and MUST NOT be treated as "socket absent". The reactor MUST return to epoll after each datagram so disable, stop and pidfd remain serviceable during the probe. The 5 s timerfd is a cap on the whole probe, not a way to interrupt a blocking `recv`. `find_inode` is a bounded helper for tests; production readiness MUST NOT call it from the reactor thread.
+
+Unselect is a separate, one-shot use of the same family: dump TCP, then
+`SOCK_DESTROY` (type 21) for sockets whose `idiag_uid` left `SELECTED` (§7.6).
+It MUST NOT be periodic, MUST NOT call `ss`, and MUST destroy nothing when the
+dump is incomplete.
 
 A timerfd MAY re-check with a bounded backoff while the candidate starts — 10, 20, 40 ms rising to a 250 ms cap, with a total deadline of 5 s — cancelled the moment readiness or failure is decided. It is not steady-state polling and MUST NOT be extended into a health probe.
 

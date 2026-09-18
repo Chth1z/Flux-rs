@@ -197,6 +197,8 @@ Four prefix classes support routing:
 | Captured :53 traffic has `sk_uid == 1051` | `"enforce_dns_uid appears enabled; system DNS is not per-app attributable on this device"` (boundary ②) |
 | The user set outbound `routing_mark` / `bind_interface` | `"user-set outbound routing_mark/bind_interface: Android network consequences are yours"` |
 | Flux did not create `clsact` | `"clsact on wlan0 pre-existed; it will never be deleted by Flux"` |
+| A complete TCP `SOCK_DIAG` dump could not be assembled while unselecting | `"sock_destroy_incomplete: live TCP of unselected UIDs was not reset"` |
+| `SOCK_DESTROY` itself failed after a complete dump | `"sock_destroy_failed:<error>"` |
 | `[ssid]` has entries but `nl80211` is unavailable or the interface dump failed | `"ssid_unreadable: Wi-Fi state cannot be read; the [ssid] list is not applied"` (§29.5 — activation is not blocked) |
 | The `[ssid]` dimension is holding Flux inactive | `"ssid_paused: the connected Wi-Fi network is excluded by [ssid]; Flux resumes when it changes"` |
 
@@ -207,7 +209,7 @@ The opposite of zero observability is not "print more numbers"; it is to **perfo
 | Counter combination | Hint |
 |---|---|
 | `admit_* > 0` and `in_drop_assign > 0` | `"assign is failing; if this is 100% the engine listener may have SO_REUSEPORT (kernels < 6.5 reject it)"` |
-| `admit_* > 0` and `in_drop_no_listener > 0` | `"packets reached the veth but no listener was found; engine may be restarting"` |
+| `admit_* > 0` and `in_drop_no_listener > 0` | `"packets reached LOCAL_OUT but no listener was found; engine may be restarting"` |
 | `egress_listener_miss > 0` and `admit_* == 0` | `"nothing is being captured because the engine listener is absent"` |
 | `direct_tcp > 0` and `admit_tcp == 0` | `"selected UIDs are matching but every first SYN chose DIRECT; check the [cidr] mode and list, and active"` |
 | All counters are 0 and `state == Active` | `"no selected traffic observed; verify the app list resolves to the UIDs you expect"` |

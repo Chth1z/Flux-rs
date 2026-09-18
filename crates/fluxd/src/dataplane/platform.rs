@@ -647,6 +647,7 @@ impl Manager {
         }
 
         let selected: Vec<u32> = next.selected.iter().copied().collect();
+        let dropped: Vec<u32> = from.selected.difference(&next.selected).copied().collect();
         self.kmod
             .as_ref()
             .ok_or_else(|| {
@@ -657,6 +658,25 @@ impl Manager {
             })?
             .set_uids(&selected)
             .map_err(|error| DataplaneError::io("lkm_set_uids", error))?;
+        self.status
+            .warnings
+            .retain(|warning| !warning.starts_with("sock_destroy_"));
+        if !dropped.is_empty() {
+            match crate::netlink::sock_diag::destroy_tcp_for_uids(&dropped) {
+                Ok(_) => {}
+                Err(error) if crate::netlink::sock_diag::dump_retryable(&error) => {
+                    self.status.warnings.push(
+                        "sock_destroy_incomplete: live TCP of unselected UIDs was not reset"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    self.status
+                        .warnings
+                        .push(format!("sock_destroy_failed:{error}"));
+                }
+            }
+        }
 
         if let Some(last) = self.last_control.as_mut() {
             last.selected_count = next.selected.len() as u32;
