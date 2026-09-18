@@ -99,6 +99,7 @@ fn quick_check_inner(
             spec.binary.display()
         ));
     }
+    check_kmod(layout, &mut report);
     (report, generated)
 }
 
@@ -119,6 +120,80 @@ fn check_flux_toml(layout: &Layout, report: &mut CheckReport) -> Option<FluxConf
     }
     check_selectors(&config, report);
     Some(config)
+}
+
+/// Names the GKI-line `.ko` and its vermagic without calling `finit_module`.
+///
+/// On a development Linux host `uname -r` is not a GKI line: that is a
+/// warning so `fluxd check` still diagnoses configuration. On Android it is
+/// an error (`lkm_unknown_release`). Same-line vermagic mismatch is a
+/// warning because SM-S9180 loaded a DDK vermagic that was not `uname -r`
+/// (`docs/history/review-log.md` §0.6.32).
+fn check_kmod(layout: &Layout, report: &mut CheckReport) {
+    let release = match crate::kmod::kernel_release() {
+        Ok(release) => release,
+        Err(error) => {
+            report.errors.push(format!("lkm_io: uname: {error}"));
+            return;
+        }
+    };
+    let Some(line) = flux_core::gki_line::from_uname_release(&release) else {
+        let token = format!("lkm_unknown_release:{release}");
+        if cfg!(target_os = "android") {
+            report.errors.push(token);
+        } else {
+            report.warnings.push(token);
+        }
+        return;
+    };
+    let dir = layout.module_dir().join(crate::kmod::DIR_NAME);
+    let names = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            report.errors.push("lkm_missing_module".to_string());
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!("lkm_io:{error}"));
+            return;
+        }
+    };
+    let Some(name) = flux_core::gki_line::pick_module_file(line, names.iter().map(String::as_str))
+    else {
+        report.errors.push("lkm_missing_module".to_string());
+        return;
+    };
+    let path = dir.join(name);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report.errors.push(format!("lkm_io:{error}"));
+            return;
+        }
+    };
+    let vermagic = match flux_core::modinfo::vermagic_from_elf(&bytes) {
+        Ok(vermagic) => vermagic.to_string(),
+        Err(error) => {
+            report.errors.push(format!("lkm_corrupt_module:{error}"));
+            return;
+        }
+    };
+    match flux_core::modinfo::relate(&vermagic, &release) {
+        flux_core::modinfo::VermagicRelation::Equal => {}
+        flux_core::modinfo::VermagicRelation::SameLine => {
+            report.warnings.push(format!(
+                "lkm_vermagic:{vermagic} kernel:{release} (same GKI line; finit_module is the gate)"
+            ));
+        }
+        flux_core::modinfo::VermagicRelation::Different => {
+            report
+                .errors
+                .push(format!("lkm_vermagic:{vermagic} kernel:{release}"));
+        }
+    }
 }
 
 /// Resolves the selected apps against `packages.list`. An unknown package makes

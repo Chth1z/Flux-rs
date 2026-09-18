@@ -92,6 +92,7 @@ with zipfile.ZipFile(target, "w") as archive:
     archive.writestr("LICENSE", "host fixture licence\n")
     archive.writestr("THIRD_PARTY_NOTICES.md", "host fixture notices\n")
     archive.writestr("licenses/DEPENDENCIES.md", "host fixture inventory\n")
+    archive.writestr("kmod/fluxrs-android13-5.15.ko", b"host fixture module\n")
 PY
 
 # Stub only root-manager helpers. No unzip, installer, or filesystem writes

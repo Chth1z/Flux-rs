@@ -38,6 +38,16 @@ unzip -o "$ZIPFILE" skip_mount -d "$MODPATH" >/dev/null || abort "! Cannot extra
 if [ ! -e "$MODPATH/skip_mount" ]; then
 	abort "! Incomplete module payload: skip_mount is missing."
 fi
+unzip -o "$ZIPFILE" "kmod/*" -d "$MODPATH" >/dev/null || abort "! Cannot extract kmod/."
+kmod_ok=0
+for ko in "$MODPATH"/kmod/fluxrs-android*.ko; do
+	if [ -s "$ko" ]; then
+		kmod_ok=1
+		break
+	fi
+done
+[ "$kmod_ok" = 1 ] || abort "! Incomplete module payload: no fluxrs-android*.ko."
+# Loading is fluxd's job. customize.sh must not insmod.
 ui_print "- Flux-rs $(grep_prop version "$MODPATH/module.prop")"
 
 # Architecture. The data plane is aarch64-only.

@@ -11,7 +11,8 @@
 //! 3. Cross-build `fluxd` (`aarch64-linux-android`, embedded BPF object,
 //!    16 KiB max-page-size link flags) and require `p_align >= 0x4000`.
 //! 4. Stage the §13.1 allowlist — never "everything except" — with LF line
-//!    endings and fixed modes.
+//!    endings and fixed modes, then the GKI-line `kmod/fluxrs-android*.ko`
+//!    files in sorted name order.
 //! 5. Write a deterministic STORE ZIP in allowlist order plus `SHA256SUMS`.
 //!
 //! `verify-package` runs the whole pipeline twice from clean cross-build
@@ -22,7 +23,7 @@ use crate::{elf, engine_release, freeze, sha256, util, zip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// §13.1: the exact ZIP contents, in archive order. Anything else is a bug.
+/// §13.1: the fixed ZIP prefix, in archive order. GKI-line modules follow.
 const ALLOWLIST: [&str; 16] = [
     "module.prop",
     "skip_mount",
@@ -178,7 +179,10 @@ fn package_once(target: &Path, inputs: &Inputs) -> Result<(PathBuf, [u8; 32]), S
 
     // 4 + 5. Stage the allowlist and write the archive.
     let entries = collect_entries(&root, &module_prop, engine, &fluxd, &inputs.build_info)?;
-    debug_assert!(entries.iter().map(|e| e.name.as_str()).eq(ALLOWLIST));
+    debug_assert!(
+        names_follow_allowlist(&entries),
+        "ZIP names must be the §13.1 prefix plus sorted kmod/*.ko"
+    );
 
     let stage = target.join("xtask/stage");
     if stage.exists() {
@@ -599,6 +603,104 @@ fn collect_entries(
         0o644,
         dependencies_md(root)?.into_bytes(),
     );
+    for entry in collect_kmod_entries(root)? {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn names_follow_allowlist(entries: &[zip::Entry]) -> bool {
+    if entries.len() <= ALLOWLIST.len() {
+        return false;
+    }
+    if !entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .take(ALLOWLIST.len())
+        .eq(ALLOWLIST)
+    {
+        return false;
+    }
+    let kmods: Vec<&str> = entries[ALLOWLIST.len()..]
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    kmods.windows(2).all(|pair| pair[0] < pair[1])
+        && kmods.iter().all(|name| {
+            name.strip_prefix("kmod/")
+                .and_then(flux_core::gki_line::GkiLine::from_module_filename)
+                .is_some()
+        })
+}
+
+fn kmod_stub_allowed() -> bool {
+    matches!(
+        std::env::var("FLUX_KMOD_STUB").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+fn kmod_input_dir(root: &Path) -> PathBuf {
+    match std::env::var_os("FLUX_KMOD_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => root.join("dist/kmod"),
+    }
+}
+
+fn list_kmod_files(dir: &Path) -> Result<Vec<String>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read {}: {error}", dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if flux_core::gki_line::GkiLine::from_module_filename(name).is_some() {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+fn collect_kmod_entries(root: &Path) -> Result<Vec<zip::Entry>, String> {
+    let dir = kmod_input_dir(root);
+    let mut names = list_kmod_files(&dir)?;
+    if names.is_empty() {
+        if kmod_stub_allowed() {
+            println!(
+                "package: stub kmod/fluxrs-android13-5.15.ko (FLUX_KMOD_STUB); \
+                 finit_module will Direct until a DDK .ko is copied into dist/kmod"
+            );
+            return Ok(vec![zip::Entry {
+                name: "kmod/fluxrs-android13-5.15.ko".into(),
+                mode: 0o644,
+                data: flux_core::modinfo::stub_android13_5_15(),
+            }]);
+        }
+        return Err(format!(
+            "no fluxrs-android*.ko in {}; DDK-build and copy, set FLUX_KMOD_DIR, \
+             or FLUX_KMOD_STUB=1 for an envelope-only stub",
+            dir.display()
+        ));
+    }
+    names.sort();
+    let mut entries = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        let data = util::read_bytes(&path)?;
+        flux_core::modinfo::vermagic_from_elf(&data)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        entries.push(zip::Entry {
+            name: format!("kmod/{name}"),
+            mode: 0o644,
+            data,
+        });
+    }
     Ok(entries)
 }
 
@@ -951,6 +1053,53 @@ mod tests {
     #[test]
     fn webroot_remains_one_redirect_file() {
         validate_webroot_shape(&util::repo_root()).unwrap();
+    }
+
+    #[test]
+    fn kmod_entries_are_sorted_gki_line_files() {
+        let dir = std::env::temp_dir().join(format!("xtask-kmod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("fluxrs-android14-6.1.ko"),
+            flux_core::modinfo::reloc_elf_with_modinfo(b"vermagic=6.1.0-android14-stub\0"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("fluxrs-android13-5.15.ko"),
+            flux_core::modinfo::stub_android13_5_15(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("readme.txt"), b"ignore").unwrap();
+        let mut names = list_kmod_files(&dir).unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "fluxrs-android13-5.15.ko".to_string(),
+                "fluxrs-android14-6.1.ko".to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allowlist_prefix_then_sorted_kmod() {
+        let mut entries: Vec<zip::Entry> = ALLOWLIST
+            .iter()
+            .map(|name| zip::Entry {
+                name: (*name).to_string(),
+                mode: 0o644,
+                data: Vec::new(),
+            })
+            .collect();
+        assert!(!names_follow_allowlist(&entries));
+        entries.push(zip::Entry {
+            name: "kmod/fluxrs-android13-5.15.ko".into(),
+            mode: 0o644,
+            data: Vec::new(),
+        });
+        assert!(names_follow_allowlist(&entries));
     }
 
     #[test]

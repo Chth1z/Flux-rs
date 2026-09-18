@@ -205,6 +205,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           GH_TOKEN: ${{ github.token }}
+          FLUX_KMOD_STUB: "1"
         run: cargo xtask verify-package
 
       # A short-lived CI artifact is for device acceptance only. It is not a

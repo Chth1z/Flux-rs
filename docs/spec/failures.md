@@ -19,9 +19,12 @@ Every possible failure point specifies **how it is detected, what action is take
 | netns is not the initial netns | Compare the inodes of `/proc/self/ns/net` and `/proc/1/ns/net` | `Inactive` | `"netns_mismatch"` |
 | A symlink or a non-directory sits where the state root, `run/` or `config/` must be | `symlink_metadata` on each of the three, every start and every convergence | `Inactive`; **MUST NOT replace, unlink or follow it** — the object is not Flux's (PHIL-5) | `"runtime_dir_type:<path> expected directory"` |
 | The state root's mode or owner has drifted from `root:root 0700` | the same inspection | **Not a failure.** The three directories are Flux's own (§11.1): restore `0700` and the owner, log one line per repair, continue. An earlier revision refused to run here, on the theory that the user may have loosened the mode deliberately; but `/data/adb` is itself root-only, so the mode protected nothing, and the boot script was tightening it anyway — the refusal contradicted the script and belonged in neither (PHIL-7) | `fluxd.log`: `state root repaired: <path>: mode 0755 restored to 0700` |
-| `uname -r` has no GKI line Flux ships | `gki_line::from_uname_release` | `Inactive`; load nothing | `"lkm_unknown_release:<uname -r>"` |
+| `uname -r` has no GKI line Flux ships | `gki_line::from_uname_release` | `Inactive`; load nothing | `"lkm_unknown_release:<uname -r>"` (`fluxd check` is an error on Android and a warning on a development Linux host) |
 | No `fluxrs-androidN-X.Y*.ko` in the kmod directory | directory list | `Inactive` | `"lkm_missing_module"` |
-| `finit_module` fails (not `EEXIST`) | errno | `Inactive`; **MUST NOT** create veth or attach TC | `"lkm_finit:<errno>"` |
+| `.ko` is not ELF64 or has no `vermagic=` | `.modinfo` parse | `Inactive` if `finit_module` is attempted; `fluxd check` fails closed | `"lkm_corrupt_module:<reason>"` |
+| Module vermagic and `uname -r` map to different GKI lines | `modinfo::relate` | `fluxd check` fails; load is still `finit_module` | `"lkm_vermagic:<vermagic> kernel:<uname -r>"` |
+| Module vermagic differs but the GKI line matches | `modinfo::relate` | **Warning only.** `finit_module` remains the gate (§0.6.32) | `"lkm_vermagic:<vermagic> kernel:<uname -r> (same GKI line; finit_module is the gate)"` |
+| `finit_module` fails (not `EEXIST`) | errno | `Inactive`; **MUST NOT** create veth or attach TC. Detail includes vermagic and `uname -r` when they can be read | `"lkm_finit:<errno>"` |
 | `/dev/fluxrs` will not open | errno (`EACCES` / `EBUSY` / …) | `Inactive`; drop any partial load | `"lkm_control"` |
 | Reading or listing the `.ko` fails before the syscall | errno | `Inactive` | `"lkm_io"` |
 | `nf_tproxy_*` unresolved (`steal_ready=0`) | `GET_STATUS` | drop the fd; `Inactive` | `"lkm_tproxy_symbol"` |
@@ -199,6 +202,7 @@ Four prefix classes support routing:
 | Flux did not create `clsact` | `"clsact on wlan0 pre-existed; it will never be deleted by Flux"` |
 | A complete TCP `SOCK_DIAG` dump could not be assembled while unselecting | `"sock_destroy_incomplete: live TCP of unselected UIDs was not reset"` |
 | `SOCK_DESTROY` itself failed after a complete dump | `"sock_destroy_failed:<error>"` |
+| Module vermagic and `uname -r` share a GKI line but are not identical | `"lkm_vermagic:<vermagic> kernel:<uname -r> (same GKI line; finit_module is the gate)"` |
 | `[ssid]` has entries but `nl80211` is unavailable or the interface dump failed | `"ssid_unreadable: Wi-Fi state cannot be read; the [ssid] list is not applied"` (§29.5 — activation is not blocked) |
 | The `[ssid]` dimension is holding Flux inactive | `"ssid_paused: the connected Wi-Fi network is excluded by [ssid]; Flux resumes when it changes"` |
 

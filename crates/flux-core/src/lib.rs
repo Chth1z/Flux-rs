@@ -26,6 +26,7 @@ pub mod engine_config;
 pub mod gki_line;
 pub mod kmod_uapi;
 pub mod migration;
+pub mod modinfo;
 pub mod parse_bounds;
 pub mod policy_epoch;
 pub mod runtime;

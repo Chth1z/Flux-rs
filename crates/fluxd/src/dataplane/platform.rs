@@ -2027,10 +2027,16 @@ fn kmod_load_error(error: crate::kmod::LoadError) -> DataplaneError {
                 .raw_os_error()
                 .map(errno_name)
                 .unwrap_or_else(|| format!("{:?}", error.kind()));
-            DataplaneError::new(
-                format!("lkm_finit:{errno}"),
-                format!("finit_module {}: {error}", path.display()),
-            )
+            let mut detail = format!("finit_module {}: {error}", path.display());
+            if let Ok(bytes) = fs::read(&path) {
+                if let Ok(vermagic) = flux_core::modinfo::vermagic_from_elf(&bytes) {
+                    detail.push_str(&format!(" vermagic={vermagic}"));
+                }
+            }
+            if let Ok(release) = crate::kmod::kernel_release() {
+                detail.push_str(&format!(" kernel={release}"));
+            }
+            DataplaneError::new(format!("lkm_finit:{errno}"), detail)
         }
         crate::kmod::LoadError::Control(error) => DataplaneError::io("lkm_control", error),
         crate::kmod::LoadError::Io(error) => DataplaneError::io("lkm_io", error),

@@ -945,3 +945,11 @@ SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。安装前生产为 
 **实测（宿主）：** `apply_policy` 先 `SET_UIDS`，再对离开 `SELECTED` 的 UID 调 `destroy_tcp_for_uids`。不完整 dump（无 `NLMSG_DONE`、`NLM_F_DUMP_INTR`、截断）返回 `Err` 且销毁循环未进入；`dump_retryable` 写成 `sock_destroy_incomplete:`，硬错误写成 `sock_destroy_failed:`。Windows 宿主门禁绿（`sock_diag` 不编进该目标）。WSL：dump/解析/uid 0 跳过通过；对自建 loopback 一条 4 元组发 type 21 得 `EOPNOTSUPP`（该内核有 inet_diag dump、无 `SOCK_DESTROY`），测试在该 errno 上返回而非失败。未对设备上真实 App 连接发销毁。
 
 **处置：** 批 5 控制面已进树。下一批是 ZIP 内 `.ko`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。
+
+### 0.6.45 rc.4 批 6：ZIP 带 GKI 代 `.ko`，`check` 写 vermagic（2026-09-18）
+
+**原说法：** 三管理器仍一份信封；ZIP 按 GKI 代放入 `fluxrs-androidN-X.Y.ko`；`customize.sh` / `service.sh` 不 `insmod`；`fluxd check` 在 vermagic 对不上时给出可执行原因。失败 Direct，token 能动手。
+
+**实测（宿主）：** `flux-core::modinfo` 从 ELF `.modinfo` 读 `vermagic=`。DDK `5.15.202-android13-…` 与本机 `5.15.211-Qkernel` 判为同一 GKI 代（警告，不是错误）——与 §0.6.32 `finit_module` 仍成功一致。跨代是 `check` 错误。`lkm_finit` 的 detail 附 vermagic 与 `uname -r`。`package` 在十六项固定 allowlist 之后按名排序追加 `kmod/*.ko`；无文件且未设 `FLUX_KMOD_STUB` 则拒绝打包。CI `verify-package` 设 `FLUX_KMOD_STUB=1` 只为信封可复现，桩模块不能 `finit`。`customize.sh` 抽出 `kmod/*` 且要求至少一份 `fluxrs-android*.ko`。未跑 `verify-package` 全量交叉构建（需 NDK）。未改正在跑的设备 `fluxd`。
+
+**处置：** 批 6 信封与诊断已进树。签名发布必须放入 DDK 编出的 `.ko`，禁止带桩。下一批是工作区命名 `1.0.0-rc.4`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。

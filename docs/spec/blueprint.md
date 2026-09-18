@@ -2902,7 +2902,7 @@ nor the new tuple. The four counterexamples live as tests in
 |---|---|
 | `fluxd daemon` | invoked by `service.sh`; supervises the reactor, restarting it after a crash (§13.2.2) |
 | `fluxd status` | prints the response of §24.1, human-readable or `--json` |
-| `fluxd check` | read-only validation of both configurations, package resolution and the engine `check`; changes no state |
+| `fluxd check` | read-only validation of both configurations, package resolution, the engine `check`, and the GKI-line `.ko` vermagic versus `uname -r`; changes no state |
 | `fluxd enable` | deletes the `disable` file and requests activation. **A front end to the switch file** (C9), never a second source of truth |
 | `fluxd disable` | creates the `disable` file, publishes `active=0`, stops the engine; the daemon keeps waiting for commands |
 | `fluxd reload` | triggers the policy and engine candidate flows |
@@ -3249,12 +3249,17 @@ build-info.toml             # generated evidence of this build's inputs
 LICENSE
 THIRD_PARTY_NOTICES.md
 licenses/{sing-box-LICENSE, DEPENDENCIES.md}
+kmod/fluxrs-androidN-X.Y.ko # one file per GKI generation Flux ships; not a per-device build
 ```
 
 **The list is an allowlist, and packaging is built from it rather than by
 excluding paths from the working tree.** An exclusion list fails open: a file
 added to the tree ships unless someone remembers to exclude it. `xtask` holds
-this list as a constant and stages exactly these entries; §13.4 makes two
+the sixteen fixed names as a constant, then appends every
+`fluxrs-androidN-X.Y*.ko` taken from `FLUX_KMOD_DIR` or `dist/kmod`, sorted
+by name. `.ko` files are not generated from the working tree and are not
+normalised to LF. `FLUX_KMOD_STUB=1` is an envelope-only stand-in for CI
+reproducibility; it MUST NOT be used for a signed release. §13.4 makes two
 consecutive runs byte-identical so the property is checkable rather than
 asserted.
 
@@ -3270,15 +3275,18 @@ consistent with — and `fluxd` rewrites that line at runtime to carry live stat
 (§27.1.3). No `updateJson` is shipped.
 
 **Forbidden:** `post-fs-data.sh`, a recovery `META-INF`, `service.d`, a WebUI,
-an APK, SEPolicy, multi-ABI directories, compiled `.o` files, and a per-file
-installation hash manifest.
+an APK, SEPolicy, multi-ABI directories, compiled `.o` leftovers, and a per-file
+installation hash manifest. The shipped `kmod/fluxrs-android*.ko` files are the
+LOCAL_OUT module, not leftovers; `customize.sh` extracts them and MUST NOT
+`insmod`.
 
 Since libbpf, libelf and zlib were removed (D10), `licenses/` needs only the
 sing-box licence and the Rust dependency licences.
 
 The archive inventory and the installed payload have different purposes.
 `customize.sh` uses selective extraction: binaries, lifecycle scripts, module
-metadata, the redirect page and `build-info.toml` remain in the module directory;
+metadata, the redirect page, `build-info.toml` and `kmod/fluxrs-android*.ko`
+remain in the module directory;
 default files supply configuration only as specified in §13.2.3. Required
 licences and notices accompany the ZIP but need not be extracted to the device
 or checked as runtime prerequisites. The engine source archive remains a

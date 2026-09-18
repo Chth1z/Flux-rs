@@ -104,7 +104,7 @@
 - 已无任何已知的、能推翻主路线的技术未知项。
 - 清库重建**已执行**，不再需要第二次授权。
 
-C13（2026-09-18）把主路线从 TC+veth 换成 LKM `LOCAL_OUT`。批 1 加载证伪点已在 SM-S9180 关闭（§0.6.32）。批 2 未选中地板未测出明显更差（§0.6.33）。批 3：`nf_tproxy` 运行期解析已通；S2–S4 通过（§0.6.36–0.6.38）；**LOCAL_OUT 内同步投递**（§0.6.34）、**未 scrub 的 workqueue 投递**（§0.6.35）与 **scrub 后无 dst 的 `ip6_input`**（§0.6.39）均证伪。**第二次 `ip_rcv` / dummy 注入不做**（§0.6.40）。S6 在 scrub 后挂 loopback 本机 dst 再投递：官方 TPROXY **UDP origdst 双栈通过**（§0.6.41）；IPv6 TCP 另需把 TX `tcp_skb_cb` 收成 `IP6CB->nhoff`（§0.6.42）。**UDP+TCP origdst 双栈通过。** 默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。ioctl UAPI 已进 flux-core。**批 4：`dataplane::Manager` 已接唯一 LOCAL_OUT 路径**（§0.6.43）。**批 5：取消勾选走 `SOCK_DESTROY`（type 21），禁止 `ss -K`；dump 不全则不拆。** 用户 CIDR / self-addr ioctl 与 UID 64 vs ABI 1024 仍未对齐。不回退 iptables。
+C13（2026-09-18）把主路线从 TC+veth 换成 LKM `LOCAL_OUT`。批 1 加载证伪点已在 SM-S9180 关闭（§0.6.32）。批 2 未选中地板未测出明显更差（§0.6.33）。批 3：`nf_tproxy` 运行期解析已通；S2–S4 通过（§0.6.36–0.6.38）；**LOCAL_OUT 内同步投递**（§0.6.34）、**未 scrub 的 workqueue 投递**（§0.6.35）与 **scrub 后无 dst 的 `ip6_input`**（§0.6.39）均证伪。**第二次 `ip_rcv` / dummy 注入不做**（§0.6.40）。S6 在 scrub 后挂 loopback 本机 dst 再投递：官方 TPROXY **UDP origdst 双栈通过**（§0.6.41）；IPv6 TCP 另需把 TX `tcp_skb_cb` 收成 `IP6CB->nhoff`（§0.6.42）。**UDP+TCP origdst 双栈通过。** 默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。ioctl UAPI 已进 flux-core。**批 4：`dataplane::Manager` 已接唯一 LOCAL_OUT 路径**（§0.6.43）。**批 5：取消勾选走 `SOCK_DESTROY`（type 21），禁止 `ss -K`；dump 不全则不拆。** **批 6：ZIP 带 GKI 代 `.ko`；`fluxd check` 写 vermagic；`customize.sh` 不 `insmod`。** 用户 CIDR / self-addr ioctl 与 UID 64 vs ABI 1024 仍未对齐。不回退 iptables。
 
 仍然成立的约束：Phase 0 断言失败若需要改全局系统语义或放弃某类设备，属**范围变更**，回 GOV-1.2 找所有者。
 

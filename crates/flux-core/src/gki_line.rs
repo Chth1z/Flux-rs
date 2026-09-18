@@ -44,6 +44,21 @@ impl GkiLine {
         format!("fluxrs-{}", self.name())
     }
 
+    /// Parse `fluxrs-androidN-X.Y.ko` / `fluxrs-androidN-X.Y-<build>.ko`.
+    pub fn from_module_filename(filename: &str) -> Option<GkiLine> {
+        let rest = filename.strip_prefix("fluxrs-android")?;
+        let body = rest.strip_suffix(".ko")?;
+        let (android_token, series_and_build) = body.split_once('-')?;
+        let android = parse_component(android_token)?;
+        let series = series_and_build.split('-').next()?;
+        let (kernel_major, kernel_minor) = parse_series(series)?;
+        Some(GkiLine {
+            android,
+            kernel_major,
+            kernel_minor,
+        })
+    }
+
     /// Whether `filename` is a module built for this generation.
     ///
     /// Accepts `fluxrs-android13-5.15.ko` and `fluxrs-android13-5.15-<build>.ko`.
@@ -191,6 +206,13 @@ mod tests {
         assert!(!line.matches_module_file("fluxrs-android13-5.150.ko"));
         assert!(!line.matches_module_file("fluxrs-android13-5.15.ko.bak"));
         assert!(!line.matches_module_file("rekernel-android13-5.15.ko"));
+        assert_eq!(
+            GkiLine::from_module_filename("fluxrs-android13-5.15-gabc.ko")
+                .unwrap()
+                .name(),
+            "android13-5.15"
+        );
+        assert!(GkiLine::from_module_filename("rekernel-android13-5.15.ko").is_none());
     }
 
     #[test]
