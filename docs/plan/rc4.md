@@ -134,6 +134,7 @@ Re-Kernel 能通用，是因为它的 netfilter 只链 GKI ABI 里的 `nf_regist
 | **4** | 拆除 veth、物理口 TC、RPDB 100 / table 20260、`rp_filter` 门 | `dataplane::Manager` 唯一路径是加载 `.ko` + ioctl；冷启动仍删 leftover `flxrs*`。Phase 3 断言无 `flxrs*` / pref 100。蓝图 §8.7/§8.8 与 `failures.md` `lkm_*` 已改。宿主门禁绿。设备上未在持有 fd 的 `fluxd` 仍跑时重跑 Phase 3（不 disable）。Phase 5/6 的 TC 套件已跳过，等 CIDR/DRAINING ioctl。 |
 | **5** | `sock_diag.rs` 发 `SOCK_DESTROY`（type 21）；禁止 `ss -K` | 取消勾选后 `SET_UIDS` 去掉该 UID，再按完整 dump 的 `idiag_uid` 拆活 TCP。dump 不全则一条都不拆。uid 0 / overflowuid / LISTEN 不碰。宿主门禁绿。WSL dump/解析通过；该内核 type 21 为 `EOPNOTSUPP`。未对设备真实 App 连接发销毁。蓝图 §7.6/§9.5 与 `failures.md` `sock_destroy_*` 已改。 |
 | **6** | 包装：ZIP 内 `.ko`、Direct token、三管理器仍一份信封 | `customize.sh` 抽出 `kmod/fluxrs-android*.ko` 且不 `insmod`。`fluxd check`：同 GKI 代 vermagic 不同为警告；跨代为错误；`lkm_finit` 细节带 vermagic 与 `uname -r`。CI `verify-package` 用 `FLUX_KMOD_STUB=1` 信封桩；签名发布必须用 DDK `.ko`。蓝图 §13.1 已改。 |
+| **6b** | ioctl UID 对齐 ABI 1024；`SET_BYPASS` 发布用户 CIDR + self-addr | `UID_SLOT_MAX` = 1024，ioctl 号随结构体变大。钩子按 prefixlen 分桶二分做 LPM；未选中路径仍不解析报文。`apply_policy` 先 `SET_BYPASS` 再 `SET_UIDS`。宿主门禁绿。未在设备上重编/重装 `.ko`（驻留 fluxd 仍握 fd）。Phase 5/6 TC 套件仍跳过。 |
 | **7** | 工作区命名 `1.0.0-rc.4`；候选设备回归 | 正式 1.0.0 门仍是远端 CI + §20 + 三管理器 smoke |
 
 ## 7 禁止（本 RC 最容易复活的）

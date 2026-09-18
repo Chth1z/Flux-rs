@@ -13,7 +13,7 @@
 
 ifneq ($(KERNELRELEASE),)
 obj-m := fluxrs.o
-fluxrs-y := fluxrs_main.o fluxrs_hook.o fluxrs_ctl.o fluxrs_sym.o
+fluxrs-y := fluxrs_main.o fluxrs_hook.o fluxrs_ctl.o fluxrs_sym.o fluxrs_bypass.o
 # 0=classify only. 2=STOLEN+kfree. 3=tproxy lookup+put.
 # 4=scrub+assign+kfree. 5=deliver without dst (panicked, do not insmod).
 # 6=attach loopback local dst, then deliver (product default).

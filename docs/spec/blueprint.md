@@ -111,9 +111,10 @@ does not (`../governance.md` GOV-6.2).
 3. Apply the fixed safety bypass, the device's own addresses, and the user's
    CIDR bypass. Resolve no domain names. The LOCAL_OUT hook MUST `NF_ACCEPT`
    the fixed prefixes and the ABI listener hosts (hardcoded, lockstepped with
-   `FIXED_BYPASS_*`). User CIDR and self-addr are recorded in userspace until
-   an ioctl LPM exists; the hook MUST NOT be described as already consulting
-   them.
+   `FIXED_BYPASS_*`) plus the live `SET_LISTENERS` addresses. User CIDR and
+   self-addr are published with `SET_BYPASS` and consulted only after a UID
+   hit. `POLICY` prefixes follow `cidr_mode`; `RESERVED` and self-addr are
+   always Direct.
 4. **Per-app DNS, precisely.** A selected app's plaintext DNS — including the
    part the system resolver sends on its behalf — enters the engine with the
    rest of its traffic, and an unselected app's DNS is untouched. Mechanism and
@@ -2317,10 +2318,14 @@ control snapshot that already exists stays at `active=0`:
    Otherwise drop the fd (`live=0`) and Direct `lkm_tproxy_symbol`.
 5. Hold a userspace inactive generation stub (`active=0`, ifindex 0). Capture
    no longer loads TC programs or a veth clsact.
-6. Parse `packages.list` and the configuration. Publish selected UIDs with
-   `SET_UIDS` (cap `UID_SLOT_MAX` = 64). Fixed bypass prefixes and the ABI
-   listener hosts are `NF_ACCEPT` in the hook. User CIDR / self-addr are not
-   ioctl-published yet.
+6. Parse `packages.list` and the configuration. Publish the CIDR epoch with
+   `SET_BYPASS` (user prefixes, self-addr, and `cidr_mode`; caps
+   `LPM_MAX_ENTRIES` / `SELF_ADDR_MAX_ENTRIES`), then selected UIDs with
+   `SET_UIDS` (cap `UID_SLOT_MAX` = `UID_SELECTED_MAX` = 1024). That order
+   keeps a newly selected UID from becoming visible before the bypass set
+   that belongs with it (§10.5). Fixed bypass prefixes and the ABI / live
+   listener hosts are always `NF_ACCEPT`. User `POLICY` prefixes follow
+   `cidr_mode` (blacklist hit = direct; whitelist miss = direct).
 7. Generate the engine configuration (§28.2), run `sing-box check`, start the
    child, and wait for its 4 sockets to pass SOCK_DIAG plus the PID and inode
    cross-check.
@@ -2872,6 +2877,12 @@ become visible before the bypass and self-address sets that belong with it.
    in the leaf refresh on this publication; BPF programs MUST NOT treat those
    counts as policy authority, and `status` computes live counts from the data
    plane's current set.
+
+   **C13 unique dataplane.** The LOCAL_OUT module has no dual BPF banks. The
+   CIDR half of a PolicyEpoch is one `SET_BYPASS` (RCU pointer swap of mode,
+   prefixes, and self-addr). `SET_UIDS` follows so a newly selected UID is
+   not visible before that swap. The UID table is a second write; a failure
+   after `SET_BYPASS` MUST republish the previous bypass set.
 5. After the commit, the former live bank may be reused as the next inactive
    bank. UID entries that leave `SELECTED` become `DRAINING` in the newly live
    bank — **never deleted** within the boot (§7.6).
@@ -3560,7 +3571,7 @@ has the inputs. It is not an everyday lockfile.
 
 | Path | Work performed |
 |---|---|
-| Unselected UID — the overwhelming majority of traffic | one TC invocation, identity helpers, one control snapshot, one HASH miss on the live `uid_policy` bank. **No packet parsing** (§2.2.4). The snapshot is required so UID classification and `cidr_mode` are one PolicyEpoch |
+| Unselected UID — the overwhelming majority of traffic | LOCAL_OUT: `live`, `sk_fullsock`, `sk_uid`, binary search of the published UID table, `NF_ACCEPT`. **No packet parsing, no CIDR** (§2.2.4). UID classification and `cidr_mode` still form one PolicyEpoch: `SET_BYPASS` then `SET_UIDS` |
 | TCP holding a `DIRECT` decision | the above plus one SK_STORAGE lookup. The control snapshot is already held from E1 |
 | First SYN of a selected-but-direct TCP flow | the above plus one LPM lookup, one listener lookup, one storage create. Nothing is written afterwards |
 | First SYN of a captured TCP flow | the above plus `bpf_redirect` — zero writes on L2, two bytes on L3 — then on ingress one `change_type`, one control read, one listener lookup and `bpf_sk_assign` |

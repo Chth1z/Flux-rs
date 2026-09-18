@@ -614,12 +614,6 @@ impl Manager {
                 "selected UID count exceeds the ABI limit",
             ));
         }
-        if desired.selected_uids.len() > flux_core::kmod_uapi::UID_SLOT_MAX {
-            return Err(DataplaneError::new(
-                "policy_capacity:kmod_uids",
-                "selected UID count exceeds the LOCAL_OUT ioctl table",
-            ));
-        }
         if desired.bypass_v4.len() > abi::LPM_MAX_ENTRIES as usize
             || desired.bypass_v6.len() > abi::LPM_MAX_ENTRIES as usize
         {
@@ -648,16 +642,17 @@ impl Manager {
 
         let selected: Vec<u32> = next.selected.iter().copied().collect();
         let dropped: Vec<u32> = from.selected.difference(&next.selected).copied().collect();
-        self.kmod
-            .as_ref()
-            .ok_or_else(|| {
-                DataplaneError::new(
-                    "lkm_not_loaded",
-                    "LOCAL_OUT module is not holding /dev/fluxrs",
-                )
-            })?
-            .set_uids(&selected)
-            .map_err(|error| DataplaneError::io("lkm_set_uids", error))?;
+        let kmod = self.kmod.as_ref().ok_or_else(|| {
+            DataplaneError::new(
+                "lkm_not_loaded",
+                "LOCAL_OUT module is not holding /dev/fluxrs",
+            )
+        })?;
+        kmod_set_bypass(kmod, &next)?;
+        if let Err(error) = kmod.set_uids(&selected) {
+            let _ = kmod_set_bypass(kmod, &from);
+            return Err(DataplaneError::io("lkm_set_uids", error));
+        }
         self.status
             .warnings
             .retain(|warning| !warning.starts_with("sock_destroy_"));
@@ -1904,6 +1899,40 @@ fn cidr_mode_value(mode: ListMode) -> u16 {
         ListMode::Blacklist => abi::CidrMode::Blacklist as u16,
         ListMode::Whitelist => abi::CidrMode::Whitelist as u16,
     }
+}
+
+fn kmod_set_bypass(
+    kmod: &crate::kmod::LoadedModule,
+    epoch: &PolicyEpoch,
+) -> Result<(), DataplaneError> {
+    let v4: Vec<flux_core::kmod_uapi::Pfx4> = epoch
+        .bypass_v4
+        .iter()
+        .map(|(cidr, tag)| flux_core::kmod_uapi::Pfx4 {
+            addr: u32::from_ne_bytes(cidr.addr().octets()),
+            prefixlen: cidr.prefix_len(),
+            tag: *tag as u8,
+            pad: [0; 2],
+        })
+        .collect();
+    let v6: Vec<flux_core::kmod_uapi::Pfx6> = epoch
+        .bypass_v6
+        .iter()
+        .map(|(cidr, tag)| flux_core::kmod_uapi::Pfx6 {
+            addr: cidr.addr().octets(),
+            prefixlen: cidr.prefix_len(),
+            tag: *tag as u8,
+            pad: [0; 2],
+        })
+        .collect();
+    let self4: Vec<u32> = epoch
+        .self_v4
+        .iter()
+        .map(|addr| u32::from_ne_bytes(addr.octets()))
+        .collect();
+    let self6: Vec<[u8; 16]> = epoch.self_v6.iter().map(Ipv6Addr::octets).collect();
+    kmod.set_bypass(epoch.cidr_mode as u32, &v4, &v6, &self4, &self6)
+        .map_err(|error| DataplaneError::io("lkm_set_bypass", error))
 }
 
 fn desired_epoch(

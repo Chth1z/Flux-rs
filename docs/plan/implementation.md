@@ -18,7 +18,7 @@
 | rc.2 主题 2：ingress 快路径 | 已落地；5.15.211 Phase 4 加载通过 | `bpf/flux.bpf.c` `flx_in` I1b；ABI 未 bump；见 §0.6.19 |
 | rc.2 主题 3：attach 模块 | 已落地 | `crates/fluxd/src/dataplane/attachment.rs`；MAP_SPECS 生成 C 占位 |
 | 1.0.0-rc.3 | 已命名工作区版本 | 批 0–7 见 `docs/plan/rc3.md`；设备 Phase 4–6 见 §0.6.27 |
-| 1.0.0-rc.4 | 批 0–5 通过；批 6 ZIP 带 `kmod/*.ko`，`check` 写 vermagic | `docs/plan/rc4.md`；§0.6.32–0.6.45。S6 为本机 dst 投递。默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。`dataplane::Manager` 加载 `.ko`；取消勾选拆活 TCP；信封含 GKI 代模块 |
+| 1.0.0-rc.4 | 批 0–6 通过；批 6b 对齐 UID 1024 与 `SET_BYPASS`；批 7 命名未做 | `docs/plan/rc4.md`；§0.6.32–0.6.46。S6 为本机 dst 投递。默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。`dataplane::Manager` 加载 `.ko`；取消勾选拆活 TCP；信封含 GKI 代模块；CIDR/self-addr 经 ioctl 进钩子 |
 | 发布剩余 | **尚未具备正式发布结论** | §20 验收见 §17.0.3；签在 rc.4 之后 |
 | rc.3 主题 | 批 0–7 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady、PolicyEpoch 双 bank、Planner Commands、EngineSpec cwd、CLI 退出码、订阅批次预算、typed map、l3_end 解析、fragment 计数名、freeze 清单、诊断 canary）；批 8 可选、未做 | `docs/plan/rc3.md` |
 

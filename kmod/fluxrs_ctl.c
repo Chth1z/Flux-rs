@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/atomic.h>
+#include <linux/slab.h>
 #include <linux/uaccess.h>
 #include "fluxrs.h"
 
@@ -33,8 +34,9 @@ static long fluxrs_ctl_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct fluxrs_listeners listeners;
-	struct fluxrs_uids uids;
+	struct fluxrs_uids *uids;
 	struct fluxrs_status status;
+	int err;
 
 	(void)file;
 	switch (cmd) {
@@ -45,9 +47,16 @@ static long fluxrs_ctl_ioctl(struct file *file, unsigned int cmd,
 		fluxrs_set_listeners(&listeners);
 		return 0;
 	case FLUXRS_SET_UIDS:
-		if (copy_from_user(&uids, (void __user *)arg, sizeof(uids)))
+		uids = kmalloc(sizeof(*uids), GFP_KERNEL);
+		if (!uids)
+			return -ENOMEM;
+		if (copy_from_user(uids, (void __user *)arg, sizeof(*uids))) {
+			kfree(uids);
 			return -EFAULT;
-		return fluxrs_set_uids(&uids);
+		}
+		err = fluxrs_set_uids(uids);
+		kfree(uids);
+		return err;
 	case FLUXRS_CLEAR_UIDS:
 		fluxrs_clear_uids();
 		return 0;
@@ -56,6 +65,8 @@ static long fluxrs_ctl_ioctl(struct file *file, unsigned int cmd,
 		if (copy_to_user((void __user *)arg, &status, sizeof(status)))
 			return -EFAULT;
 		return 0;
+	case FLUXRS_SET_BYPASS:
+		return fluxrs_set_bypass((void __user *)arg);
 	default:
 		return -ENOTTY;
 	}

@@ -952,4 +952,12 @@ SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。安装前生产为 
 
 **实测（宿主）：** `flux-core::modinfo` 从 ELF `.modinfo` 读 `vermagic=`。DDK `5.15.202-android13-…` 与本机 `5.15.211-Qkernel` 判为同一 GKI 代（警告，不是错误）——与 §0.6.32 `finit_module` 仍成功一致。跨代是 `check` 错误。`lkm_finit` 的 detail 附 vermagic 与 `uname -r`。`package` 在十六项固定 allowlist 之后按名排序追加 `kmod/*.ko`；无文件且未设 `FLUX_KMOD_STUB` 则拒绝打包。CI `verify-package` 设 `FLUX_KMOD_STUB=1` 只为信封可复现，桩模块不能 `finit`。`customize.sh` 抽出 `kmod/*` 且要求至少一份 `fluxrs-android*.ko`。未跑 `verify-package` 全量交叉构建（需 NDK）。未改正在跑的设备 `fluxd`。
 
-**处置：** 批 6 信封与诊断已进树。签名发布必须放入 DDK 编出的 `.ko`，禁止带桩。下一批是工作区命名 `1.0.0-rc.4`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。
+**处置：** 批 6 信封与诊断已进树。签名发布必须放入 DDK 编出的 `.ko`，禁止带桩。用户 CIDR ioctl 与 UID 64 vs 1024 在 §0.6.46 对齐。不实现 TCX。不回退 iptables。
+
+### 0.6.46 rc.4 批 6b：UID 1024 与 `SET_BYPASS`（2026-09-18）
+
+**原说法：** `SET_UIDS` 容量与 ABI `UID_SELECTED_MAX=1024` 锁步。用户 CIDR 与 self-addr 经一次 ioctl 进钩子，语义与 `bypass_hit()` 相同：`RESERVED` / self-addr 永远直连；`POLICY` 跟 `cidr_mode`。未选中路径不解析目的地址。
+
+**实测（宿主）：** `fluxrs_uids` 变为 4100 字节，`SET_UIDS=0x50044602`。UID 表改为排序后二分，避免 1024 项开寻址放不下。`SET_BYPASS` 头 20 字节，后接前缀与本机地址；内核按 prefixlen 分桶二分做最长匹配，RCU 换表。`apply_policy` 先 `SET_BYPASS` 再 `SET_UIDS`，后者失败则把旁路表写回上一 epoch。`policy_capacity:kmod_uids` 不再作为现行 token。钩子仍硬编码 `FIXED_BYPASS_*` 与 ABI listener。未在设备上重编或重装 `.ko`（驻留 fluxd 仍握 `/dev/fluxrs`，不 disable）。Phase 5/6 的 TC 套件仍跳过。
+
+**处置：** 唯一数据面的 UID/CIDR 合同缺口已在树里补上。产品 `.ko` 需 DDK 按本批头文件重编后才带 `SET_BYPASS`。下一批是工作区命名 `1.0.0-rc.4`。不实现 TCX。不回退 iptables。

@@ -103,7 +103,7 @@ fn main() {
     }
 
     println!(
-        "phase6 device test: skipped (unique LOCAL_OUT; origdst is tools/phase0 S6; CIDR/DRAINING ioctl not in kmod yet)"
+        "phase6 device test: skipped (unique LOCAL_OUT; origdst is tools/phase0 S6; CIDR is SET_BYPASS, suite still describes TC/DRAINING SK_STORAGE)"
     );
 }
 

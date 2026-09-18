@@ -10,6 +10,18 @@
 
 #define FLUXRS_IOCTL_MAGIC 'F'
 
+/* Lockstep `FLUX_UID_SELECTED_MAX` / `FLUX_LPM_MAX_ENTRIES` /
+ * `FLUX_SELF_ADDR_MAX_ENTRIES` in bpf/include/flux_abi.h.
+ */
+#define FLUXRS_UID_SLOT_MAX 1024u
+#define FLUXRS_LPM_MAX 65536u
+#define FLUXRS_SELF_MAX 256u
+
+#define FLUXRS_CIDR_BLACKLIST 0u
+#define FLUXRS_CIDR_WHITELIST 1u
+#define FLUXRS_BYPASS_RESERVED 1u
+#define FLUXRS_BYPASS_POLICY 2u
+
 struct fluxrs_listeners {
 	__be32 v4_addr;
 	__be16 v4_port;
@@ -21,7 +33,7 @@ struct fluxrs_listeners {
 
 struct fluxrs_uids {
 	__u32 count;
-	__u32 uids[64];
+	__u32 uids[FLUXRS_UID_SLOT_MAX];
 };
 
 struct fluxrs_status {
@@ -32,11 +44,38 @@ struct fluxrs_status {
 	__u64 miss_listener;
 };
 
+/* Header of FLUXRS_SET_BYPASS. Packed immediately after, in the same
+ * userspace buffer: pfx4[v4_count], pfx6[v6_count], __be32 self4[self4_count],
+ * in6_addr self6[self6_count]. The ioctl size encodes only this header.
+ */
+struct fluxrs_bypass {
+	__u32 cidr_mode;
+	__u32 v4_count;
+	__u32 v6_count;
+	__u32 self4_count;
+	__u32 self6_count;
+};
+
+struct fluxrs_pfx4 {
+	__be32 addr;
+	__u8 prefixlen;
+	__u8 tag;
+	__u8 pad[2];
+};
+
+struct fluxrs_pfx6 {
+	struct in6_addr addr;
+	__u8 prefixlen;
+	__u8 tag;
+	__u8 pad[2];
+};
+
 #define FLUXRS_SET_LISTENERS \
 	_IOW(FLUXRS_IOCTL_MAGIC, 1, struct fluxrs_listeners)
 #define FLUXRS_SET_UIDS _IOW(FLUXRS_IOCTL_MAGIC, 2, struct fluxrs_uids)
 #define FLUXRS_CLEAR_UIDS _IO(FLUXRS_IOCTL_MAGIC, 3)
 #define FLUXRS_GET_STATUS _IOR(FLUXRS_IOCTL_MAGIC, 4, struct fluxrs_status)
+#define FLUXRS_SET_BYPASS _IOW(FLUXRS_IOCTL_MAGIC, 5, struct fluxrs_bypass)
 
 typedef struct sock *(*fluxrs_get_sock_v4_t)(struct net *net, struct sk_buff *skb,
 					     const u8 protocol, const __be32 saddr,
@@ -85,6 +124,10 @@ void fluxrs_set_listeners(const struct fluxrs_listeners *l);
 int fluxrs_set_uids(const struct fluxrs_uids *u);
 void fluxrs_clear_uids(void);
 void fluxrs_get_status(struct fluxrs_status *s);
+
+int fluxrs_set_bypass(void __user *arg);
+bool fluxrs_policy_direct(struct sk_buff *skb, u8 pf);
+void fluxrs_bypass_exit(void);
 
 int fluxrs_ctl_register(void);
 void fluxrs_ctl_unregister(void);

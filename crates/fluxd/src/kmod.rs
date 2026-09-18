@@ -136,6 +136,31 @@ impl LoadedModule {
         ioctl(self._ctl.as_raw_fd(), kmod_uapi::SET_UIDS, &mut body)
     }
 
+    /// Publish `cidr_mode`, bypass prefixes, and exact self-addresses as one epoch.
+    pub fn set_bypass(
+        &self,
+        cidr_mode: u32,
+        v4: &[kmod_uapi::Pfx4],
+        v6: &[kmod_uapi::Pfx6],
+        self4: &[u32],
+        self6: &[[u8; 16]],
+    ) -> io::Result<()> {
+        if v4.len() > kmod_uapi::LPM_MAX || v6.len() > kmod_uapi::LPM_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many prefixes for FLUXRS_SET_BYPASS",
+            ));
+        }
+        if self4.len() > kmod_uapi::SELF_MAX || self6.len() > kmod_uapi::SELF_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many self-addresses for FLUXRS_SET_BYPASS",
+            ));
+        }
+        let mut body = kmod_uapi::encode_bypass(cidr_mode, v4, v6, self4, self6);
+        ioctl_bytes(self._ctl.as_raw_fd(), kmod_uapi::SET_BYPASS, &mut body)
+    }
+
     /// Drop every published UID. Listeners stay until replaced or the fd closes.
     pub fn clear_uids(&self) -> io::Result<()> {
         let fd = self._ctl.as_raw_fd();
@@ -165,6 +190,21 @@ fn ioctl<T>(fd: std::os::fd::RawFd, req: u32, arg: &mut T) -> io::Result<()> {
         // SAFETY: fd is /dev/fluxrs; req is a fluxrs ioctl; arg matches the
         // kernel struct size encoded in req.
         let result = unsafe { libc::ioctl(fd, req as libc::c_ulong, arg as *mut T) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn ioctl_bytes(fd: std::os::fd::RawFd, req: u32, arg: &mut [u8]) -> io::Result<()> {
+    loop {
+        // SAFETY: fd is /dev/fluxrs; req is SET_BYPASS; arg is the packed
+        // header-plus-arrays buffer the kernel copy_from_user reads.
+        let result = unsafe { libc::ioctl(fd, req as libc::c_ulong, arg.as_mut_ptr()) };
         if result == 0 {
             return Ok(());
         }
@@ -303,8 +343,9 @@ mod tests {
         let name = pick_name(&dir, line).unwrap();
         assert_eq!(name, "fluxrs-android13-5.15.ko");
         assert_eq!(DIR_NAME, "kmod");
-        assert_eq!(kmod_uapi::UID_SLOT_MAX, 64);
+        assert_eq!(kmod_uapi::UID_SLOT_MAX, 1024);
         assert_eq!(kmod_uapi::SET_LISTENERS, 0x401C_4601);
+        assert_eq!(kmod_uapi::SET_BYPASS, 0x4014_4605);
         fs::remove_dir_all(&dir).unwrap();
     }
 

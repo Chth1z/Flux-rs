@@ -34,7 +34,7 @@ struct fluxrs_listeners {
 
 struct fluxrs_uids {
 	uint32_t count;
-	uint32_t uids[64];
+	uint32_t uids[1024];
 };
 
 struct fluxrs_status {

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /*
  * NF_INET_LOCAL_OUT classifier. Unselected floor is always:
- * live, skb->sk, sk_fullsock, sk_uid, one HASH probe, NF_ACCEPT.
+ * live, skb->sk, sk_fullsock, sk_uid, binary search of the published
+ * UID table, NF_ACCEPT. No L3 parse, no CIDR.
  *
  * Handoff is a compile-time stage (Makefile FLUXRS_STAGE), not an ioctl:
  *   0  classify only. Accidental insmod cannot steal (live=0 until fd).
@@ -23,6 +24,9 @@
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/sort.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 #include <net/sock.h>
 #include "fluxrs.h"
 
@@ -31,8 +35,6 @@
 #endif
 
 #define FLUXRS_OVERFLOWUID 65534
-#define FLUXRS_UID_CAP 256u
-#define FLUXRS_UID_PROBE 8u
 
 #if FLUXRS_STAGE >= 2
 #include <linux/workqueue.h>
@@ -61,7 +63,8 @@ static atomic64_t selected_seen;
 static atomic64_t stolen;
 static atomic64_t miss_listener;
 
-static u32 uid_tab[FLUXRS_UID_CAP];
+static u32 uid_sorted[FLUXRS_UID_SLOT_MAX];
+static u32 uid_n;
 static struct fluxrs_listeners listeners;
 static bool listeners_set;
 
@@ -76,7 +79,7 @@ void fluxrs_set_live(bool on)
 	if (!on) {
 		listeners_set = false;
 		memset(&listeners, 0, sizeof(listeners));
-		memset(uid_tab, 0, sizeof(uid_tab));
+		WRITE_ONCE(uid_n, 0);
 #if FLUXRS_STAGE >= 2
 		cancel_work_sync(&steal_work);
 		skb_queue_purge(&steal_q);
@@ -92,36 +95,55 @@ void fluxrs_set_listeners(const struct fluxrs_listeners *l)
 
 void fluxrs_clear_uids(void)
 {
-	memset(uid_tab, 0, sizeof(uid_tab));
+	WRITE_ONCE(uid_n, 0);
+}
+
+static int cmp_uid(const void *a, const void *b)
+{
+	u32 va = *(const u32 *)a;
+	u32 vb = *(const u32 *)b;
+
+	if (va < vb)
+		return -1;
+	if (va > vb)
+		return 1;
+	return 0;
 }
 
 int fluxrs_set_uids(const struct fluxrs_uids *u)
 {
+	u32 *tmp;
+	u32 n = 0;
 	u32 i;
 
 	if (u->count > ARRAY_SIZE(u->uids))
 		return -EINVAL;
-	memset(uid_tab, 0, sizeof(uid_tab));
+	tmp = kmalloc_array(FLUXRS_UID_SLOT_MAX, sizeof(*tmp), GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
 	for (i = 0; i < u->count; i++) {
 		u32 uid = u->uids[i];
-		u32 slot = (uid * 0x9e3779b1u) & (FLUXRS_UID_CAP - 1);
-		u32 j;
-		bool placed = false;
 
 		if (uid == 0 || uid == FLUXRS_OVERFLOWUID)
 			continue;
-		for (j = 0; j < FLUXRS_UID_PROBE; j++) {
-			u32 idx = (slot + j) & (FLUXRS_UID_CAP - 1);
-
-			if (uid_tab[idx] == 0 || uid_tab[idx] == uid) {
-				uid_tab[idx] = uid;
-				placed = true;
-				break;
-			}
-		}
-		if (!placed)
-			return -ENOSPC;
+		tmp[n++] = uid;
 	}
+	if (n > 1)
+		sort(tmp, n, sizeof(*tmp), cmp_uid, NULL);
+	if (n > 1) {
+		u32 o = 0;
+
+		for (i = 1; i < n; i++) {
+			if (tmp[i] != tmp[o])
+				tmp[++o] = tmp[i];
+		}
+		n = o + 1;
+	}
+	WRITE_ONCE(uid_n, 0);
+	if (n)
+		memcpy(uid_sorted, tmp, n * sizeof(*tmp));
+	WRITE_ONCE(uid_n, n);
+	kfree(tmp);
 	return 0;
 }
 
@@ -143,32 +165,40 @@ void fluxrs_get_status(struct fluxrs_status *s)
 
 static bool uid_selected(u32 uid)
 {
-	u32 slot = (uid * 0x9e3779b1u) & (FLUXRS_UID_CAP - 1);
-	u32 i;
+	u32 lo = 0;
+	u32 hi;
 
 	if (uid == 0 || uid == FLUXRS_OVERFLOWUID)
 		return false;
-
-	for (i = 0; i < FLUXRS_UID_PROBE; i++) {
-		u32 v = READ_ONCE(uid_tab[(slot + i) & (FLUXRS_UID_CAP - 1)]);
+	hi = READ_ONCE(uid_n);
+	while (lo < hi) {
+		u32 mid = lo + ((hi - lo) >> 1);
+		u32 v = READ_ONCE(uid_sorted[mid]);
 
 		if (v == uid)
 			return true;
-		if (v == 0)
-			return false;
+		if (v < uid)
+			lo = mid + 1;
+		else
+			hi = mid;
 	}
 	return false;
 }
 
 /*
  * Keep in lockstep with crates/flux-core/src/cidr.rs FIXED_BYPASS_* plus
- * the ABI listener hosts. User CIDR / self-addr are still ioctl work.
+ * the ABI listener hosts and the live SET_LISTENERS addresses. User CIDR
+ * and self-addr come from SET_BYPASS (fluxrs_policy_direct).
  */
 static bool fluxrs_reserved_dest(struct sk_buff *skb, u8 pf)
 {
+	struct fluxrs_listeners l = listeners;
+
 	if (pf == NFPROTO_IPV4) {
 		u32 a = ntohl(ip_hdr(skb)->daddr);
 
+		if (l.v4_port && ip_hdr(skb)->daddr == l.v4_addr)
+			return true;
 		if ((a & 0xff000000u) == 0x00000000u)
 			return true;
 		if ((a & 0xff000000u) == 0x0a000000u)
@@ -196,6 +226,8 @@ static bool fluxrs_reserved_dest(struct sk_buff *skb, u8 pf)
 		u32 w2 = ntohl(d->s6_addr32[2]);
 		u32 w3 = ntohl(d->s6_addr32[3]);
 
+		if (l.v6_port && memcmp(d, &l.v6_addr, sizeof(*d)) == 0)
+			return true;
 		if (w0 == 0 && w1 == 0 && w2 == 0 && (w3 == 0 || w3 == 1))
 			return true;
 		if ((w0 & 0xfe000000u) == 0xfc000000u)
@@ -509,6 +541,8 @@ static unsigned int fluxrs_local_out(void *priv, struct sk_buff *skb,
 		return NF_ACCEPT;
 	if (fluxrs_reserved_dest(skb, state->pf))
 		return NF_ACCEPT;
+	if (fluxrs_policy_direct(skb, state->pf))
+		return NF_ACCEPT;
 	atomic64_inc(&selected_seen);
 #if FLUXRS_STAGE < 2
 	return NF_ACCEPT;
@@ -566,6 +600,7 @@ void fluxrs_hook_unregister(void)
 	cancel_work_sync(&steal_work);
 	skb_queue_purge(&steal_q);
 #endif
+	fluxrs_bypass_exit();
 	pr_info("fluxrs: stage=%d selected_seen=%llu stolen=%llu miss=%llu\n",
 		FLUXRS_STAGE,
 		(unsigned long long)atomic64_read(&selected_seen),

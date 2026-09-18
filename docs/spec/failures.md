@@ -29,7 +29,8 @@ Every possible failure point specifies **how it is detected, what action is take
 | Reading or listing the `.ko` fails before the syscall | errno | `Inactive` | `"lkm_io"` |
 | `nf_tproxy_*` unresolved (`steal_ready=0`) | `GET_STATUS` | drop the fd; `Inactive` | `"lkm_tproxy_symbol"` |
 | `/dev/fluxrs` is not held when policy or listeners must be published | `kmod` fd absent | keep `active=0`; do not steal | `"lkm_not_loaded"` |
-| Selected UID count exceeds the LOCAL_OUT ioctl table (64) | count | Reject the hot update; retain the current policy | `"policy_capacity:kmod_uids"` |
+| Selected UID count exceeds `UID_SELECTED_MAX` (1024); the LOCAL_OUT `SET_UIDS` table is the same cap | count | Reject the hot update; retain the current policy | `"policy_capacity:selected"` |
+| Selected UID count exceeds the former 64-slot ioctl table | count | **Superseded.** `UID_SLOT_MAX` is 1024, lockstep with the ABI. Old status lines may still carry this token. | `"policy_capacity:kmod_uids"` (historical) |
 | `all.rp_filter != 0` | Read `/proc/sys/...` | **Superseded (C13).** LOCAL_OUT does not consult `rp_filter`. Startup MUST NOT fail closed on this value. The token remains so old status lines parse. | `"rp_filter_conflict:all=1"` (historical) |
 | A veth with the same name exists but its alias does not match | `RTM_GETLINK` + `IFLA_IFALIAS` | **Superseded as a startup gate (C13).** Unique dataplane does not create `flxrs*`. Leftover owned pairs are deleted in §8.7 step 2; a name match without the predicate is still a conflict if cleanup sees it. | `"veth_conflict:flxrs0 alias mismatch"` |
 | MTU 65535 is rejected | ACK from `RTM_NEWLINK` | **Superseded as a startup gate (C13).** Unique dataplane does not create veth. | `"veth_mtu_rejected"` |
