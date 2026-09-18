@@ -1,0 +1,8 @@
+{
+  "log": { "level": "trace", "timestamp": true },
+  "inbounds": [
+    { "type": "tproxy", "tag": "flux-in-v4", "listen": "198.51.100.1", "listen_port": 61235 },
+    { "type": "tproxy", "tag": "flux-in-v6", "listen": "2001:db8:0:1::2", "listen_port": 61235 }
+  ],
+  "outbounds": [ { "type": "direct", "tag": "direct" } ]
+}

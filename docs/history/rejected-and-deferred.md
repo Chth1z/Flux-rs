@@ -42,6 +42,8 @@
 | 运行期 `settings put global private_dns_mode off` | 见 §1.3.3 边界①。改用 `status` 检测并提示 |
 | 用户态 packet pump（bpf2socks 的 bridge 架构） | `clone/bpf2socks` 的 `bridge_tcp.c` + `bridge_udp.c` 合计 4400+ 行用户态转发，且其 bridge socket 设了 `SO_REUSEPORT`（`bridge.c:95/125/152/189`）——那会让 6.5 之前的 `bpf_sk_assign` 直接返回 `-ESOCKTNOSUPPORT`。我们把 skb 直接 assign 给官方 engine，不引入第二个用户态栈 |
 
+**1.0.0-rc.4 对上表两行的现行处置（C13，2026-09-18）：** 「保留 iptables TPROXY 作为兜底后端」与「多后端 fallback」仍然拒绝。被取代的只是「产品身份就是 eBPF-only」——唯一数据面改为 `NF_INET_LOCAL_OUT` LKM + 内核 `nf_tproxy`，由 `fluxd` 加载；失败则 Direct，不回退 TC+veth，也不写 xtables/fwmark。目标形状见 `plan/rc4.md`。
+
 ---
 
 # 第 21 部分：需要项目所有者确认的事项
@@ -70,6 +72,7 @@
 | C10 | deferred | **仅指开箱即用的代理控制面**，仍推迟。0.9.5 不默认启用 `clash_api`，也不打包任何 UI |
 | C11 | current | 订阅转换由 0.9.5 规范（§28）。所有者 2026-08-30 确认从推迟转入本版范围 |
 | C12 | current | — |
+| C13 | current | 1.0.0-rc.4：唯一数据面为 `LOCAL_OUT` `.ko`；`insmod` 失败则 Direct。见 `plan/rc4.md` |
 
 ## 21.1 确认项：全部已关闭（2026-08-25 定稿）
 
@@ -91,6 +94,7 @@
 | **C10** | 代理控制面 | **后续版本做，0.9.1 不做**（所有者 2026-08-29 确认）。0.9.1 默认配置无 `clash_api`、zashboard 或远程内容；用户可在自有配置中启用回环 + secret 的 `clash_api`（R091-03） |
 | **C11** | 订阅 | **后续版本做，0.9.1 不做**（所有者 2026-08-29 确认）。目标形态是类似 `Flux-original` 的订阅转换（URI 列表 → outbound）；0.9.1 不做订阅、转换或自动替换用户配置，也不为它预建 seam（R091-03、R091-14） |
 | **C12** | 诊断包是否含 `logcat` | **默认不含**，`--with-logcat` 显式开启并警告。理由：`logcat -b all` 含通知内容、Wi-Fi BSSID（可定位）、蜂窝小区、账号名、其它应用自己打的日志，且**无法脱敏**——那是几千个应用产生的无结构文本。Android 自己把 `READ_LOGS` 定为 signature 级权限正是因为这个 |
+| **C13** | rc.4 数据面 | **`NF_INET_LOCAL_OUT` 的 `.ko` 是唯一捕获路径**（所有者 2026-09-18）。按 `sk_uid` 分类，内核 `nf_tproxy` 交给未修改官方 sing-box；删除 veth 与物理口 TC 捕获。`fluxd` 加载模块，控制 fd 关闭后钩子必须 `NF_ACCEPT`。`insmod` 失败则 Direct，不回退 TC+veth。同 RC 做 `SOCK_DESTROY`。不做 INGRESS/dummy、不做 iptables TPROXY、不把 LAN/TCX 塞进这条通路。计划：`plan/rc4.md` |
 
 ### 定稿状态
 
@@ -99,6 +103,8 @@
 - 当时 Phase 0 的**观测半场**已完成（§16.2），Q10 已通过；此后 Phase 1–8 与对应设备验证均已进入仓库，不再使用“Q1–Q9 待做”描述当前状态。
 - 已无任何已知的、能推翻主路线的技术未知项。
 - 清库重建**已执行**，不再需要第二次授权。
+
+C13（2026-09-18）把主路线从 TC+veth 换成 LKM `LOCAL_OUT`。批 1 加载证伪点已在 SM-S9180 关闭（§0.6.32）。批 2 未选中地板未测出明显更差（§0.6.33）。批 3：`nf_tproxy` 运行期解析已通；S2–S4 通过（§0.6.36–0.6.38）；**LOCAL_OUT 内同步投递**（§0.6.34）、**未 scrub 的 workqueue 投递**（§0.6.35）与 **scrub 后无 dst 的 `ip6_input`**（§0.6.39）均证伪。**第二次 `ip_rcv` / dummy 注入不做**（§0.6.40）。S6 在 scrub 后挂 loopback 本机 dst 再投递：官方 TPROXY **UDP origdst 双栈通过**（§0.6.41）；IPv6 TCP 另需把 TX `tcp_skb_cb` 收成 `IP6CB->nhoff`（§0.6.42）。**UDP+TCP origdst 双栈通过。** 默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。ioctl UAPI 已进 flux-core。**批 4：`dataplane::Manager` 已接唯一 LOCAL_OUT 路径**（§0.6.43）：冷启动删 leftover veth，不再建 `flxrs*` / pref 100 / table 20260，也不把 `rp_filter` 当启动门。用户 CIDR / self-addr ioctl 与 UID 64 vs ABI 1024 仍未对齐。不回退 iptables。
 
 仍然成立的约束：Phase 0 断言失败若需要改全局系统语义或放弃某类设备，属**范围变更**，回 GOV-1.2 找所有者。
 

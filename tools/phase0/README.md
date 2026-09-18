@@ -43,6 +43,8 @@ them when the thing under them changes:
 | `btf-inspect.sh` | why libbpf cannot size a map from BTF | libbpf says "can't determine value size" |
 | `wsl-capability.sh` | whether the build host can compile BPF at all | new development machine |
 | `observe.sh` | everything about an unfamiliar device | first thing on any new device |
+| `local-out-floor-run.sh` | rc.4 batch 2 — LOCAL_OUT uid+hash miss vs TC E1 sendto cost | changing `kmod/fluxrs_hook.c` unselected path |
+| `local-out-stage-run.sh` | rc.4 batch 3 — compile-gated `FLUXRS_STAGE`. S2–S4 passed; S5 without dst panicked; S6 UDP+TCP origdst dual-stack on official TPROXY (0.6.36–0.6.42). Default build is stage 6 / NOCFI=1. Do not insmod stage 5. | changing `kmod/fluxrs_hook.c` selected path |
 
 ### How to run one
 

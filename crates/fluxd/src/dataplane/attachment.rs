@@ -1,11 +1,10 @@
-//! Clsact attach, liveness probe, and identity predicate (blueprint §12.5.1).
+//! LOCAL_OUT attachment seam (blueprint §8.7 steps 8-9) plus leftover clsact
+//! cleanup.
 //!
-//! This revision implements only the clsact path. A later 6.6+ TCX path
-//! replaces the internals of this file — `BPF_F_BEFORE`, fall back to
-//! clsact if the kernel rejects the anchor, never append-only TCX — without
-//! a `trait Attach` while only one adapter exists, and without changing the
-//! four BPF programs or the map set. Ownership is still proven from a kernel
-//! dump, never from `attached: Vec` alone.
+//! The unique dataplane returns `Complete` once `fluxrs.ko` is loaded. The
+//! clsact/verify helpers below still exist so a cold start can recognise and
+//! delete leftover `flx_` filters from the previous dataplane. They are not
+//! the capture path.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,10 +22,21 @@ use super::{
 };
 
 impl Manager {
-    /// Starts §8.7 steps 8-9. The caller arms a timerfd for every `Wait` and
+    /// Starts §8.7 steps 8-9. The unique LOCAL_OUT path is Complete as soon as
+    /// the module is loaded. The caller arms a timerfd for every `Wait` and
     /// calls `advance_attachment` when it expires; the reactor never sleeps.
     pub fn begin_attachment(&mut self) -> Result<AttachmentProgress, DataplaneError> {
         if self.test_bypass {
+            self.status.attachment_ready = true;
+            return Ok(AttachmentProgress::Complete);
+        }
+        if self.kmod.is_some() {
+            if !self.status.topology_ready || !self.status.bpf_ready {
+                return Err(DataplaneError::new(
+                    "dataplane_not_ready",
+                    "LOCAL_OUT module must be loaded before activation",
+                ));
+            }
             self.status.attachment_ready = true;
             return Ok(AttachmentProgress::Complete);
         }

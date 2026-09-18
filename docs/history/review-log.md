@@ -825,3 +825,115 @@ D18（per-app DNS 零额外机制）此前只有源码链支撑（§1.3.1 的 `n
 SM-S9180 / `5.15.211-Qkernel-g7a72da9438` / KernelSU 3.3.0。安装前生产为 rc.1、`Active` generation 1。`ksud module install` 走升级路径（customize.sh 未打印 fresh-install 禁用提示）；`config/flux.toml`、`advanced.toml`、`template.json` 的 SHA-256 与安装前一致；模块无 `disable`。重启后 `modules_update/Flux-rs` 被消费，现行 `module.prop` 为 rc.3 / 10000003，daemon 收敛到 `Active` generation 1，engine pid 3315、4/4 sockets verified，接口可 capture。
 
 **处置：** 记为这条开发 ZIP 的 KernelSU 升级证据，不是签名 tag、不是 §20、不是 Magisk/APatch。未跑 Phase 7，未做卸载残留。不实现 TCX。
+
+### 0.6.30 所有者锁定 rc.4 唯一数据面为 LOCAL_OUT `.ko`（2026-09-18）
+
+**原说法：** 产品身份是 eBPF-only；TC egress → 专用 veth → `bpf_sk_assign` 是唯一候选（§21 定稿第 1 条、§19「保留 iptables TPROXY 作为兜底」）。`.ko` 因生命周期与 KMI 被标为比 TCX / `SOCK_DESTROY` 更贵的可选项，不是本版范围。
+
+**实际：** 所有者确认：(1) 「昂贵」指对象不随 fd 消失、KMI 矩阵、开机 `insmod` 变砖面，不是选中路径变慢；(2) 可接受工程量，目标是最短交付；(3) 这是 `1.0.0-rc.4` 要做的内容。当场选择：`NF_INET_LOCAL_OUT` `.ko` + `sk_uid` + 内核 `nf_tproxy` 为**唯一**数据面；失败 Direct；范围是本次讨论里仍有效的优化（`SOCK_DESTROY` 做；INGRESS/dummy/kfunc-from-TC 因删除 veth 而不做；LAN/TCX 仍延期；禁止 iptables 兜底）。
+
+**处置：** C13 记入 §21.0。目标形状与批次在 `plan/rc4.md`。正式 1.0.0 签署改到 rc.4 之后。蓝图 §1–§8 随各批就地改，不在批 0 把现行实现判成违约。不实现 TCX。不写全局 `rp_filter`。
+
+### 0.6.31 rc.4 模块按 GKI 代通用，不按测试机内核树（2026-09-18）
+
+**原说法：** `plan/rc4.md` 批 1 把第一份 `.ko` 对准 SM-S9180 的 `5.15.211-Qkernel` 内核树；GKI 矩阵当成后续包装。
+
+**实际：** 所有者要求与 Re-Kernel 相同：同一内核代通用。Re-Kernel 的匹配是 `uname -r` → `androidN-X.Y`，ZIP 里放 `rekernel-android13-5.15*`，`insmod` 失败则该机不可用（`template/customize.sh:5-32`，`post-fs-data.sh:10-16`）。它能跨机，是因为只使用 GKI 导出的 netfilter 注册函数，并且不偷包。
+
+**处置：** 就地改 `plan/rc4.md` §4.1。源码目录 `kmod/`。批 1 只链接 `nf_register_net_hooks` / `nf_unregister_net_hooks` / `misc_register` / `misc_deregister`。`nf_tproxy_get_sock_*` 不作为链接依赖。加载仍由 `fluxd` 做，不在 `post-fs-data` `insmod`（PHIL-6/7；Re-Kernel 开机 `insmod` 是反例）。本会话 adb 无设备，未做 `finit_module`。
+
+### 0.6.32 rc.4 批 1：GKI 代 `.ko` 在 SM-S9180 上 `finit_module` 成功（2026-09-18）
+
+**原说法：** DDK `android13-5.15` 的 vermagic（`5.15.202-android13-5.15.202_r00-dirty`）对不上本机 `uname`（`5.15.211-Qkernel-g7a72da9438`）和厂商模块（`5.15.189-android13-8-…-abS9180ZHU7FZDP`），`finit_module` 可能直接 `EINVAL`；未改 vermagic 字符串当产品路径。
+
+**实测：** 对着 DDK kdir（`Module.symvers` + UTS `5.15.202-android13-5.15.202_r00-dirty`）和 clang-r450784e（与 kdir `CONFIG_CC_VERSION_TEXT` 同一把）编出 `fluxrs.ko`。未定义符号只有 GKI 侧 `nf_register_net_hooks` / `nf_unregister_net_hooks` / `misc_register` / `misc_deregister` 以及 `init_net` / `_printk` / `noop_llseek` / CFI·hwcap；没有 `nf_tproxy_*`。SM-S9180 / KernelSU 3.3.0 / Enforcing。`finit_module`（aarch64 NR 273）errno 0，dmesg `fluxrs: loaded (bypass only)`，`/dev/fluxrs` 为 `crw-------` minor 102，`lsmod` 见 `fluxrs`，模块 taint `O`。随后 `ksud insmod` 得到 EEXIST（已在），并写 `without vermagic mismatch`。未打开控制节点时 ping，卸载打印 `seen=0`；持有 fd 时 ping，卸载打印 `seen=32`。第二次 open 得 EBUSY；`kill -9` 持有者后可再打开。测完 `delete_module`，未改正在跑的 TC+veth 数据面，未把 loader 接到 `dataplane::Manager`。未改 vermagic 字节。
+
+**处置：** 批 1 的加载证伪点在本机关闭。剩余证伪点是未选中地板（批 2）和运行期解析 `nf_tproxy`（批 3）。`.ko` 不进 git。不实现 TCX。
+
+### 0.6.33 rc.4 批 2：LOCAL_OUT 未选中地板未明显差于现行路径（2026-09-18）
+
+**原说法：** 未选中预算改成 LOCAL_OUT 上一次 `sk_uid` + 一次哈希未命中 + `NF_ACCEPT`。必须在本机对照现行 TC E1 实测；明显更差则停。
+
+**实测：** 钩子补上 `sk_fullsock` + `sk->sk_uid` + 空表哈希未命中；未定义符号相对批 1 没有增加。SM-S9180、uid 0、对默认路由 via 的 UDP `sendto` 50000×5。`off` 中位 24825 ns/pkt，`ko` 中位 23594 ns/pkt，跑间波动约 1.4 µs，分不出钩子本身。`tc` 臂无效：`fluxd enable` 没有回到 Active。Disable 停掉了当时唯一还能跑的 generation 1 引擎（pid 3315）；盘上政策已是 `flux_config_invalid`（`nodes.sources` 第 3 条 unsupported vless encryption），冷启动填不出引擎配置。事后 daemon 已用 KernelSU 环境拉起，状态 Inactive，无 `flx_`、无 `flxrs*`。数字见 `tools/phase0/results/2026-09-18-sm-s9180-local-out-floor.txt`。未写百分比。
+
+**处置：** 不因地板停 rc.4。批 3 继续做命中路径。测量脚本在已有 `last_error` 时拒绝再 `disable`。不实现 TCX。
+
+### 0.6.34 rc.4 批 3：LOCAL_OUT 同步投递证伪失败，偷包路径撤回（2026-09-18）
+
+**原说法：** 运行期 `__symbol_get` 解析 `nf_tproxy_*`（不写链接依赖），在 `LOCAL_OUT` 命中后 `assign_sock` 并把原包交给官方 TPROXY listener。
+
+**实测：** `__symbol_get` 在 SM-S9180 上成功，dmesg `nf_tproxy symbols resolved`，`.ko` 的 UNDEF 仍无 `nf_tproxy_*`。随后在钩子里对命中包同步调用 `ip_local_deliver` / 再改 `netif_rx(lo)`：用户态 `sendto` 挂死，`open /dev/fluxrs` 也曾挂死；所有者报告开机进系统后卡死并重启。仓库内**没有** `service.sh`/`post-fs-data` `insmod`，`fluxd` 的 `kmod` 也未接到 `dataplane::Manager`，故重启后模块不应自动装上——若仍循环重启，先取 `last_kmsg` / `pstore` 核对是否另有原因。
+
+**处置：** 立即撤回钩子内同步投递；`kmod/fluxrs_hook.c` 回到只 `NF_ACCEPT`（可计数、可 ioctl 配 UID/listener，但 `steal_ready` 恒 0）。批 3 在设计出**离开 LOCAL_OUT 调用栈**的投递（例如 workqueue，并写清与 socket/BH 锁序）并在本机证伪前，禁止再装带偷包的 `.ko`。符号解析代码可留作批 3 续作。不实现 TCX。不回退 iptables。
+
+### 0.6.35 rc.4 批 3：未 scrub 的延迟投递仍在 worker 崩；捕获与交付拆开（2026-09-18）
+
+**原说法：** 离开 `LOCAL_OUT` 调用栈之后，workqueue 里可以直接 `nf_tproxy` + `ip_local_deliver`。
+
+**实测：** 带完整偷包的 `.ko` 经 `ksud insmod` 装上（`nf_tproxy symbols resolved`，`loaded (deferred steal)`）。自写 NDK prove 在 `/data/local/tmp` 对 `IP_TRANSPARENT` 得 `EPERM`（官方 `sing-box` 同机可绑 `198.51.100.1`，故不是内核关了 TRANSPARENT）。随后 `nsenter -m -n` 进正在跑的 `sing-box` 的 mount/net 再跑 prove——不该做。`/proc/last_kmsg`：`Workqueue: events fluxrs_steal_workfn.cfi_jt [fluxrs]` → `fluxrs_steal_v4`；任务表见 `fluxrs-steal-pr` uid 0 与 2000。手机硬重启。重启后模块未自动装上，SELinux Enforcing。线程对了，skb 仍是 TX 形态；CFI 间接调 `__symbol_get` 来的 `nf_tproxy_*` 同列嫌疑。
+
+**处置：** C13 的捕获点（`LOCAL_OUT` + `sk_uid`）保持。默认 `FLUXRS_STAGE=0` 只 `NF_ACCEPT`。交付改编译期台阶 S2–S5：先 `STOLEN`+`kfree`，再 lookup+put，再 `skb_scrub_packet`+assign，最后才 `ip_local_deliver`。禁止再把 deliver 放进 `LOCAL_OUT` 钩子；禁止 `nsenter` 进 Magisk/KSU daemon 命名空间；禁止把 NDK `setsockopt(IP_TRANSPARENT)` 当合同探针（listener 用官方 sing-box）。未接入 `dataplane::Manager`。不实现 TCX。不回退 iptables。
+
+### 0.6.36 rc.4 批 3 S2：`NF_STOLEN` + worker `kfree` 后 sendto 立即返回（2026-09-18）
+
+**原说法：** 钩子里 orphan + 入队 + `NF_STOLEN`，worker 只丢包，发送路径应能完成。
+
+**实测：** `FLUXRS_STAGE=2`，UNDEF 无 `nf_tproxy_*` / `ip_local_deliver`。`ksud insmod`。`/dev/fluxrs` 需 `u:r:ksu:s0`（`runcon`；`u:r:shell:s0` 对 0600 节点 `EACCES`）。uid 2000 对 `203.0.113.1:9` 的 UDP `sendto` 立即返回；`seen=1 stolen=1`。uid 0 第一次被空哈希槽误判为命中（`uid_selected(0)` 把 0 当空槽），补上 uid 0 / overflowuid 拒绝后 `seen=1 stolen=1`，uid 0 不再计数。`rmmod` 干净。机器未挂。
+
+**处置：** S2 关闭。S3 只做 lookup+put+`kfree`，不 assign、不 deliver。
+
+### 0.6.37 rc.4 批 3 S3：无 `__nocfi` 的 lookup 重启；`__nocfi` 后 lookup 能活（2026-09-18）
+
+**原说法：** workqueue 里 `rcu_read_lock` + `__symbol_get` 得到的 `nf_tproxy_get_sock_*` 再 `sock_gen_put`/`kfree`，不 assign、不 deliver，足以证明 CFI 间接调用能否活。
+
+**实测：** `FLUXRS_STAGE=3` `FLUXRS_NOCFI=0`：`ksud insmod` 后一次 uid 2000 `sendto`，adb 约 8s 后空输出退出 255，设备消失并重启；重启后模块未自动装上。`FLUXRS_STAGE=3` `FLUXRS_NOCFI=1`（`FLUXRS_CFI_WRAP` 套在 lookup / `steal_one` / `steal_workfn`）：同一命令路径 `sendto` 立即返回；`steal_ready=1 seen=1 stolen=0 miss=1`（当时没有 TPROXY listener，lookup 跑完未命中）；uid 0 不计数。`rmmod` 干净。UNDEF 仍无 `nf_tproxy_*` 链接名。
+
+**处置：** S3 关闭。阶段 ≥3 的证伪构建使用 `FLUXRS_NOCFI=1`。树上默认仍是 `FLUXRS_STAGE=0`。S4 才 `skb_scrub_packet` + `assign_sock`，仍禁止 `ip_local_deliver`。未接入 `dataplane::Manager`。
+
+### 0.6.38 rc.4 批 3 S4：`skb_scrub_packet` + assign 后 kfree，不投递（2026-09-18）
+
+**原说法：** lookup 命中之后把 TX skb 做成 RX（`skb_linearize` / `skb_scrub_packet(skb,false)` / checksum）再 `nf_tproxy_assign_sock`，然后 `kfree`，仍不调用 `ip_local_deliver`。
+
+**实测：** `FLUXRS_STAGE=4` `FLUXRS_NOCFI=1`。UNDEF 有 `skb_scrub_packet`、`skb_checksum_help`、`sock_edemux`，无 `nf_tproxy_*` / `ip_local_deliver` / `ip6_input`。官方 `sing-box` 无凭据 TPROXY 绑 `198.51.100.1:61235` 与 `2001:db8:0:1::2:61235`（与正在跑的 61234 错开）。uid 2000 UDP `sendto` 立即返回；`seen=1 stolen=1 miss=0`。uid 0 不计数。IPv6 `sendto` 未发出（无路由，`SEND6 rc=-1`）。`rmmod` 干净。机器未挂。
+
+**处置：** S4 关闭。S5 才允许 worker 调 `ip_local_deliver` / `ip6_input`。未接入 `dataplane::Manager`。
+
+### 0.6.39 rc.4 批 3 S5：scrub 之后直接 `ip6_input` 仍崩；交付停在 TX→RX 之后（2026-09-18）
+
+**原说法：** S2–S4 通过后，worker 在 assign 之后调 `ip_local_deliver` / `ip6_input`，官方 TPROXY 应看到 origdst 双栈。
+
+**实测：** `FLUXRS_STAGE=5` `FLUXRS_NOCFI=1`。UNDEF 有 `ip_local_deliver`、`ip6_input`、`skb_scrub_packet`，无 `nf_tproxy_*` 链接名。官方 `sing-box` TPROXY 已在 61235 监听。`ksud insmod` 后 prove（uid 2000 `sendto`，含一次 IPv6）约 8s 空输出退出 255，设备重启。`/proc/last_kmsg`：`Unable to handle kernel NULL pointer dereference at virtual address 00000000000000b8`；`pc ip6_protocol_deliver_rcu+0x50`，`lr ip6_input+0x54`；`Workqueue: events fluxrs_steal_workfn.cfi_jt [fluxrs]` → `fluxrs_steal_one`；`Kernel panic - not syncing: Oops: Fatal exception in interrupt`（worker 里 `local_bh_disable`）。任务表见 `fluxrs-stage-pr` uid 0/2000。`skb_scrub_packet` 会 `skb_dst_drop`；`ip6_input` 随后从空 dst 取 `idev`。重启后模块未自动装上。IPv4 投递是否单独能活未再测——计划要求 S5 不过就停。
+
+**处置：** S5 证伪。默认树仍 `FLUXRS_STAGE=0`。禁止再把 `ip_local_deliver`/`ip6_input`/`netif_rx` 当作下一次「换个参数再试」。是否允许自有 dummy 上第二次 `ip_rcv` 升为 **GOV-1.2**，不在当场发明第三条热路径。未接入 `dataplane::Manager`。不实现 TCX。不回退 iptables。
+
+### 0.6.40 rc.4：第二次 `ip_rcv` 不做；补本地 dst，不换通路（2026-09-18）
+
+**原说法：** S5 不过则把「自有 dummy 上第二次 `ip_rcv`」做成 GOV-1.2 选项。
+
+**判定：** 所有者把通路选择交给实现。最优雅且最短的仍是 C13：`LOCAL_OUT` 分类 + 内核 `nf_tproxy` + **一次**本机投递。S5 证伪的是「`skb_scrub_packet` 丢掉 dst 之后直接 `ip6_input`」（`ip6_protocol_deliver_rcu` 要 `ip6_dst_idev`），不是「必须再进一次 `ip_rcv`」。dummy 的 TX 是黑洞（§8.2）；要靠它回送就得 `netif_rx`/`INGRESS`，把 `rp_filter` / martian / 专用 `iif` 整笔买回来，比 C13 更长也更脏。`lo` 当回送仍拒绝（§19：`skb_dst_force` + `iif lo` 会命中全部本机流量）。
+
+**处置：** 不注入 dummy，不回退 veth，不写 iptables/fwmark。S6 在 scrub 之后给 skb 挂上 **loopback 的本机 dst**（只借 `idev`，不 `netif_rx(lo)`、不装 `iif lo` 规则），再 `ip_local_deliver` / `ip6_input`。默认仍 `FLUXRS_STAGE=0`。未接入 `dataplane::Manager`。
+
+### 0.6.41 rc.4 批 3 S6：官方 TPROXY 双栈 origdst 通过（2026-09-18）
+
+**原说法：** scrub 之后挂上 loopback 本机 dst，再 `ip_local_deliver` / `ip6_input`，官方未修改 sing-box TPROXY 应看到原目的。
+
+**实测：** `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。UNDEF 有 `ip_route_output_flow`、`ip6_route_output_flags`、`dst_release`、`ip_local_deliver`、`ip6_input`，无 `nf_tproxy_*` 链接名。`ksud insmod` 成功（这些路由符号本机有）。uid 2000 UDP：IPv4 `sendto` 立即返回，`stolen` 增加；官方 `sing-box` 日志 `inbound/tproxy[flux-in-v4]: inbound packet connection to 203.0.113.1:9`。随后 IPv6 `sendto` 到 `2001:db8::1:9` 同样立即返回；日志 `inbound/tproxy[flux-in-v6]: inbound packet connection to [2001:db8::1]:9`。uid 0 不计数。`rmmod` 干净。临时 v6 源地址与 `wlan0` 表路由已删。机器未挂。未测 TCP。
+
+**处置：** UDP 原头双栈手交关闭。捕获点仍是 `LOCAL_OUT` + `sk_uid`。交付是 scrub + 本机 dst + `nf_tproxy` assign + `LOCAL_IN` 入口，没有第二次 `ip_rcv`、没有 dummy 注入、没有 `iif lo` 规则。树上默认仍 `FLUXRS_STAGE=0`。仍不接入 `dataplane::Manager`。不实现 TCX。不回退 iptables。
+
+### 0.6.42 rc.4 批 3：TCP origdst 双栈 + kmod UAPI（2026-09-18）
+
+**原说法：** S6 的 UDP 原头已通，同一条 scrub + 本机 dst + `nf_tproxy` assign + `ip_local_deliver`/`ip6_input` 也应把 TCP SYN 交给官方 TPROXY，且 `fluxd` 应能用与内核头相同的 ioctl 编码写 listener/UID。
+
+**实测：** 官方未修改 sing-box TPROXY 仍绑 `198.51.100.1:61235` 与 `[2001:db8:0:1::2]:61235`。uid 2000：IPv4 UDP `inbound packet connection to 203.0.113.1:9`；IPv4 TCP `inbound connection to 203.0.113.1:9`。IPv6 UDP 同 §0.6.41。第一次 IPv6 TCP：`stolen` 加 1、`miss=0`，listener **没有** `inbound connection to [2001:db8::1]:9`——TX TCP 把 `skb->cb` 当 `tcp_skb_cb`，`ip6_input_finish` 读 `IP6CB(skb)->nhoff` 才能派发到 `tcp_v6_rcv`；UDP IPv6 的 nhoff 已由 `ip6_xmit` 写好，IPv4 TCP 走 `ip_hdr->protocol`，所以前两路能过、IPv6 TCP 不能。补上 `memset(IP6CB)` + `nhoff = offsetof(ipv6hdr, nexthdr)`（仍不进 `ip6_rcv`）后再测：IPv6 TCP `inbound connection to [2001:db8::1]:9`，`stolen` 增量与 IPv4 TCP 同形。uid 0 不计数。`rmmod` 干净。机器未挂。`flux-core::kmod_uapi` 的 ioctl 号与 28/260/32 布局对上 `kmod/fluxrs.h`；`fluxd::kmod::LoadedModule` 已有 `set_listeners` / `set_uids` / `clear_uids` / `status`。Makefile 与 WSL 构建脚本默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`；`live=0` 直到打开 `/dev/fluxrs`。未接入 `dataplane::Manager`。
+
+**处置：** TCP/UDP 原头双栈手交在 SM-S9180 关闭。产品 `.ko` 默认即 S6。ioctl 编码进 flux-core，加载器能说话，数据面仍不切 `Manager`（批 4 拆 veth）。ioctl 表 64 UID，ABI `UID_SELECTED_MAX=1024`，接线时再对齐。不实现 TCX。不回退 iptables。
+
+### 0.6.43 rc.4 批 4：唯一数据面接到 `dataplane::Manager`（2026-09-18）
+
+**原说法：** 拆除 veth、物理口 TC、RPDB 100 / table 20260、`rp_filter` 启动门。`fluxd` 加载 `.ko`，ioctl 写 UID/listener；失败 Direct，不回退 TC+veth。
+
+**实测（宿主）：** `Manager` 冷启动仍按所有权谓词删 leftover `flxrs*` / pref 100 / table 20260，但 `converge(true)` 只 `finit_module` + 打开 `/dev/fluxrs`。`steal_ready=0` → `lkm_tproxy_symbol` 并放开 fd。`apply_policy` 只 `SET_UIDS`（超过 64 → `policy_capacity:kmod_uids`）。`prepare_generation` `SET_LISTENERS`。`begin_attachment` 在已加载模块时直接 Complete。`publish_inactive` `CLEAR_UIDS`，fd 仍握着。钩子对固定旁路前缀与 ABI listener 主机 `NF_ACCEPT`（与 `FIXED_BYPASS_*` 锁步；用户 CIDR / self-addr 尚未 ioctl）。Phase 3 断言无 `flxrs*`；Phase 5/6 的 TC/L2/RAWIP 套件改为跳过（CIDR/DRAINING 不在 kmod）。蓝图 §8.7/§8.8 与 `failures.md` `lkm_*` 已改。未在仍握着 `/dev/fluxrs` 的运行中 `fluxd` 上重跑设备 Phase 3（不 disable、不 nsenter、不 `setenforce 0`）。
+
+**处置：** 批 4 代码路径已切到唯一 LOCAL_OUT。双数据面禁止。下一批是 `SOCK_DESTROY`。用户 CIDR ioctl 与 UID 64 vs 1024 仍未对齐。不实现 TCX。不回退 iptables。

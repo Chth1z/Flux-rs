@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -154,6 +155,8 @@ pub struct Manager {
     /// with a unicast default route. Subscription retry consumes this event-
     /// driven fact; it is not a periodic probe (blueprint §29.4).
     default_route_ready: bool,
+    kmod_dir: PathBuf,
+    kmod: Option<crate::kmod::LoadedModule>,
     status: DataplaneStatus,
 }
 
@@ -242,8 +245,16 @@ impl Manager {
             address_seen_v6: BTreeMap::new(),
             address_tick: 0,
             default_route_ready: false,
+            kmod_dir: default_kmod_dir(),
+            kmod: None,
             status: DataplaneStatus::default(),
         })
+    }
+
+    /// Directory that holds `fluxrs-androidN-X.Y*.ko`. Reactor points this at
+    /// the manager module so test layout overrides apply.
+    pub fn set_kmod_dir(&mut self, dir: PathBuf) {
+        self.kmod_dir = dir;
     }
 
     pub fn event_fd(&self) -> RawFd {
@@ -297,6 +308,16 @@ impl Manager {
     }
 
     pub fn counters(&self) -> Result<Counters, DataplaneError> {
+        if let Some(kmod) = self.kmod.as_ref() {
+            let status = kmod
+                .status()
+                .map_err(|error| DataplaneError::io("lkm_status", error))?;
+            return Ok(Counters {
+                egress_listener_miss: status.miss_listener,
+                in_assign_tcp: status.stolen,
+                ..Counters::default()
+            });
+        }
         let Some(runtime) = self.runtime.as_ref() else {
             return Ok(Counters::default());
         };
@@ -339,6 +360,8 @@ impl Manager {
     /// was. This is not a production stop path: normal stop intentionally
     /// retains owned kernel objects until the next cold start (§8.8).
     pub fn cleanup_for_test(&mut self) -> Result<(), String> {
+        self.drop_kmod();
+        let _ = crate::kmod::unload();
         self.cleanup_owned().map_err(|error| error.to_string())
     }
 
@@ -436,8 +459,9 @@ impl Manager {
         self.converge_inner(enabled, None);
     }
 
-    /// Reconciles §8.7 steps 2-5. `enabled=false` still performs the one
-    /// cold-start stale-object cleanup, but creates and loads nothing.
+    /// Reconciles §8.7 steps 2-5: leftover veth cleanup, then `fluxrs.ko`.
+    /// `enabled=false` still performs the one cold-start stale-object cleanup,
+    /// but loads nothing.
     pub fn converge_with_bpf(&mut self, enabled: bool, object: &[u8]) {
         self.converge_inner(enabled, Some(object));
     }
@@ -473,6 +497,7 @@ impl Manager {
         }
 
         if !enabled {
+            self.drop_kmod();
             if let Err(error) = self.publish_inactive() {
                 next.error = Some(error);
                 self.status = next;
@@ -483,51 +508,64 @@ impl Manager {
             return;
         }
 
-        if let Err(error) = validate_rp_filter(&next.sysctl) {
+        if let Err(error) = self.ensure_kmod() {
             next.error = Some(error);
             self.status = next;
             return;
         }
 
-        let topology = self.ensure_topology();
-        next.active = self.status.active;
-        if let Err(error) = topology {
-            next.error = Some(error);
-            self.status = next;
-            return;
-        }
-
-        if let Some(object) = object {
-            if let Err(error) = self.ensure_inactive_runtime(object) {
-                next.error = Some(error);
-                self.status = next;
-                return;
-            }
-            next.bpf_ready = true;
-        }
-
-        match self.admit_interfaces() {
-            Ok(ifaces) => {
-                next.topology_ready = true;
-                next.ifaces = ifaces;
-                next.sysctl = read_status_sysctls();
-                if object.is_none() {
-                    next.warnings.push(
-                        "phase-3 network seam is ready; no BPF object was requested by this test"
-                            .to_string(),
-                    );
-                } else if !next.active {
-                    next.warnings.push(
-                        "BPF runtime is loaded with a frozen active=0 snapshot; capture waits for engine readiness"
-                            .to_string(),
-                    );
-                }
-            }
-            Err(error) => next.error = Some(error),
+        next.topology_ready = true;
+        next.bpf_ready = true;
+        next.attachment_ready = self.kmod.is_some();
+        next.sysctl = read_status_sysctls();
+        if object.is_none() {
+            next.warnings.push(
+                "phase-3 network seam is the LOCAL_OUT module; no BPF object was requested"
+                    .to_string(),
+            );
+        } else if !next.active {
+            next.warnings.push(
+                "LOCAL_OUT module is loaded with steal idle until the engine is ready".to_string(),
+            );
         }
         self.status = next;
     }
 
+    fn drop_kmod(&mut self) {
+        self.kmod = None;
+        self.status.attachment_ready = false;
+        self.status.bpf_ready = false;
+        self.status.topology_ready = false;
+    }
+
+    fn ensure_kmod(&mut self) -> Result<(), DataplaneError> {
+        if self.kmod.is_none() {
+            let release = crate::kmod::kernel_release()
+                .map_err(|error| DataplaneError::io("uname", error))?;
+            let loaded =
+                crate::kmod::load_from_dir(&self.kmod_dir, &release).map_err(kmod_load_error)?;
+            self.kmod = Some(loaded);
+        }
+        let status = self
+            .kmod
+            .as_ref()
+            .expect("just loaded")
+            .status()
+            .map_err(|error| DataplaneError::io("lkm_status", error))?;
+        if status.steal_ready == 0 {
+            self.drop_kmod();
+            return Err(DataplaneError::new(
+                "lkm_tproxy_symbol",
+                "fluxrs loaded but nf_tproxy symbols were not resolved",
+            ));
+        }
+        if self.last_control.is_none() {
+            self.last_control = Some(inactive_control(0, 0, 1, 0, 0)?);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     fn ensure_inactive_runtime(&mut self, object: &[u8]) -> Result<(), DataplaneError> {
         let snapshot = self
             .route
@@ -576,6 +614,12 @@ impl Manager {
                 "selected UID count exceeds the ABI limit",
             ));
         }
+        if desired.selected_uids.len() > flux_core::kmod_uapi::UID_SLOT_MAX {
+            return Err(DataplaneError::new(
+                "policy_capacity:kmod_uids",
+                "selected UID count exceeds the LOCAL_OUT ioctl table",
+            ));
+        }
         if desired.bypass_v4.len() > abi::LPM_MAX_ENTRIES as usize
             || desired.bypass_v6.len() > abi::LPM_MAX_ENTRIES as usize
         {
@@ -592,11 +636,6 @@ impl Manager {
         let (desired_self_v4, desired_self_v6, truncated) =
             self.desired_self_addresses(&snapshot.addresses)?;
 
-        let mut last = self.last_control.ok_or_else(|| {
-            DataplaneError::new("control_missing", "inactive generation was not published")
-        })?;
-        let live_bank = last.policy_bank & 1;
-        let inactive_bank = abi::inactive_policy_bank(live_bank);
         let from = self.live_epoch();
         let wanted = desired_epoch(desired, &desired_self_v4, &desired_self_v6);
         let next = policy_epoch::committed(&from, &wanted);
@@ -607,18 +646,25 @@ impl Manager {
             ));
         }
 
-        self.write_policy_bank(inactive_bank, &next)?;
+        let selected: Vec<u32> = next.selected.iter().copied().collect();
+        self.kmod
+            .as_ref()
+            .ok_or_else(|| {
+                DataplaneError::new(
+                    "lkm_not_loaded",
+                    "LOCAL_OUT module is not holding /dev/fluxrs",
+                )
+            })?
+            .set_uids(&selected)
+            .map_err(|error| DataplaneError::io("lkm_set_uids", error))?;
 
-        last.policy_bank = inactive_bank;
-        last.cidr_mode = cidr_mode_value(desired.cidr_mode);
-        last.selected_count = next.selected.len() as u32;
-        last.draining_count = next.draining.len() as u32;
-        last.bypass_v4_count = next.bypass_v4.len() as u32;
-        last.bypass_v6_count = next.bypass_v6.len() as u32;
-        self.maps_mut()?
-            .publish_control(&last)
-            .map_err(|error| DataplaneError::map_op("control_publish", error))?;
-        self.last_control = Some(last);
+        if let Some(last) = self.last_control.as_mut() {
+            last.selected_count = next.selected.len() as u32;
+            last.draining_count = next.draining.len() as u32;
+            last.bypass_v4_count = next.bypass_v4.len() as u32;
+            last.bypass_v6_count = next.bypass_v6.len() as u32;
+            last.cidr_mode = cidr_mode_value(desired.cidr_mode);
+        }
 
         self.uid_modes = uid_modes_from_epoch(&next);
         self.bypass_v4.clone_from(&desired.bypass_v4);
@@ -670,6 +716,7 @@ impl Manager {
         epoch
     }
 
+    #[allow(dead_code)]
     fn write_policy_bank(&mut self, bank: u8, epoch: &PolicyEpoch) -> Result<(), DataplaneError> {
         let maps = self.maps_mut()?;
         for uid in &epoch.selected {
@@ -771,7 +818,7 @@ impl Manager {
     }
 
     pub fn clear_fault_latch(&self) -> Result<(), DataplaneError> {
-        if self.test_bypass {
+        if self.test_bypass || self.runtime.is_none() {
             return Ok(());
         }
         self.maps()?
@@ -780,7 +827,7 @@ impl Manager {
     }
 
     pub fn delete_fault_latch(&self, key: &FaultKey) -> Result<(), DataplaneError> {
-        if self.test_bypass {
+        if self.test_bypass || self.runtime.is_none() {
             return Ok(());
         }
         self.maps()?
@@ -788,22 +835,16 @@ impl Manager {
             .map_err(|error| DataplaneError::map_op("fault_latch_delete", error))
     }
 
-    /// The sole Phase 6 commit point. TC ingress and every admitted egress
-    /// entry must already be installed before this pointer swap.
+    /// The sole Phase 6 commit point. The LOCAL_OUT module must already hold
+    /// `/dev/fluxrs` with `steal_ready` before userspace `active=1`.
     pub fn publish_active(&mut self) -> Result<(), DataplaneError> {
         if self.test_bypass {
             return Ok(());
         }
-        if !self.status.attachment_ready
-            || !self
-                .status
-                .ifaces
-                .iter()
-                .any(|iface| iface.status == "active")
-        {
+        if !self.status.attachment_ready {
             return Err(DataplaneError::new(
                 "dataplane_not_ready",
-                "no positively attached capture interface is ready for activation",
+                "LOCAL_OUT module is not ready for activation",
             ));
         }
         let mut control = self.last_control.ok_or_else(|| {
@@ -815,9 +856,6 @@ impl Manager {
         control.draining_count = counts.draining;
         control.bypass_v4_count = counts.bypass_v4;
         control.bypass_v6_count = counts.bypass_v6;
-        self.maps_mut()?
-            .publish_control(&control)
-            .map_err(|error| DataplaneError::map_op("control_publish", error))?;
         self.last_control = Some(control);
         self.status.active = true;
         Ok(())
@@ -833,16 +871,11 @@ impl Manager {
         };
         if control.active != 0 {
             control.active = 0;
-            self.maps_mut()?
-                .publish_inactive_control(&control)
-                .map_err(|error| {
-                    if error.to_string().starts_with("inactive_publish_failed") {
-                        DataplaneError::new("inactive_publish_failed", error.to_string())
-                    } else {
-                        DataplaneError::map_op("control_publish", error)
-                    }
-                })?;
             self.last_control = Some(control);
+        }
+        if let Some(kmod) = self.kmod.as_ref() {
+            kmod.clear_uids()
+                .map_err(|error| DataplaneError::io("lkm_clear_uids", error))?;
         }
         self.status.active = false;
         Ok(())
@@ -860,10 +893,12 @@ impl Manager {
         })
     }
 
+    #[allow(dead_code)]
     fn maps(&self) -> Result<&crate::bpf::MapSet, DataplaneError> {
         Ok(self.runtime_ref()?.maps())
     }
 
+    #[allow(dead_code)]
     fn maps_mut(&mut self) -> Result<&mut crate::bpf::MapSet, DataplaneError> {
         Ok(self.runtime_mut()?.maps_mut())
     }
@@ -966,16 +1001,7 @@ impl Manager {
         if self.test_bypass {
             return Ok(());
         }
-        let snapshot = self
-            .route
-            .snapshot()
-            .map_err(|error| DataplaneError::io("rtnetlink_dump", error))?;
-        let host = link_named(&snapshot, HOST_NAME)
-            .ok_or_else(|| DataplaneError::new("veth_missing:flxrs0", "owned host veth absent"))?;
-        let peer = link_named(&snapshot, PEER_NAME)
-            .ok_or_else(|| DataplaneError::new("veth_missing:flxrs1", "owned peer veth absent"))?;
-        let mut control =
-            inactive_control(host.ifindex, peer.ifindex, generation, port_v4, port_v6)?;
+        let mut control = inactive_control(0, 0, generation, port_v4, port_v6)?;
         control.cidr_mode = cidr_mode_value(self.cidr_mode);
         if let Some(last) = self.last_control {
             control.policy_bank = last.policy_bank & 1;
@@ -985,16 +1011,23 @@ impl Manager {
         control.draining_count = counts.draining;
         control.bypass_v4_count = counts.bypass_v4;
         control.bypass_v6_count = counts.bypass_v6;
-        let runtime = self.runtime.as_mut().ok_or_else(|| {
-            DataplaneError::new("bpf_runtime_missing", "Phase 6 runtime has not been loaded")
-        })?;
-        if self.last_control != Some(control) {
-            runtime
-                .maps_mut()
-                .publish_control(&control)
-                .map_err(|error| DataplaneError::map_op("control_publish", error))?;
-            self.last_control = Some(control);
-        }
+        let listen_v4 = abi::LISTEN_V4_STR
+            .parse::<Ipv4Addr>()
+            .map_err(|error| DataplaneError::new("control_address_invalid", error.to_string()))?;
+        let listen_v6 = abi::LISTEN_V6_STR
+            .parse::<Ipv6Addr>()
+            .map_err(|error| DataplaneError::new("control_address_invalid", error.to_string()))?;
+        self.kmod
+            .as_ref()
+            .ok_or_else(|| {
+                DataplaneError::new(
+                    "lkm_not_loaded",
+                    "LOCAL_OUT module is not holding /dev/fluxrs",
+                )
+            })?
+            .set_listeners(listen_v4, port_v4, listen_v6, port_v6)
+            .map_err(|error| DataplaneError::io("lkm_set_listeners", error))?;
+        self.last_control = Some(control);
         self.status.active = false;
         Ok(())
     }
@@ -1145,6 +1178,7 @@ impl Manager {
         })
     }
 
+    #[allow(dead_code)]
     fn ensure_topology(&mut self) -> Result<(), DataplaneError> {
         let snapshot = self
             .route
@@ -1164,6 +1198,7 @@ impl Manager {
         self.create_topology()
     }
 
+    #[allow(dead_code)]
     fn create_topology(&mut self) -> Result<(), DataplaneError> {
         let before = self
             .route
@@ -1315,6 +1350,7 @@ impl Manager {
         let _ = self.route.delete_link(host_ifindex);
     }
 
+    #[allow(dead_code)]
     fn admit_interfaces(&mut self) -> Result<Vec<IfaceStatus>, DataplaneError> {
         let snapshot = self
             .route
@@ -1949,6 +1985,38 @@ fn hex_tag(tag: [u8; 8]) -> String {
     tag.into_iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn default_kmod_dir() -> PathBuf {
+    match std::env::var_os("FLUX_KMOD_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => Path::new("/data/adb/modules/Flux-rs").join(crate::kmod::DIR_NAME),
+    }
+}
+
+fn kmod_load_error(error: crate::kmod::LoadError) -> DataplaneError {
+    match error {
+        crate::kmod::LoadError::UnknownRelease(release) => DataplaneError::new(
+            format!("lkm_unknown_release:{release}"),
+            "uname -r did not map to a GKI line Flux ships",
+        ),
+        crate::kmod::LoadError::MissingModule { line, dir } => DataplaneError::new(
+            "lkm_missing_module",
+            format!("no {}*.ko in {}", line.module_stem(), dir.display()),
+        ),
+        crate::kmod::LoadError::Finit { path, error } => {
+            let errno = error
+                .raw_os_error()
+                .map(errno_name)
+                .unwrap_or_else(|| format!("{:?}", error.kind()));
+            DataplaneError::new(
+                format!("lkm_finit:{errno}"),
+                format!("finit_module {}: {error}", path.display()),
+            )
+        }
+        crate::kmod::LoadError::Control(error) => DataplaneError::io("lkm_control", error),
+        crate::kmod::LoadError::Io(error) => DataplaneError::io("lkm_io", error),
+    }
+}
+
 fn write_veth_sysctls() -> Result<(), DataplaneError> {
     for (path, value) in [
         ("/proc/sys/net/ipv6/conf/flxrs0/addr_gen_mode", "1\n"),
@@ -1995,6 +2063,7 @@ fn read_status_sysctls() -> BTreeMap<String, i64> {
     values
 }
 
+#[cfg(test)]
 fn validate_rp_filter(values: &BTreeMap<String, i64>) -> Result<(), DataplaneError> {
     match values.get("all.rp_filter").copied() {
         Some(0) => Ok(()),

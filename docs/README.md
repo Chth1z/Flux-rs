@@ -22,7 +22,8 @@
 | **我是用户，这东西是干什么的** | **`guide/introduction.md`**（不含术语） |
 | **要评审或提出一个设计** | **`philosophy.md`**（英文），先过 PHIL-10 的 checklist |
 | **动手写代码，不知道从哪开始** | **`plan/implementation.md`**，按阶段顺序读 |
-| **设计 1.0.0-rc.3 核心与架构升级** | **`plan/rc3.md`**（批 0–7 已落地并命名工作区 `1.0.0-rc.3`；正式 1.0.0 门见 `plan/implementation.md` §17.0.3） |
+| **设计 1.0.0-rc.4 交付路径** | **`plan/rc4.md`**（批 0：合同意向已锁定；落地前以该文为准，蓝图随各批就地改。正式 1.0.0 门改到 rc.4 之后） |
+| 查阅 1.0.0-rc.3 核心与架构升级 | `plan/rc3.md`（批 0–7 已落地；工作区仍为 `1.0.0-rc.3` 直至 rc.4 命名） |
 | 实现某个模块 | `spec/blueprint.md`，从头读到尾。它是完整合同，不需要再叠任何东西 |
 | 了解技术架构 | `guide/architecture.md` |
 | 怎么装、怎么配、出问题怎么办 | `guide/how-to.md` |
@@ -33,6 +34,7 @@
 | 改用户看得见的东西 | `spec/interaction.md`（§27） |
 | 质疑某条断言的依据 | `history/review-log.md` |
 | 提议「为什么不做 X」 | `history/rejected-and-deferred.md`（大概已经评估过了） |
+| 对照 clone 里各项目的哲学与技术边界 | [`history/clone-philosophy-tech-tradeoffs-2026-09-17.md`](history/clone-philosophy-tech-tradeoffs-2026-09-17.md) |
 | 搞清楚什么该问所有者 | `governance.md` |
 | 写或改这些文档 | `authoring.md`；引用与编号看 `index.md` |
 | **引用某个 §、发一个新号** | **`index.md`** |

@@ -1,8 +1,10 @@
-//! Network-object ownership, interface admission and Phase 6 activation.
+//! Unique dataplane: LOCAL_OUT `fluxrs.ko`, leftover veth cleanup, Phase 6 arm.
 //!
-//! This module coordinates typed rtnetlink operations. It does not construct
-//! raw messages; the platform manager owns the BPF runtime and attachment
-//! lifecycle (`attachment.rs` is the clsact/TCX insert point, §12.5.1).
+//! Capture is the GKI-line module (`kmod/`). This module still speaks typed
+//! rtnetlink so a cold start can delete leftover `flxrs*` / pref-100 objects
+//! from the previous dataplane. It does not construct raw netlink; it does not
+//! create veth or attach physical TC. `attachment.rs` returns Complete once
+//! the module is live.
 
 #![cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 

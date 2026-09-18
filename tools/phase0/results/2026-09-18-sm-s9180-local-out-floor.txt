@@ -1,0 +1,48 @@
+########## 0. context
+probe: tools/phase0/local-out-floor-run.sh + local-out-floor-bench.c
+date: 2026-09-18
+device: SM-S9180
+kernel: 5.15.211-Qkernel-g7a72da9438
+manager: KernelSU 3.3.0 LKM
+pagesize: 4096
+uid: 0 (HASH miss; shell uid 2000 was in the selected set)
+dest: IPv4 via from `ip route get 1.1.1.1` (address redacted), UDP port 9
+count: 50000 sendto/run, 5 runs/arm
+metric: CLOCK_MONOTONIC around SOCK_DGRAM sendto (local stack, not radio RTT)
+
+########## 1. static path (authoritative per blueprint 14.3)
+TC E1 unselected (bpf/flux.bpf.c cap_core):
+  skb->sk, bpf_sk_fullsock, bpf_get_socket_uid, ctrl() = control_root lookup
+  + leaf lookup, uid_policy HASH miss, TC_ACT_UNSPEC. No parse.
+LOCAL_OUT floor (kmod/fluxrs_hook.c, live=1, empty uid_tab):
+  atomic live, skb->sk, sk_fullsock, __kuid_val(sk->sk_uid), overflowuid gate,
+  one HASH probe miss, NF_ACCEPT.
+LOCAL_OUT miss does not take a control snapshot; liveness is the control fd.
+No new GKI UNDEF vs batch 1 (still nf_*_net_hooks + misc_* + init_net + printk).
+
+########## 2. sendto ns/pkt
+arm off (Disabled; engine stopped). median 24825
+  25779 24699 24429 24825 24869
+arm tc (INVALID: enable did not reach Active; engine not running). median 24150
+  23499 23901 24397 24150 24106
+arm ko (Disabled + fluxrs.ko live=1, uid+hash miss). median 23594
+  23428 24421 23594 23951 23308
+
+Run-to-run scatter on off is about 1.4 us/pkt. ko-off median is -1.2 us/pkt
+(ko numerically cheaper). That is inside scatter. This bench cannot resolve a
+tens-of-nanoseconds hook. It can reject a large regression. None seen.
+Do not advertise a percentage.
+
+########## 3. stop/go
+Not obviously worse than the measured floor. Do not stop rc.4 for performance.
+A clean TC-Active vs LOCAL_OUT-only pair was not obtained: Enable after Disable
+could not rebuild the live generation because on-disk policy is
+flux_config_invalid (nodes.sources entry 3: unsupported vless encryption) and
+engine_config_unfilled. That last_error was already present while generation 1
+was Active; Disable dropped the only working engine process (pid 3315).
+
+########## 4. device after the run
+fluxd restarted; KernelSU 3.3.0 LKM env restored.
+state Inactive, generation 0, engine not running.
+wlan0/rmnet flx_ filters absent; flxrs0/1 absent (apps go Android-native).
+Harness now refuses Disable when last_error is set unless FLUX_FLOOR_FORCE=1.

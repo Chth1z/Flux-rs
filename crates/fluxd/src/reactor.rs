@@ -243,7 +243,8 @@ impl Reactor {
         let subscription_timer = make_timerfd()?;
         let subscription_worker = crate::subscription::Worker::new()?;
         let server = ControlServer::bind(&layout.control_socket())?;
-        let dataplane = crate::dataplane::Manager::open()?;
+        let mut dataplane = crate::dataplane::Manager::open()?;
+        dataplane.set_kmod_dir(layout.module_dir().join(crate::kmod::DIR_NAME));
         let root_manager = root_manager_from_env();
 
         // Cold start: any effective file is a leftover of a previous instance
@@ -1628,7 +1629,7 @@ impl Reactor {
         let Some(child) = self.engine.as_ref() else {
             let error = crate::dataplane::DataplaneError {
                 code: "engine_not_ready".to_string(),
-                detail: "TC became ready without a supervised engine child".to_string(),
+                detail: "LOCAL_OUT became ready without a supervised engine child".to_string(),
             };
             self.fail_phase6_activation("activation commit", error);
             return;
@@ -1643,7 +1644,7 @@ impl Reactor {
                 self.last_error = None;
                 self.last_error_detail = None;
                 self.logger.log(&format!(
-                    "generation {}: policy, 4/4 sockets and TC verified; active=1 committed",
+                    "generation {}: policy, 4/4 sockets and LOCAL_OUT verified; steal armed",
                     child.params.generation
                 ));
             }
@@ -1937,8 +1938,8 @@ impl Reactor {
         }
 
         if !engine_busy && self.engine.is_none() && candidate_user.is_none() {
-            // Cold invalid input performs stale cleanup only and cannot create
-            // a topology or an inactive BPF runtime (§8.7).
+            // Cold invalid input performs leftover cleanup only and cannot
+            // load the LOCAL_OUT module (§8.7).
             self.dataplane.converge(false);
             self.reload_requested = false;
             self.engine_config_changed = false;
@@ -3705,17 +3706,17 @@ impl Reactor {
                 warnings.extend(self.dataplane.status().warnings.iter().cloned());
                 if state != State::Active && self.dataplane.status().attachment_ready {
                     warnings.push(
-                    "traffic is NOT proxied yet: TC is attached but the Phase 6 active control commit is pending"
+                    "traffic is NOT proxied yet: LOCAL_OUT is live but the Phase 6 active commit is pending"
                         .to_string(),
                     );
                 } else if state != State::Active && self.dataplane.status().bpf_ready {
                     warnings.push(
-                    "traffic is NOT proxied yet: the inactive BPF runtime is ready and TC liveness verification is pending"
+                    "traffic is NOT proxied yet: the LOCAL_OUT module is loaded and waiting for the engine"
                         .to_string(),
                     );
                 } else if state != State::Active && self.dataplane.status().topology_ready {
                     warnings.push(
-                    "traffic is NOT proxied yet: the network seam is ready but no BPF runtime is loaded"
+                    "traffic is NOT proxied yet: the LOCAL_OUT module is present but steal is idle"
                         .to_string(),
                     );
                 }
@@ -3865,7 +3866,7 @@ fn counter_hints(state: State, counters: &Counters) -> Vec<String> {
     }
     if admitted > 0 && counters.in_drop_no_listener > 0 {
         hints.push(
-            "packets reached the veth but no listener was found; engine may be restarting"
+            "packets reached LOCAL_OUT but no listener was found; engine may be restarting"
                 .to_string(),
         );
     }
@@ -4167,7 +4168,7 @@ mod tests {
             .any(|hint| hint.starts_with("assign is failing")));
         assert!(hints
             .iter()
-            .any(|hint| hint.starts_with("packets reached the veth")));
+            .any(|hint| hint.starts_with("packets reached LOCAL_OUT")));
         assert!(hints
             .iter()
             .any(|hint| hint.starts_with("selected-app IP fragments")));

@@ -27,6 +27,8 @@
 
 mod bpf;
 mod dataplane;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod kmod;
 mod packages;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

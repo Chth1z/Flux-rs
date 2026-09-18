@@ -27,6 +27,7 @@ is wrong?**
 |---|---|
 | Proposing or reviewing a design | `docs/philosophy.md` — run its review checklist |
 | Implementing anything | `docs/spec/blueprint.md` for the part you touch |
+| RC4 delivery path (until it lands in spec) | `docs/plan/rc4.md` |
 | Citing a section, allocating a number | `docs/index.md` |
 | Changing user-visible behaviour | `docs/spec/interaction.md` (§27) |
 | Deciding what needs the owner's approval | `docs/governance.md` GOV-1 |

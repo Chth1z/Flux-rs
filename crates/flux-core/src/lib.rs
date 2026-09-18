@@ -3,7 +3,7 @@
 //! This crate holds everything that needs no syscall: configuration parsing,
 //! app selector resolution, CIDR canonicalisation, the PolicyEpoch model,
 //! dump completeness, the data-plane ABI mirror, parse bound arithmetic, the control-protocol wire types, the §26
-//! lifecycle Planner (`plan` / `step`), and version arithmetic. It therefore compiles and tests
+//! lifecycle Planner (`plan` / `step`), GKI-line matching, kmod ioctl encoding, and version arithmetic. It therefore compiles and tests
 //! on any host, including Windows.
 //!
 //! Boundaries that must not erode (blueprint §5):
@@ -23,6 +23,8 @@ pub mod cidr;
 pub mod config;
 pub mod control_wire;
 pub mod engine_config;
+pub mod gki_line;
+pub mod kmod_uapi;
 pub mod migration;
 pub mod parse_bounds;
 pub mod policy_epoch;

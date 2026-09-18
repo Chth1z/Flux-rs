@@ -19,11 +19,19 @@ Every possible failure point specifies **how it is detected, what action is take
 | netns is not the initial netns | Compare the inodes of `/proc/self/ns/net` and `/proc/1/ns/net` | `Inactive` | `"netns_mismatch"` |
 | A symlink or a non-directory sits where the state root, `run/` or `config/` must be | `symlink_metadata` on each of the three, every start and every convergence | `Inactive`; **MUST NOT replace, unlink or follow it** — the object is not Flux's (PHIL-5) | `"runtime_dir_type:<path> expected directory"` |
 | The state root's mode or owner has drifted from `root:root 0700` | the same inspection | **Not a failure.** The three directories are Flux's own (§11.1): restore `0700` and the owner, log one line per repair, continue. An earlier revision refused to run here, on the theory that the user may have loosened the mode deliberately; but `/data/adb` is itself root-only, so the mode protected nothing, and the boot script was tightening it anyway — the refusal contradicted the script and belonged in neither (PHIL-7) | `fluxd.log`: `state root repaired: <path>: mode 0755 restored to 0700` |
-| `all.rp_filter != 0` | Read `/proc/sys/...` | `Inactive` (§8.4; **do not write a global sysctl**) | `"rp_filter_conflict:all=1"` + manual remediation instructions |
-| A veth with the same name exists but its alias does not match | `RTM_GETLINK` + `IFLA_IFALIAS` | `Inactive`; **MUST NOT delete another owner's object** | `"veth_conflict:flxrs0 alias mismatch"` |
-| MTU 65535 is rejected | ACK from `RTM_NEWLINK` | `Inactive`; **do not fall back by guessing a smaller value** | `"veth_mtu_rejected"` |
-| RPDB priority 100 is occupied | `RTM_GETRULE` dump | `Inactive`; **do not substitute a dynamic value** (cleanup MUST remain provable) | `"rule_conflict:priority 100 occupied"` |
-| table 20260 contains an unknown route | `RTM_GETROUTE` dump where `rtm_protocol != 202` | `Inactive` | `"route_table_conflict:20260"` |
+| `uname -r` has no GKI line Flux ships | `gki_line::from_uname_release` | `Inactive`; load nothing | `"lkm_unknown_release:<uname -r>"` |
+| No `fluxrs-androidN-X.Y*.ko` in the kmod directory | directory list | `Inactive` | `"lkm_missing_module"` |
+| `finit_module` fails (not `EEXIST`) | errno | `Inactive`; **MUST NOT** create veth or attach TC | `"lkm_finit:<errno>"` |
+| `/dev/fluxrs` will not open | errno (`EACCES` / `EBUSY` / …) | `Inactive`; drop any partial load | `"lkm_control"` |
+| Reading or listing the `.ko` fails before the syscall | errno | `Inactive` | `"lkm_io"` |
+| `nf_tproxy_*` unresolved (`steal_ready=0`) | `GET_STATUS` | drop the fd; `Inactive` | `"lkm_tproxy_symbol"` |
+| `/dev/fluxrs` is not held when policy or listeners must be published | `kmod` fd absent | keep `active=0`; do not steal | `"lkm_not_loaded"` |
+| Selected UID count exceeds the LOCAL_OUT ioctl table (64) | count | Reject the hot update; retain the current policy | `"policy_capacity:kmod_uids"` |
+| `all.rp_filter != 0` | Read `/proc/sys/...` | **Superseded (C13).** LOCAL_OUT does not consult `rp_filter`. Startup MUST NOT fail closed on this value. The token remains so old status lines parse. | `"rp_filter_conflict:all=1"` (historical) |
+| A veth with the same name exists but its alias does not match | `RTM_GETLINK` + `IFLA_IFALIAS` | **Superseded as a startup gate (C13).** Unique dataplane does not create `flxrs*`. Leftover owned pairs are deleted in §8.7 step 2; a name match without the predicate is still a conflict if cleanup sees it. | `"veth_conflict:flxrs0 alias mismatch"` |
+| MTU 65535 is rejected | ACK from `RTM_NEWLINK` | **Superseded as a startup gate (C13).** Unique dataplane does not create veth. | `"veth_mtu_rejected"` |
+| RPDB priority 100 is occupied | `RTM_GETRULE` dump | **Superseded as a startup gate (C13).** Unique dataplane does not install pref 100. Leftover owned rules are deleted in §8.7 step 2. | `"rule_conflict:priority 100 occupied"` |
+| table 20260 contains an unknown route | `RTM_GETROUTE` dump where `rtm_protocol != 202` | **Superseded as a startup gate (C13).** Unique dataplane does not install table 20260. | `"route_table_conflict:20260"` |
 | BTF load fails | errno from `BPF_BTF_LOAD` | `Inactive` | `"btf_load:EINVAL"` |
 | SK_STORAGE map creation fails | errno from `BPF_MAP_CREATE` | `Inactive` | `"map_create:tcp_decision:EINVAL"` |
 | Program verifier rejects a program | errno from `BPF_PROG_LOAD` | `Inactive`; **write the first N lines of the verifier log to both the log and status** (§12.7 item 11) | `"prog_load:flx_cap_l2:EACCES"` + log summary |

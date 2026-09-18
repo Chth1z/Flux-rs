@@ -11,6 +11,8 @@
 mod bpf;
 #[path = "../src/dataplane.rs"]
 mod dataplane;
+#[path = "../src/kmod.rs"]
+mod kmod;
 #[path = "../src/netlink/mod.rs"]
 mod netlink;
 
@@ -53,46 +55,8 @@ fn main() {
         process::exit(77);
     }
 
-    let global_before = global_sysctls();
-    run_isolated_child();
-
-    let _cleanup = HostCleanup;
-    let mut initial = dataplane::Manager::open().expect("open initial manager");
-    initial
-        .cleanup_for_test()
-        .expect("clean exact-owned pre-test leftovers");
-    drop(initial);
-    assert_host_clean();
-
-    // The child leaves TC programs referenced by the qdiscs, just like a
-    // daemon crash. SIGKILL is raised only after every RAWIP assertion passed.
-    // SAFETY: the test process is single-threaded at this point.
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
-    if pid == 0 {
-        run_host_rawip();
-        // SAFETY: raise targets this process with a valid signal.
-        unsafe { libc::raise(libc::SIGKILL) };
-        unreachable!();
-    }
-    assert_killed_child(pid);
-    assert_host_has_flux_filters();
-
-    let mut recovered = dataplane::Manager::open().expect("open recovery manager");
-    recovered.converge_with_bpf(true, BPF_OBJECT);
-    assert!(
-        recovered.status().error.is_none(),
-        "Phase 5 crash recovery failed: {:?}",
-        recovered.status().error
-    );
-    recovered
-        .cleanup_for_test()
-        .expect("remove recovered Phase 5 objects");
-    assert_host_clean();
-    assert_eq!(global_sysctls(), global_before, "global sysctls changed");
-
     println!(
-        "phase5 device test: PASS (Q5.1 L2 loop, Q5.2 RAWIP loop, Q5.6 isolated matrix, Q5.7 continuation, crash cleanup)"
+        "phase5 device test: skipped (unique LOCAL_OUT; Q5 L2/RAWIP/TC retired; crash recovery is phase3)"
     );
 }
 

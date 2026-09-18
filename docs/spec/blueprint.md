@@ -109,7 +109,11 @@ does not (`../governance.md` GOV-6.2).
    immutable decision on the first `SYN && !ACK` — and IPv4/IPv6 UDP datagrams
    sent by that UID.
 3. Apply the fixed safety bypass, the device's own addresses, and the user's
-   CIDR bypass inside eBPF. Resolve no domain names.
+   CIDR bypass. Resolve no domain names. The LOCAL_OUT hook MUST `NF_ACCEPT`
+   the fixed prefixes and the ABI listener hosts (hardcoded, lockstepped with
+   `FIXED_BYPASS_*`). User CIDR and self-addr are recorded in userspace until
+   an ioctl LPM exists; the hook MUST NOT be described as already consulting
+   them.
 4. **Per-app DNS, precisely.** A selected app's plaintext DNS — including the
    part the system resolver sends on its behalf — enters the engine with the
    rest of its traffic, and an unselected app's DNS is untouched. Mechanism and
@@ -2292,58 +2296,61 @@ control snapshot that already exists stays at `active=0`:
    and the runtime directory permissions. An unsupported page size means
    Inactive and Direct immediately, with no engine started and no object
    created.
-2. **Clean up.** Enumerate by the ownership predicate and delete every residual
-   object of our own — TC filters, RPDB rules, route table entries, the veth.
-   An object matching by name but not by predicate is a conflict: Inactive, and
-   report it.
-3. Check `all.rp_filter`. Create the veth, set MTU and sysctls, bring it up. **No
-   MAC is read**, because since D17 the control struct has no MAC field.
-4. Create the route table 20260 entries and the two RPDB rules.
-5. Load the BTF, the maps in `MAP_NAMES` plus the spare control leaf, and the 4 programs, `flx_verify` (§8.5.4) among
-   them. Register the ringbuf with epoll. Publish the initial frozen leaf with
-   `active=0`.
-6. Parse `packages.list` and the configuration; fill `uid_policy`, the two
-   bypass LPM tries (fixed prefixes tagged `RESERVED`, user prefixes tagged
-   `POLICY`, §6.1.1) and the two `self_addr` HASH maps (D20).
+2. **Clean up leftovers from the previous dataplane.** Enumerate by the
+   ownership predicate and delete residual `flxrs*` veth, pref-100 RPDB rules,
+   table 20260 routes, and `flx_` TC filters if any remain. An object matching
+   by name but not by predicate is a conflict: Inactive, and report it. Missing
+   veth is not a conflict. This step MUST NOT create those objects.
+3. Load the GKI-line `fluxrs.ko` with `finit_module` from the module `kmod/`
+   directory (`fluxrs-androidN-X.Y*.ko`). Open `/dev/fluxrs` exclusively
+   (`live=1`). `EEXIST` from `finit_module` is success if the node opens.
+   Failure is Direct with a `lkm_*` token. MUST NOT create veth, attach
+   physical TC, or write `all.rp_filter`. `all.rp_filter` is not a startup gate.
+4. `GET_STATUS`: `steal_ready` MUST be 1 (`nf_tproxy_*` resolved at runtime).
+   Otherwise drop the fd (`live=0`) and Direct `lkm_tproxy_symbol`.
+5. Hold a userspace inactive generation stub (`active=0`, ifindex 0). Capture
+   no longer loads TC programs or a veth clsact.
+6. Parse `packages.list` and the configuration. Publish selected UIDs with
+   `SET_UIDS` (cap `UID_SLOT_MAX` = 64). Fixed bypass prefixes and the ABI
+   listener hosts are `NF_ACCEPT` in the hook. User CIDR / self-addr are not
+   ioctl-published yet.
 7. Generate the engine configuration (§28.2), run `sing-box check`, start the
    child, and wait for its 4 sockets to pass SOCK_DIAG plus the PID and inode
    cross-check.
-8. Create the `clsact` on `flxrs1` and attach `flx_in` — **before** any egress
-   attach, so the return path is ready first.
-9. Process each supportable interface independently, one failure excluding only
-   that interface: dump the parent and select an available preference (§8.5.3),
-   attach `flx_verify` and run liveness verification (§8.5.4), then on success
-   detach the probe and attach `flx_cap_l2` or `flx_cap_l3` at the same
-   preference.
-10. One final `control_root` pointer swap publishes the complete generation
-    snapshot with `active=1`.
+8. `SET_LISTENERS` for the official TPROXY binds. Until this ioctl, selected
+   UIDs still `NF_ACCEPT` (`listeners_set` is false).
+9. Attachment is Complete once the module is loaded with `steal_ready`. There
+   is no physical-interface TC attach and no `flx_verify` liveness window.
+10. Userspace `active=1`. The hook steals when `live`, UIDs and listeners are
+    set; this commit is the reactor's Phase 6 flag, not a BPF `control_root`
+    swap.
 
-**`active` is 0 throughout steps 1 to 9**, which is what makes step 9's
-verification safe: no traffic changes course while Flux is still establishing
-whether it can be reached.
+**Userspace `active` is 0 throughout steps 1 to 9.** The hook MUST NOT steal
+before step 8. Closing `/dev/fluxrs` (including `SIGKILL`) sets `live=0`
+before release returns.
 
-Normal shutdown reverses only the first half: publish an `active=0` leaf, then
-stop the engine.
+Normal shutdown reverses only the first half: clear UIDs / publish userspace
+`active=0`, then stop the engine. The module stays resident; the next start
+opens the node again.
 
 ## 8.8 What a crash leaves behind
 
-If `fluxd` dies abnormally its TC programs and maps may survive, but its direct
-child is killed by the kernel through `PR_SET_PDEATHSIG=SIGKILL`, so the
-listeners close with the process. The consequences follow from that asymmetry:
+If `fluxd` dies abnormally, `release` on `/dev/fluxrs` runs and sets `live=0`,
+clears UIDs and listeners, and drains the steal queue. The module itself stays
+resident (`/dev/fluxrs` remains). The engine child is killed through
+`PR_SET_PDEATHSIG=SIGKILL`, so the listeners close with the process.
 
-- unadmitted TCP and UDP go Direct because `listener_alive()` misses — **this is
-  the mechanism that delivers the pre-admission guarantee of §2.2.1**, not a
-  separate safety net;
-- packets on a flow that already holds a TCP decision are still redirected, and
-  then dropped when the ingress lookup misses — which is §2.2.2 behaving as
-  specified rather than a residual defect;
-- once the supervisor restarts the reactor (§13.2.2), §8.7's delete-and-rebuild
-  returns everything to a known state.
+- new selected flows are Direct because `live=0` (or `listeners_set` is false)
+  — this is the pre-admission guarantee of §2.2.1;
+- there is no leftover TC redirect of admitted TCP: LOCAL_OUT no longer
+  steals, so in-flight sockets follow the Android path once the TPROXY
+  listener is gone;
+- the supervisor restart (§13.2.2) opens `/dev/fluxrs` again and repeats §8.7.
+  Leftover `flxrs*` from a previous dataplane revision are deleted in step 2.
 
-A manual `disable` or `stop` follows the same order: publish `active=0` first,
-then stop the engine. Objects remain until the daemon restarts or the device
-does. After an uninstall and a reboot, every non-persistent kernel object is gone
-on its own.
+A manual `disable` or `stop` follows the same order: clear UIDs first, then
+stop the engine. The `.ko` remains until `delete_module` or reboot. After an
+uninstall and a reboot, every non-persistent kernel object is gone on its own.
 
 ## 8.9 netlink messages, field by field
 
@@ -3738,7 +3745,7 @@ MUST NOT invent handling for it.
 
 **Four invariants:**
 
-1. **The only way into `Active`** is the single `control_root` pointer swap of §8.7 step 10, and **the first action on leaving `Active`** is always publishing `active=0`. There is no other path in either direction, which is what lets every other rule reason about `active` without enumerating cases.
+1. **The only way into `Active`** is userspace `active=1` of §8.7 step 10 (after `SET_LISTENERS`), and **the first action on leaving `Active`** is always clearing UIDs / publishing `active=0`. There is no other path in either direction, which is what lets every other rule reason about `active` without enumerating cases.
 2. **A policy transaction never changes the top-level state** (§10.5, D5). Only an engine generation switch, **core** topology drift, or the engine exiting leaves `Active`.
 3. **Events arriving during a transaction are neither dropped nor recursed into.** Record them in a pending set and consume them in one convergence after the current transaction ends. Re-entering the reactor from inside a transaction is forbidden.
 4. **Capture-side drift MUST be handled locally and MUST NOT escalate into a

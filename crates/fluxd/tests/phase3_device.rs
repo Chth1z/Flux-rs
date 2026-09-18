@@ -1,27 +1,24 @@
 //! Destructive Phase 3 device test.
 //!
-//! Blast radius: creates only the reserved flxrs0/flxrs1 veth pair, its peer
-//! clsact, RPDB priority 100 and table 20260 routes. It writes only per-peer
-//! sysctls. The cleanup guard removes those exact-owned objects on success,
-//! panic and ordinary process exit. Run only on an authorized rooted device
-//! with `FLUX_PHASE3_DEVICE_TEST=1`.
+//! Blast radius: loads the GKI-line `fluxrs.ko` and holds `/dev/fluxrs`. It
+//! still deletes leftover exact-owned `flxrs*` / pref-100 / table 20260 objects
+//! from the previous dataplane. The cleanup guard unloads the module and
+//! removes those leftovers on success, panic and ordinary process exit. Run
+//! only on an authorized rooted device with `FLUX_PHASE3_DEVICE_TEST=1` and
+//! `fluxrs-android13-5.15.ko` in `FLUX_KMOD_DIR` or `/data/adb/modules/Flux-rs/kmod`.
 
-// This executable imports the product modules by path so the exact production
-// encoder is exercised on Android; unrelated binary-only entry points are
-// intentionally unused in this test crate.
 #![allow(dead_code, unused_imports)]
 
 #[path = "../src/bpf/mod.rs"]
 mod bpf;
 #[path = "../src/dataplane.rs"]
 mod dataplane;
+#[path = "../src/kmod.rs"]
+mod kmod;
 #[path = "../src/netlink/mod.rs"]
 mod netlink;
 
 use std::process;
-
-const HOST_ALIAS: &str = "flux-rs:managed:v1:host";
-const PEER_ALIAS: &str = "flux-rs:managed:v1:peer";
 
 struct Cleanup;
 
@@ -92,95 +89,39 @@ fn main() {
 fn assert_ready(manager: &dataplane::Manager) {
     let status = manager.status();
     assert!(status.error.is_none(), "topology error: {:?}", status.error);
-    assert!(status.topology_ready, "topology did not become ready");
-    assert_eq!(status.sysctl.get("all.rp_filter"), Some(&0));
-    assert_eq!(status.sysctl.get("flxrs1.rp_filter"), Some(&0));
-    assert_eq!(status.sysctl.get("flxrs1.accept_local"), Some(&1));
     assert!(
-        !status.ifaces.is_empty(),
-        "device must expose at least one upstream candidate"
+        status.topology_ready,
+        "LOCAL_OUT module did not become ready"
     );
+    assert!(status.bpf_ready, "LOCAL_OUT steal is not ready");
     assert!(
-        status.ifaces.iter().any(|iface| iface.status == "admitted"),
-        "no physical upstream was admitted: {:?}",
-        status.ifaces
+        std::path::Path::new("/dev/fluxrs").exists(),
+        "/dev/fluxrs missing after converge"
     );
-    for iface in &status.ifaces {
-        match iface.status.as_str() {
-            "admitted" => {
-                assert!(
-                    iface.entry.is_some(),
-                    "admitted interface lacks entry: {iface:?}"
-                );
-                // Phase 3 stops at ownership; the liveness probe that decides
-                // reachability lands in Phase 5. Admission must therefore
-                // publish the chosen preference and leave the verdict absent
-                // rather than guess from dump order (blueprint §8.5.0).
-                assert!(
-                    iface.pref.is_some_and(|pref| pref >= 2),
-                    "admitted interface lacks a dynamic preference: {iface:?}"
-                );
-                assert_eq!(iface.reachable, None, "{iface:?}");
-            }
-            "excluded" => {
-                assert!(
-                    iface.reason.is_some(),
-                    "excluded interface lacks reason: {iface:?}"
-                );
-            }
-            other => panic!("unknown interface status {other}: {iface:?}"),
-        }
-    }
 }
 
 fn assert_complete() {
     let mut route = netlink::RouteNetlink::open().expect("open validation socket");
     let snapshot = route.snapshot().expect("dump validation snapshot");
-    let host = snapshot
-        .links
-        .iter()
-        .find(|link| link.name == "flxrs0")
-        .expect("flxrs0 exists");
-    let peer = snapshot
-        .links
-        .iter()
-        .find(|link| link.name == "flxrs1")
-        .expect("flxrs1 exists");
-    assert_eq!(host.alias.as_deref(), Some(HOST_ALIAS));
-    assert_eq!(peer.alias.as_deref(), Some(PEER_ALIAS));
-    assert_eq!(host.peer_ifindex, Some(peer.ifindex));
-    assert_eq!(peer.peer_ifindex, Some(host.ifindex));
-    assert_eq!(host.mtu, 65_535);
-    assert_eq!(peer.mtu, 65_535);
-    assert!(snapshot.rules.iter().any(|rule| {
-        rule.family as i32 == libc::AF_INET
-            && rule.priority == Some(100)
-            && rule.table == 20_260
-            && rule.iif_name.as_deref() == Some("flxrs1")
-    }));
-    assert!(snapshot.rules.iter().any(|rule| {
-        rule.family as i32 == libc::AF_INET6
-            && rule.priority == Some(100)
-            && rule.table == 20_260
-            && rule.iif_name.as_deref() == Some("flxrs1")
-    }));
-    assert!(snapshot
-        .routes
-        .iter()
-        .any(|route| route.family as i32 == libc::AF_INET
-            && route.table == 20_260
-            && route.protocol == 202));
-    assert!(snapshot
-        .routes
-        .iter()
-        .any(|route| route.family as i32 == libc::AF_INET6
-            && route.table == 20_260
-            && route.protocol == 202));
-    assert!(snapshot.qdiscs.iter().any(|qdisc| {
-        qdisc.ifindex == peer.ifindex
-            && qdisc.kind.as_deref() == Some("clsact")
-            && qdisc.handle == netlink::TC_CLSACT_HANDLE
-    }));
+    assert!(
+        !snapshot
+            .links
+            .iter()
+            .any(|link| link.name == "flxrs0" || link.name == "flxrs1"),
+        "unique dataplane must not create flxrs*"
+    );
+    assert!(
+        !snapshot.rules.iter().any(|rule| rule.priority == Some(100)),
+        "unique dataplane must not install pref 100"
+    );
+    assert!(
+        !snapshot.routes.iter().any(|route| route.table == 20_260),
+        "unique dataplane must not install table 20260"
+    );
+    assert!(
+        std::path::Path::new("/dev/fluxrs").exists(),
+        "control node missing while module should be resident"
+    );
 }
 
 fn assert_clean() {
@@ -192,4 +133,8 @@ fn assert_clean() {
         .any(|link| link.name == "flxrs0" || link.name == "flxrs1"));
     assert!(!snapshot.rules.iter().any(|rule| rule.priority == Some(100)));
     assert!(!snapshot.routes.iter().any(|route| route.table == 20_260));
+    assert!(
+        !std::path::Path::new("/dev/fluxrs").exists(),
+        "control node remains after unload"
+    );
 }

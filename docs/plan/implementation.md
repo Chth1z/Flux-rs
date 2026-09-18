@@ -6,9 +6,9 @@
 
 ---
 
-## 17.0 当前实施状态（2026-09-17）
+## 17.0 当前实施状态（2026-09-18）
 
-**1.0.0-rc.3 核心与架构升级，不扩产品面。** 工作区版本是 `1.0.0-rc.3`。rc.1 的软件候选已并入 `main`（`0df947e`）；rc.2 加深核心已并入；rc.3 批 0–7 已落地并完成本条命名。正式 1.0.0 仍在远端 CI、候选 ZIP 的 §20、Phase 7 与三管理器 smoke 之后签署。不实现 TCX、WebUI、默认控制面、校园网自动旁路或新运行时依赖。
+**1.0.0-rc.4 把「如何把原包交给官方 sing-box」做成唯一数据面。** 工作区版本仍是 `1.0.0-rc.3`，直到 rc.4 命名批。rc.3 批 0–7 已落地。所有者 2026-09-18 锁定 C13：捕获钩子改为 `NF_INET_LOCAL_OUT` 的 `.ko`，`insmod` 失败则 Direct，不回退 veth。目标形状与批次见 `docs/plan/rc4.md`。正式 1.0.0 改到 **rc.4 完成之后** 再走远端 CI、候选 ZIP 的 §20、Phase 7 与三管理器 smoke。不实现 TCX、WebUI、默认控制面、校园网自动旁路；不把 iptables TPROXY 当第二条热路径。
 
 | 范围 | 当前状态 | 主要证据 |
 |---|---|---|
@@ -17,8 +17,9 @@
 | rc.2 主题 1：§26 纯函数 | 已落地 | `crates/flux-core/src/runtime.rs`；`cargo test -p flux-core` |
 | rc.2 主题 2：ingress 快路径 | 已落地；5.15.211 Phase 4 加载通过 | `bpf/flux.bpf.c` `flx_in` I1b；ABI 未 bump；见 §0.6.19 |
 | rc.2 主题 3：attach 模块 | 已落地 | `crates/fluxd/src/dataplane/attachment.rs`；MAP_SPECS 生成 C 占位 |
-| 1.0.0-rc.3 | 已命名工作区版本 | 本条；批 0–7 见 `docs/plan/rc3.md`；设备 Phase 4–6 见 §0.6.27 |
-| 发布剩余 | **尚未具备正式发布结论** | §20 验收见 §17.0.3；签在 rc.3 之后 |
+| 1.0.0-rc.3 | 已命名工作区版本 | 批 0–7 见 `docs/plan/rc3.md`；设备 Phase 4–6 见 §0.6.27 |
+| 1.0.0-rc.4 | 批 0–3 通过；批 4 Manager 已接唯一 LOCAL_OUT 路径 | `docs/plan/rc4.md`；§0.6.32–0.6.43。S6 为本机 dst 投递。默认 `FLUXRS_STAGE=6` `FLUXRS_NOCFI=1`。`dataplane::Manager` 加载 `.ko`，不再建 veth / 物理口 TC |
+| 发布剩余 | **尚未具备正式发布结论** | §20 验收见 §17.0.3；签在 rc.4 之后 |
 | rc.3 主题 | 批 0–7 已落地（合同、TrustedSnapshot、开关三态、WatchSet、ProbeReady、PolicyEpoch 双 bank、Planner Commands、EngineSpec cwd、CLI 退出码、订阅批次预算、typed map、l3_end 解析、fragment 计数名、freeze 清单、诊断 canary）；批 8 可选、未做 | `docs/plan/rc3.md` |
 
 ### 17.0.1 设计哲学返工清单
@@ -31,7 +32,7 @@ rc.1 的产品缺口已处理。本轮把 §26 收成纯函数、reactor 降为 
 
 ### 17.0.3 1.0.0 候选审核与发布验收
 
-**签署放在 rc.3 之后。** 取舍标准不变：优先消除重复真相和无效状态。远端 CI、候选 ZIP 真机 §20、三管理器 smoke 仍是发布门，不是 rc.3 的设计范围。WSL 本地通过不等于远端 CI；旧设备记录不等于这个候选已通过。
+**签署放在 rc.4 之后。** 取舍标准不变：优先消除重复真相和无效状态。远端 CI、候选 ZIP 真机 §20、三管理器 smoke 仍是发布门，不是 rc.4 各批的设计范围。WSL 本地通过不等于远端 CI；旧设备记录不等于这个候选已通过。rc.3 的控制面加深保留，不在 rc.4 拆掉重做。
 
 | §20 条目 | 当前结论 | 发布前剩余动作 |
 |---|---|---|
